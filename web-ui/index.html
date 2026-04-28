@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Amberry Voice - Stage 1 UI</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="panel hero">
+        <div>
+          <p class="eyebrow">Amberry Voice</p>
+          <h1>Локальный контроль микрофона и стриминга</h1>
+          <p class="lede">
+            Минимальный Web UI для Этапа 1: выбор микрофона, старт/стоп
+            стриминга, realtime-транскрипт, ошибки и базовые метрики.
+          </p>
+        </div>
+        <div class="status-stack">
+          <div class="status-card">
+            <span class="status-label">Сессия</span>
+            <strong id="sessionState">idle</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">WebSocket</span>
+            <strong id="socketState">disconnected</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Активный лот</span>
+            <strong id="activeLot">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel controls-grid">
+        <label class="field">
+          <span>Микрофон</span>
+          <select id="microphoneSelect"></select>
+        </label>
+
+        <label class="field">
+          <span>WebSocket endpoint</span>
+          <input
+            id="wsUrlInput"
+            type="text"
+            value="ws://localhost:8080/ws/stt"
+            spellcheck="false"
+          />
+        </label>
+
+        <div class="button-row">
+          <button id="refreshDevicesButton" type="button">Обновить устройства</button>
+          <button id="startButton" type="button">Старт</button>
+          <button id="stopButton" type="button" disabled>Стоп</button>
+        </div>
+      </section>
+
+      <section class="data-grid">
+        <section class="panel transcript-panel">
+          <div class="panel-header">
+            <h2>Realtime-транскрипт</h2>
+            <span id="transcriptMeta">Нет данных</span>
+          </div>
+          <div id="transcriptOutput" class="transcript-output">
+            Ожидание запуска стриминга...
+          </div>
+        </section>
+
+        <section class="panel metrics-panel">
+          <div class="panel-header">
+            <h2>Метрики</h2>
+          </div>
+          <dl class="metrics-list">
+            <div>
+              <dt>Chunks sent</dt>
+              <dd id="chunksSent">0</dd>
+            </div>
+            <div>
+              <dt>Bytes sent</dt>
+              <dd id="bytesSent">0</dd>
+            </div>
+            <div>
+              <dt>Last partial latency</dt>
+              <dd id="partialLatency">-</dd>
+            </div>
+            <div>
+              <dt>Last final latency</dt>
+              <dd id="finalLatency">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="panel-header">
+            <h2>События и ошибки</h2>
+          </div>
+          <ul id="eventLog" class="event-log"></ul>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
