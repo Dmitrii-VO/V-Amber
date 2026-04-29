@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Amberry Voice - Stage 1 UI</title>
+    <title>Amberry Voice - Stage 2 UI</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -13,8 +13,8 @@
           <p class="eyebrow">Amberry Voice</p>
           <h1>Локальный контроль микрофона и стриминга</h1>
           <p class="lede">
-            Минимальный Web UI для Этапа 1: выбор микрофона, старт/стоп
-            стриминга, realtime-транскрипт, ошибки и базовые метрики.
+            Минимальный Web UI для Этапа 2: выбор микрофона, старт/стоп
+            стриминга, realtime-транскрипт, извлечение артикулов, ошибки и базовые метрики.
           </p>
         </div>
         <div class="status-stack">
@@ -89,6 +89,30 @@
               <dd id="finalLatency">-</dd>
             </div>
           </dl>
+        </section>
+
+        <section class="panel detection-panel">
+          <div class="panel-header">
+            <h2>Извлечение артикула</h2>
+            <span id="detectionStatus">Нет данных</span>
+          </div>
+          <dl class="metrics-list detection-list">
+            <div>
+              <dt>Confirmed code</dt>
+              <dd id="detectedCode">-</dd>
+            </div>
+            <div>
+              <dt>Source</dt>
+              <dd id="detectionSource">-</dd>
+            </div>
+            <div>
+              <dt>Candidates</dt>
+              <dd id="detectionCandidates">-</dd>
+            </div>
+          </dl>
+          <div id="detectionTranscript" class="transcript-output detection-transcript">
+            Ожидание извлечения...
+          </div>
         </section>
 
         <section class="panel log-panel">

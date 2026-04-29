@@ -7,6 +7,11 @@ const elements = {
   sessionState: document.querySelector("#sessionState"),
   socketState: document.querySelector("#socketState"),
   activeLot: document.querySelector("#activeLot"),
+  detectionStatus: document.querySelector("#detectionStatus"),
+  detectedCode: document.querySelector("#detectedCode"),
+  detectionSource: document.querySelector("#detectionSource"),
+  detectionCandidates: document.querySelector("#detectionCandidates"),
+  detectionTranscript: document.querySelector("#detectionTranscript"),
   transcriptMeta: document.querySelector("#transcriptMeta"),
   transcriptOutput: document.querySelector("#transcriptOutput"),
   chunksSent: document.querySelector("#chunksSent"),
@@ -30,6 +35,7 @@ const state = {
   chunksSent: 0,
   bytesSent: 0,
   finalTranscript: "",
+  lastDetection: null,
 };
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -100,6 +106,25 @@ function setLifecycle(nextLifecycle) {
 function updateMetrics() {
   elements.chunksSent.textContent = String(state.chunksSent);
   elements.bytesSent.textContent = String(state.bytesSent);
+}
+
+function updateDetection(detection) {
+  state.lastDetection = detection;
+
+  if (!detection) {
+    elements.detectionStatus.textContent = "Нет данных";
+    elements.detectedCode.textContent = "-";
+    elements.detectionSource.textContent = "-";
+    elements.detectionCandidates.textContent = "-";
+    elements.detectionTranscript.textContent = "Ожидание извлечения...";
+    return;
+  }
+
+  elements.detectionStatus.textContent = detection.status || "unknown";
+  elements.detectedCode.textContent = detection.chosen?.code || "-";
+  elements.detectionSource.textContent = detection.chosen?.source || "-";
+  elements.detectionCandidates.textContent = detection.candidates?.map((item) => item.code).join(", ") || "-";
+  elements.detectionTranscript.textContent = detection.transcript || "-";
 }
 
 function updateTranscript(partialText) {
@@ -239,7 +264,8 @@ function handleServerMessage(payload) {
   }
 
   if (payload.type === "state") {
-    elements.activeLot.textContent = payload.activeLot || "-";
+    elements.activeLot.textContent = payload.activeLot?.code || "-";
+    updateDetection(payload.lastDetection || null);
     return;
   }
 
@@ -274,6 +300,7 @@ async function startStreaming() {
     state.finalTranscript = "";
     updateMetrics();
     updateTranscript("");
+    updateDetection(null);
 
     const websocket = await connectSocket();
 

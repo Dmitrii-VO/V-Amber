@@ -1,4 +1,21 @@
 import "dotenv/config";
+import { resolveVkConfig } from "./vk.js";
+
+function parseCsvEnv(value, fallback = []) {
+  if (!value?.trim()) {
+    return fallback;
+  }
+
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseIntEnv(value, fallback) {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
 
 function getRequiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -12,6 +29,38 @@ function getRequiredEnv(name) {
 
 export const config = {
   port: Number(process.env.PORT || 8080),
+  vk: resolveVkConfig(process.env),
+  moysklad: {
+    baseUrl: process.env.MOYSKLAD_BASE_URL?.trim() || "https://api.moysklad.ru/api/remap/1.2/",
+    token: process.env.MOYSKLAD_TOKEN?.trim() || "",
+    login: process.env.MOYSKLAD_LOGIN?.trim() || "",
+    password: process.env.MOYSKLAD_PASSWORD?.trim() || "",
+    organizationId: process.env.MOYSKLAD_ORGANIZATION_ID?.trim() || "",
+    storeId: process.env.MOYSKLAD_STORE_ID?.trim() || "",
+    customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
+    salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
+  },
+  articleExtraction: {
+    triggers: parseCsvEnv(process.env.VOICE_ARTICLE_TRIGGERS, ["код товара"]),
+    minLength: parseIntEnv(process.env.VOICE_ARTICLE_MIN_LENGTH, 1),
+    maxLength: parseIntEnv(process.env.VOICE_ARTICLE_MAX_LENGTH, 10),
+    finalBufferSize: parseIntEnv(process.env.VOICE_ARTICLE_FINAL_BUFFER_SIZE, 3),
+    triggerWindowMs: parseIntEnv(process.env.VOICE_ARTICLE_TRIGGER_WINDOW_MS, 8000),
+    notificationDedupMs: parseIntEnv(process.env.VOICE_ARTICLE_NOTIFICATION_DEDUP_MS, 15000),
+    yandexgpt: {
+      apiKey: process.env.YANDEX_GPT_API_KEY?.trim() || process.env.YANDEX_SPEECHKIT_API_KEY?.trim() || "",
+      folderId: process.env.YANDEX_GPT_FOLDER_ID?.trim() || process.env.YANDEX_SPEECHKIT_FOLDER_ID?.trim() || "",
+      model: process.env.YANDEX_GPT_MODEL?.trim() || "yandexgpt-5-lite/latest",
+      endpoint: process.env.YANDEX_GPT_ENDPOINT?.trim() || "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+    },
+  },
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
+    chatIds: parseCsvEnv(process.env.TELEGRAM_CHAT_ID, []),
+    primaryChatId: parseCsvEnv(process.env.TELEGRAM_CHAT_ID, [])[0] || "",
+    pollingTimeoutSec: parseIntEnv(process.env.TELEGRAM_POLLING_TIMEOUT_SEC, 30),
+    confirmationTtlMs: parseIntEnv(process.env.TELEGRAM_CONFIRMATION_TTL_MS, 300000),
+  },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),
     folderId: process.env.YANDEX_SPEECHKIT_FOLDER_ID?.trim() || "",

@@ -160,6 +160,7 @@ button[disabled] {
 
 .transcript-panel,
 .metrics-panel,
+.detection-panel,
 .log-panel {
   padding: 20px;
 }
@@ -193,6 +194,14 @@ button[disabled] {
   display: grid;
   gap: 12px;
   margin: 0;
+}
+
+.detection-list {
+  margin-bottom: 14px;
+}
+
+.detection-transcript {
+  min-height: 96px;
 }
 
 .metrics-list div {
