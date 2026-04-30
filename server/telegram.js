@@ -1,7 +1,8 @@
+import crypto from "node:crypto";
 import { logger } from "./logger.js";
 
 function createToken() {
-  return Math.random().toString(36).slice(2, 10);
+  return crypto.randomBytes(16).toString("hex");
 }
 
 function delay(ms) {

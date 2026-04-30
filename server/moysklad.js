@@ -160,7 +160,7 @@ export function createMoySkladClient(config) {
 
     if (!defaults.storeId) {
       const stores = await requestJson("entity/store", { limit: 10 });
-      const preferredStore = stores.rows?.find((item) => item.name === "Аукцион") || stores.rows?.[0];
+      const preferredStore = stores.rows?.find((item) => item.name === config.preferredStoreName) || stores.rows?.[0];
       defaults.storeId = preferredStore?.id || "";
     }
 
@@ -199,22 +199,39 @@ export function createMoySkladClient(config) {
       return null;
     }
 
-    const response = await fetch(imageHref, {
-      headers: {
-        Authorization: authHeader,
-      },
-    });
+    const timeoutMs = Math.max(1000, Number(config?.imageDownloadTimeoutMs || 10000));
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
 
-    if (!response.ok) {
-      throw new Error(`MoySklad image HTTP ${response.status}`);
+    try {
+      const response = await fetch(imageHref, {
+        headers: {
+          Authorization: authHeader,
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`MoySklad image HTTP ${response.status}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+
+      return {
+        buffer: Buffer.from(arrayBuffer),
+        contentType: response.headers.get("content-type") || "application/octet-stream",
+      };
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(`MoySklad image download timed out after ${timeoutMs}ms`);
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const arrayBuffer = await response.arrayBuffer();
-
-    return {
-      buffer: Buffer.from(arrayBuffer),
-      contentType: response.headers.get("content-type") || "application/octet-stream",
-    };
   }
 
   return {

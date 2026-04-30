@@ -6,6 +6,16 @@ function delay(ms) {
   });
 }
 
+function normalizeVkOwnerId(value) {
+  const normalized = String(value || "").trim();
+  return /^-?\d+$/.test(normalized) && normalized !== "0" ? normalized : "";
+}
+
+function normalizeVkVideoId(value) {
+  const normalized = String(value || "").trim();
+  return /^\d+$/.test(normalized) && normalized !== "0" ? normalized : "";
+}
+
 function parseLiveVideoReference(value) {
   if (!value) {
     return { ownerId: "", videoId: "", source: "" };
@@ -14,9 +24,11 @@ function parseLiveVideoReference(value) {
   const input = String(value).trim();
   const directMatch = /video(-?\d+)_(\d+)/.exec(input);
   if (directMatch) {
+    const ownerId = normalizeVkOwnerId(directMatch[1]);
+    const videoId = normalizeVkVideoId(directMatch[2]);
     return {
-      ownerId: directMatch[1],
-      videoId: directMatch[2],
+      ownerId,
+      videoId,
       source: input,
     };
   }
@@ -72,7 +84,9 @@ async function parseVkResponse(response) {
   }
 
   if (payload?.error) {
-    throw new Error(`VK API ${payload.error.error_code}: ${payload.error.error_msg}`);
+    const error = new Error(`VK API ${payload.error.error_code}: ${payload.error.error_msg}`);
+    error.vkErrorCode = Number(payload.error.error_code);
+    throw error;
   }
 
   return payload.response;
@@ -88,8 +102,8 @@ export function createVkPublisher(config) {
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
-  const liveOwnerId = config?.liveOwnerId || liveVideo.ownerId;
-  const liveVideoId = config?.liveVideoId || liveVideo.videoId;
+  const liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
+  const liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
   const isEnabled = Boolean(userToken && liveOwnerId && liveVideoId);
 
   async function callVkApi(method, params) {
@@ -285,6 +299,41 @@ export function createVkPublisher(config) {
           kind: "lot_closed",
           code: activeLot.code,
           lotSessionId: activeLot.lotSessionId,
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+        },
+      );
+    },
+    async publishReservationReply({ commentId, message, lotSessionId, code, viewerId, status }) {
+      if (!isEnabled || !commentId || !message) {
+        logger.info("vk", "publish_skipped_not_configured", {
+          kind: "reservation_reply",
+          commentId: commentId || null,
+          lotSessionId: lotSessionId || null,
+          code: code || null,
+          viewerId: viewerId || null,
+          status: status || null,
+          hasUserToken: Boolean(userToken),
+          ownerId: liveOwnerId || null,
+          videoId: liveVideoId || null,
+        });
+        return { ok: false, skipped: true };
+      }
+
+      return sendWithRetry(
+        () => callVkApi("video.createComment", {
+          owner_id: liveOwnerId,
+          video_id: liveVideoId,
+          message,
+          reply_to_comment: commentId,
+        }),
+        {
+          kind: "reservation_reply",
+          commentId,
+          lotSessionId,
+          code,
+          viewerId,
+          status,
           ownerId: liveOwnerId,
           videoId: liveVideoId,
         },

@@ -154,35 +154,38 @@ function parseSubThousand(words) {
   let consumed = 0;
   let value = 0;
   let matched = false;
+  let currentWord = consumed < words.length ? words[consumed] : undefined;
 
-  if (HUNDREDS_WORDS.has(words[consumed])) {
-    value += HUNDREDS_WORDS.get(words[consumed]);
+  if (HUNDREDS_WORDS.has(currentWord)) {
+    value += HUNDREDS_WORDS.get(currentWord);
     consumed += 1;
     matched = true;
+    currentWord = consumed < words.length ? words[consumed] : undefined;
   }
 
-  if (TEEN_WORDS.has(words[consumed])) {
-    value += TEEN_WORDS.get(words[consumed]);
+  if (TEEN_WORDS.has(currentWord)) {
+    value += TEEN_WORDS.get(currentWord);
     consumed += 1;
     matched = true;
     return { value, consumed };
   }
 
-  if (TENS_WORDS.has(words[consumed])) {
-    value += TENS_WORDS.get(words[consumed]);
+  if (TENS_WORDS.has(currentWord)) {
+    value += TENS_WORDS.get(currentWord);
     consumed += 1;
     matched = true;
+    currentWord = consumed < words.length ? words[consumed] : undefined;
 
-    if (UNIT_WORDS.has(words[consumed]) && UNIT_WORDS.get(words[consumed]) > 0) {
-      value += UNIT_WORDS.get(words[consumed]);
+    if (UNIT_WORDS.has(currentWord) && UNIT_WORDS.get(currentWord) > 0) {
+      value += UNIT_WORDS.get(currentWord);
       consumed += 1;
     }
 
     return { value, consumed };
   }
 
-  if (UNIT_WORDS.has(words[consumed])) {
-    value += UNIT_WORDS.get(words[consumed]);
+  if (UNIT_WORDS.has(currentWord)) {
+    value += UNIT_WORDS.get(currentWord);
     consumed += 1;
     matched = true;
     return { value, consumed };
@@ -228,9 +231,26 @@ function buildCandidateMap(candidates) {
 
   for (const candidate of candidates) {
     const existing = unique.get(candidate.code);
-    if (!existing || existing.confidence < candidate.confidence) {
-      unique.set(candidate.code, candidate);
+    if (!existing) {
+      unique.set(candidate.code, {
+        ...candidate,
+        sources: [candidate.source].filter(Boolean),
+      });
+      continue;
     }
+
+    const preferred = existing.confidence < candidate.confidence
+      ? candidate
+      : existing;
+    const sources = [...new Set([
+      ...(existing.sources || [existing.source].filter(Boolean)),
+      ...(candidate.sources || [candidate.source].filter(Boolean)),
+    ])];
+
+    unique.set(candidate.code, {
+      ...preferred,
+      sources,
+    });
   }
 
   return [...unique.values()].sort((left, right) => right.confidence - left.confidence);
@@ -294,6 +314,9 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
     });
 
     cursor += parsed.consumed;
+    if (cursor >= remainingWords.length) {
+      break;
+    }
 
     if (!isNumericWord(remainingWords[cursor])) {
       break;

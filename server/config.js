@@ -37,8 +37,10 @@ export const config = {
     password: process.env.MOYSKLAD_PASSWORD?.trim() || "",
     organizationId: process.env.MOYSKLAD_ORGANIZATION_ID?.trim() || "",
     storeId: process.env.MOYSKLAD_STORE_ID?.trim() || "",
+    preferredStoreName: process.env.MOYSKLAD_PREFERRED_STORE_NAME?.trim() || "Аукцион",
     customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
     salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
+    imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
   },
   articleExtraction: {
     triggers: parseCsvEnv(process.env.VOICE_ARTICLE_TRIGGERS, ["код товара"]),
@@ -71,3 +73,15 @@ export const config = {
     endpoint: "stt.api.cloud.yandex.net:443",
   },
 };
+
+if (config.articleExtraction.minLength > config.articleExtraction.maxLength) {
+  throw new Error(
+    `VOICE_ARTICLE_MIN_LENGTH (${config.articleExtraction.minLength}) must be <= VOICE_ARTICLE_MAX_LENGTH (${config.articleExtraction.maxLength})`,
+  );
+}
+
+if (!config.articleExtraction.yandexgpt.apiKey || !config.articleExtraction.yandexgpt.folderId) {
+  process.emitWarning(
+    "YandexGPT fallback disabled: set YANDEX_GPT_API_KEY and YANDEX_GPT_FOLDER_ID (or SpeechKit equivalents).",
+  );
+}

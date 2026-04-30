@@ -8,11 +8,40 @@ import { createVkPublisher } from "./vk.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
+let nextDetectionId = 1;
 
 function sendJson(socket, payload) {
   if (socket.readyState === 1) {
     socket.send(JSON.stringify(payload));
   }
+}
+
+function getVkPublicationCommentId(publication) {
+  const rawValue = typeof publication === "number"
+    ? publication
+    : publication?.comment_id ?? publication?.commentId ?? null;
+
+  if (typeof rawValue === "number" && Number.isFinite(rawValue) && rawValue > 0) {
+    return rawValue;
+  }
+
+  const parsed = Number.parseInt(String(rawValue || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getVkApiErrorCode(error) {
+  if (typeof error?.vkErrorCode === "number" && Number.isFinite(error.vkErrorCode)) {
+    return error.vkErrorCode;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const match = /VK API\s+(\d+):/i.exec(message);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function attachWsServer(httpServer, config) {
@@ -55,9 +84,11 @@ export function attachWsServer(httpServer, config) {
     let lastAmbiguousNotification = null;
     let nextRunId = 1;
     let activeRunId = null;
+    let activeDetectionActionId = null;
     let commentPollingGeneration = 0;
     let commentPollingActive = false;
     let customerOrdersByViewerId = new Map();
+    let customerOrderSessionVersion = 1;
 
     function emitState() {
       sendJson(websocket, {
@@ -72,10 +103,16 @@ export function attachWsServer(httpServer, config) {
       commentPollingActive = false;
       activeLot = null;
       lastDetection = null;
+      activeDetectionActionId = null;
       triggerActiveUntil = 0;
       triggerSessionFinals = [];
       lastNotification = null;
       lastAmbiguousNotification = null;
+    }
+
+    function resetCustomerOrders() {
+      customerOrdersByViewerId = new Map();
+      customerOrderSessionVersion += 1;
     }
 
     function normalizeReservationText(text) {
@@ -114,8 +151,60 @@ export function attachWsServer(httpServer, config) {
       state.events = state.events.slice(-20);
     }
 
+    function getReservationReplyMessage(event) {
+      if (event.status === "waitlist_pending") {
+        return "Бронь принята. Вы в очереди, подтвердим следующим сообщением.";
+      }
+
+      if (event.status === "reserved") {
+        return "Бронь подтверждена. Заказ создан.";
+      }
+
+      if (event.status === "reserved_appended") {
+        return "Бронь подтверждена. Товар добавлен в ваш заказ.";
+      }
+
+      if (event.status === "order_failed") {
+        return "Не удалось обработать бронь. Напишите \"бронь\" ещё раз.";
+      }
+
+      return "";
+    }
+
+    function notifyReservationStatus(lot, event) {
+      const message = getReservationReplyMessage(event);
+      if (!message) {
+        return;
+      }
+
+      void vk.publishReservationReply({
+        commentId: event.commentId,
+        message,
+        lotSessionId: lot?.lotSessionId || null,
+        code: lot?.code || null,
+        viewerId: event.viewerId,
+        status: event.status,
+      }).catch((error) => {
+        logger.warn("vk", "reservation_reply_failed", {
+          connectionId,
+          lotSessionId: lot?.lotSessionId || null,
+          code: lot?.code || null,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          status: event.status,
+          error,
+        });
+      });
+    }
+
+    function isReservationSessionCurrent(lot, reservationSessionVersion) {
+      return reservationSessionVersion === customerOrderSessionVersion
+        && activeLot?.lotSessionId === lot?.lotSessionId;
+    }
+
     async function processReservationEvent(lot, event) {
       const state = ensureReservationState(lot);
+      const reservationSessionVersion = customerOrderSessionVersion;
 
       if (state.primaryReservation) {
         event.status = "waitlist_pending";
@@ -126,6 +215,7 @@ export function attachWsServer(httpServer, config) {
           viewerId: event.viewerId,
         });
         emitState();
+        notifyReservationStatus(lot, event);
         return;
       }
 
@@ -135,6 +225,8 @@ export function attachWsServer(httpServer, config) {
       };
       event.status = "creating_order";
       emitState();
+
+      let nextWaitlistEvent = null;
 
       try {
         const existingOrder = customerOrdersByViewerId.get(event.viewerId) || null;
@@ -158,9 +250,21 @@ export function attachWsServer(httpServer, config) {
             },
             reservation: event,
           });
-          if (order?.id) {
-            customerOrdersByViewerId.set(event.viewerId, order);
-          }
+        }
+
+        if (!isReservationSessionCurrent(lot, reservationSessionVersion)) {
+          logger.info("vk", "reservation_result_discarded", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            reason: existingOrder?.id ? "stale_session_after_append" : "stale_session_after_create",
+          });
+          return;
+        }
+
+        if (!existingOrder?.id && order?.id) {
+          customerOrdersByViewerId.set(event.viewerId, order);
         }
 
         event.status = existingOrder?.id ? "reserved_appended" : "reserved";
@@ -173,8 +277,9 @@ export function attachWsServer(httpServer, config) {
           orderId: order?.id || null,
           appended: Boolean(existingOrder?.id),
         });
+        notifyReservationStatus(lot, event);
       } catch (error) {
-        state.primaryReservation = null;
+        state.acceptedUserIds = state.acceptedUserIds.filter((viewerId) => viewerId !== event.viewerId);
         event.status = "order_failed";
         event.error = error instanceof Error ? error.message : String(error);
         logger.error("moysklad", "reservation_order_failed", {
@@ -184,14 +289,46 @@ export function attachWsServer(httpServer, config) {
           viewerId: event.viewerId,
           error,
         });
+
+        if (!isReservationSessionCurrent(lot, reservationSessionVersion)) {
+          logger.info("vk", "reservation_result_discarded", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            reason: "stale_session_after_error",
+          });
+          return;
+        }
+
+        notifyReservationStatus(lot, event);
+      } finally {
+        if (
+          state.primaryReservation?.commentId === event.commentId
+          && state.primaryReservation?.viewerId === event.viewerId
+        ) {
+          state.primaryReservation = null;
+        }
+
+        nextWaitlistEvent = state.events.find((candidate) => candidate.status === "waitlist_pending") || null;
       }
 
       emitState();
+
+      if (nextWaitlistEvent && activeLot?.lotSessionId === lot.lotSessionId) {
+        nextWaitlistEvent.status = "pending_reservation";
+        void processReservationEvent(lot, nextWaitlistEvent);
+      }
     }
 
     function isFatalCommentReadError(error) {
+      const errorCode = getVkApiErrorCode(error);
+      if (errorCode !== null) {
+        return [5, 15, 100].includes(errorCode);
+      }
+
       const message = error instanceof Error ? error.message : String(error);
-      return message.includes("VK API 15") || message.includes("video not found");
+      return /video not found/i.test(message);
     }
 
     function startCommentPolling(lot) {
@@ -210,20 +347,27 @@ export function attachWsServer(httpServer, config) {
         while (generation === commentPollingGeneration && activeLot?.lotSessionId === lotSessionId) {
           try {
             const comments = await vk.getComments(50);
-            const currentLot = activeLot?.lotSessionId === lotSessionId ? activeLot : lot;
+            if (generation !== commentPollingGeneration || activeLot?.lotSessionId !== lotSessionId) {
+              break;
+            }
+
+            const currentLot = activeLot;
             const reservationState = ensureReservationState(currentLot);
             const profileMap = new Map((comments.profiles || []).map((profile) => [profile.id, profile]));
             const sortedItems = (comments.items || []).sort((left, right) => left.id - right.id);
 
             if (!initialized) {
-              reservationState.lastCommentId = sortedItems.at(-1)?.id || reservationState.lastCommentId;
               initialized = true;
               consecutiveFailures = 0;
 
-              await new Promise((resolve) => {
-                setTimeout(resolve, 2000);
-              });
-              continue;
+              if (reservationState.lastCommentId <= 0) {
+                reservationState.lastCommentId = sortedItems.at(-1)?.id || reservationState.lastCommentId;
+
+                await new Promise((resolve) => {
+                  setTimeout(resolve, 2000);
+                });
+                continue;
+              }
             }
 
             const newItems = (comments.items || [])
@@ -242,7 +386,7 @@ export function attachWsServer(httpServer, config) {
               if (reservationState.acceptedUserIds.includes(viewerId)) {
                 logger.info("vk", "reservation_duplicate_ignored", {
                   connectionId,
-                  lotSessionId: activeLot.lotSessionId,
+                  lotSessionId: currentLot.lotSessionId,
                   commentId: comment.id,
                   viewerId,
                 });
@@ -264,7 +408,7 @@ export function attachWsServer(httpServer, config) {
                 status: "pending_reservation",
               };
 
-              addReservationEvent(activeLot, event);
+              addReservationEvent(currentLot, event);
               logger.info("vk", "reservation_detected", {
                 connectionId,
                 lotSessionId: currentLot.lotSessionId,
@@ -381,10 +525,22 @@ export function attachWsServer(httpServer, config) {
       return true;
     }
 
-    function confirmDetectedCode(detection, selectedCode, source = "telegram_manual", productCard = null) {
+    function isDetectionStillActive({ runId = null, enforceActiveRun = false, expectedDetectionId = null } = {}) {
+      if (enforceActiveRun && runId !== activeRunId) {
+        return false;
+      }
+
+      if (expectedDetectionId && activeDetectionActionId !== expectedDetectionId) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function buildConfirmedLot(detection, selectedCode, source = "telegram_manual", productCard = null) {
       const previousLot = activeLot;
 
-      const nextLot = {
+      return {
         code: selectedCode,
         lotSessionId: `lot-${Date.now()}-${nextLotSessionId++}`,
         transcript: detection.transcript,
@@ -408,14 +564,15 @@ export function attachWsServer(httpServer, config) {
           events: [],
         },
       };
+    }
 
+    function activateConfirmedLot(detection, nextLot, source = "telegram_manual") {
       activeLot = nextLot;
-
       lastDetection = {
         ...detection,
         status: "confirmed",
         chosen: {
-          code: selectedCode,
+          code: nextLot.code,
           source,
           fragment: detection.transcript,
           confidence: 1,
@@ -424,7 +581,7 @@ export function attachWsServer(httpServer, config) {
 
       logger.info("article", "article_detected", {
         connectionId,
-        code: selectedCode,
+        code: nextLot.code,
         lotSessionId: nextLot.lotSessionId,
         source,
         transcript: detection.transcript,
@@ -437,9 +594,9 @@ export function attachWsServer(httpServer, config) {
     }
 
     async function handleConfirmedDetection(detection, selectedCode, source, options = {}) {
-      const { runId = null, enforceActiveRun = false } = options;
+      const { runId = null, enforceActiveRun = false, expectedDetectionId = null } = options;
 
-      if (enforceActiveRun && runId !== activeRunId) {
+      if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
         return;
       }
 
@@ -456,7 +613,7 @@ export function attachWsServer(httpServer, config) {
         });
       }
 
-      if (enforceActiveRun && runId !== activeRunId) {
+      if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
         return;
       }
 
@@ -474,39 +631,49 @@ export function attachWsServer(httpServer, config) {
           });
         }
 
-        if (enforceActiveRun && runId !== activeRunId) {
+        if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
           return;
         }
       }
 
-      const confirmedLot = confirmDetectedCode(detection, selectedCode, source, productCard);
+      const confirmedLot = buildConfirmedLot(detection, selectedCode, source, productCard);
+      let publicationCommentId = null;
 
       try {
         const publication = await vk.publishLotCard(confirmedLot, productCard);
-
-        if ((!enforceActiveRun || runId === activeRunId) && activeLot?.lotSessionId === confirmedLot.lotSessionId) {
-          activeLot.vkPublication = publication?.comment_id || publication
-            ? {
-              commentId: publication?.comment_id ?? publication,
-            }
-            : activeLot.vkPublication;
-          emitState();
-        }
+        publicationCommentId = getVkPublicationCommentId(publication);
       } catch (error) {
         logger.error("vk", "lot_card_publish_failed", {
           connectionId,
           code: selectedCode,
-          lotSessionId: activeLot.lotSessionId,
+          lotSessionId: confirmedLot.lotSessionId,
           error,
         });
       }
 
-      if ((!enforceActiveRun || runId === activeRunId) && activeLot?.lotSessionId === confirmedLot.lotSessionId) {
-        startCommentPolling(confirmedLot);
+      if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
+        if (publicationCommentId !== null) {
+          publishLotClosed(confirmedLot, "stale_detection");
+        }
+        return;
       }
 
+      if (publicationCommentId !== null) {
+        const reservationState = ensureReservationState(confirmedLot);
+        confirmedLot.vkPublication = {
+          commentId: publicationCommentId,
+        };
+        reservationState.lastCommentId = Math.max(reservationState.lastCommentId, publicationCommentId);
+      }
+
+      activateConfirmedLot(detection, confirmedLot, source);
+      startCommentPolling(confirmedLot);
+
       if (shouldSendNotification(selectedCode, detection.transcript)) {
-        if ((enforceActiveRun && runId !== activeRunId) || activeLot?.lotSessionId !== confirmedLot.lotSessionId) {
+        if (
+          !isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })
+          || activeLot?.lotSessionId !== confirmedLot.lotSessionId
+        ) {
           return;
         }
 
@@ -547,7 +714,6 @@ export function attachWsServer(httpServer, config) {
         if (payload.type === "start") {
           const runId = nextRunId++;
 
-          customerOrdersByViewerId = new Map();
           activeRunId = null;
           session?.close();
           session = null;
@@ -610,51 +776,63 @@ export function attachWsServer(httpServer, config) {
                   return;
                 }
 
-                lastDetection = detection;
+                const detectionWithId = {
+                  ...detection,
+                  detectionId: `det-${runId}-${nextDetectionId++}`,
+                };
 
-                if (detection.status === "confirmed" && detection.chosen) {
+                lastDetection = detectionWithId;
+
+                if (detectionWithId.status === "confirmed" && detectionWithId.chosen) {
+                  activeDetectionActionId = detectionWithId.detectionId;
                   await handleConfirmedDetection(
-                    detection,
-                    detection.chosen.code,
-                    detection.chosen.source,
+                    detectionWithId,
+                    detectionWithId.chosen.code,
+                    detectionWithId.chosen.source,
                     {
                       runId,
                       enforceActiveRun: true,
+                      expectedDetectionId: detectionWithId.detectionId,
                     },
                   );
-                } else if (detection.status === "ambiguous") {
+                } else if (detectionWithId.status === "ambiguous") {
                   logger.warn("article", "article_ambiguous", {
                     connectionId,
-                    transcript: detection.transcript,
-                    candidates: detection.candidates,
+                    transcript: detectionWithId.transcript,
+                    candidates: detectionWithId.candidates,
                   });
 
-                  if (shouldSendAmbiguousNotification(detection)) {
+                  if (shouldSendAmbiguousNotification(detectionWithId)) {
+                    activeDetectionActionId = detectionWithId.detectionId;
                     void telegram.sendAmbiguousArticle({
-                      transcript: detection.transcript,
-                      candidates: detection.candidates,
+                      transcript: detectionWithId.transcript,
+                      candidates: detectionWithId.candidates,
                       onConfirm: async (selectedCode) => {
-                        await handleConfirmedDetection(detection, selectedCode, "telegram_manual");
+                        await handleConfirmedDetection(detectionWithId, selectedCode, "telegram_manual", {
+                          runId,
+                          enforceActiveRun: true,
+                          expectedDetectionId: detectionWithId.detectionId,
+                        });
                       },
                     }).catch((error) => {
                       logger.error("telegram", "ambiguity_notification_failed", {
                         connectionId,
-                        transcript: detection.transcript,
-                        candidates: detection.candidates,
+                        transcript: detectionWithId.transcript,
+                        candidates: detectionWithId.candidates,
                         error,
                       });
                     });
                   }
-                } else if (detection.status === "llm_error") {
+                } else if (detectionWithId.status === "llm_error") {
                   logger.warn("article", "article_llm_error", {
                     connectionId,
-                    transcript: detection.transcript,
-                    error: detection.error,
+                    transcript: detectionWithId.transcript,
+                    error: detectionWithId.error,
                   });
-                } else if (detection.status === "awaiting_continuation") {
+                } else if (detectionWithId.status === "awaiting_continuation") {
                   logger.info("article", "article_awaiting_continuation", {
                     connectionId,
-                    transcript: detection.transcript,
+                    transcript: detectionWithId.transcript,
                   });
                 }
 
@@ -717,6 +895,7 @@ export function attachWsServer(httpServer, config) {
               activeRunId = null;
               session?.close();
               session = null;
+              resetCustomerOrders();
               resetDetectionState();
               emitState();
             },
@@ -733,6 +912,7 @@ export function attachWsServer(httpServer, config) {
           activeRunId = null;
           session?.close();
           session = null;
+          resetCustomerOrders();
           resetDetectionState();
           emitState();
         }
@@ -751,6 +931,7 @@ export function attachWsServer(httpServer, config) {
       activeRunId = null;
       session?.close();
       session = null;
+      resetCustomerOrders();
       resetDetectionState();
     });
   });
