@@ -62,6 +62,7 @@ export function createTelegramNotifier(config) {
   let lastUpdateId = 0;
   let pollingStarted = false;
   let pollingActive = false;
+  let discountHandler = null;
 
   function pruneExpiredConfirmations() {
     const now = Date.now();
@@ -180,6 +181,29 @@ export function createTelegramNotifier(config) {
     }
   }
 
+  async function handleTextMessage(message) {
+    const text = (message?.text || "").trim();
+    const match = /^\/скидка\s+(\d+)/i.exec(text);
+    if (!match || !discountHandler) {
+      return;
+    }
+
+    const senderChatId = String(message.chat?.id || "");
+    if (!chatIds.includes(senderChatId)) {
+      logger.warn("telegram", "discount_command_unauthorized", { senderChatId });
+      return;
+    }
+
+    const amount = parseInt(match[1], 10);
+    if (amount > 0) {
+      try {
+        await discountHandler(amount);
+      } catch (error) {
+        logger.warn("telegram", "discount_command_failed", { amount, error });
+      }
+    }
+  }
+
   async function pollUpdatesLoop() {
     if (!isEnabled || pollingActive) {
       return;
@@ -194,13 +218,16 @@ export function createTelegramNotifier(config) {
         const payload = await callTelegram("getUpdates", {
           offset: lastUpdateId + 1,
           timeout: config.pollingTimeoutSec,
-          allowed_updates: ["callback_query"],
+          allowed_updates: ["callback_query", "message"],
         });
 
         for (const update of payload.result || []) {
           lastUpdateId = Math.max(lastUpdateId, update.update_id);
           if (update.callback_query) {
             await handleCallbackQuery(update.callback_query);
+          }
+          if (update.message?.text) {
+            await handleTextMessage(update.message);
           }
         }
       } catch (error) {
@@ -455,6 +482,25 @@ export function createTelegramNotifier(config) {
         token,
         messageId: payload.result?.message_id ?? null,
       };
+    },
+    setDiscountHandler(fn) {
+      discountHandler = fn;
+    },
+    async sendDiscountApplied({ discountAmount, originalPrice, newPrice, code, lotSessionId }) {
+      const text = [
+        `Скидка применена: −${formatPrice(discountAmount)}`,
+        `Новая цена: ${formatPrice(newPrice)}`,
+        `Исходная цена: ${formatPrice(originalPrice)}`,
+        `Код товара: ${code}`,
+        `lotSessionId: ${lotSessionId}`,
+      ].join("\n");
+
+      return sendMessage(text, {
+        kind: "discount_applied",
+        code,
+        lotSessionId,
+        discountAmount,
+      });
     },
   };
 }

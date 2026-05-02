@@ -344,7 +344,7 @@ export function createMoySkladClient(config) {
         positions: [
           {
             quantity: 1,
-            price: toMinorUnits(productCard?.salePrice ?? activeLot.product.salePrice),
+            price: toMinorUnits((productCard?.salePrice ?? activeLot.product.salePrice) - (activeLot.discountAmount || 0)),
             reserve: 1,
             assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
           },
@@ -375,7 +375,7 @@ export function createMoySkladClient(config) {
       const payload = [
         {
           quantity: 1,
-          price: toMinorUnits(productCard?.salePrice ?? activeLot.product.salePrice),
+          price: toMinorUnits((productCard?.salePrice ?? activeLot.product.salePrice) - (activeLot.discountAmount || 0)),
           reserve: 1,
           assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
         },

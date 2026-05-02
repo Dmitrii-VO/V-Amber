@@ -50,6 +50,7 @@ function formatStock(value, fallback = "-") {
 
 function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
   const product = activeLot?.product;
+  const discountAmount = activeLot?.discountAmount || 0;
   const lines = [];
 
   if (product?.name) {
@@ -59,7 +60,12 @@ function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
   lines.push(`Код товара: ${activeLot.code}`);
 
   if (product) {
-    lines.push(`Цена: ${formatPrice(product.salePrice)}`);
+    if (discountAmount > 0) {
+      const effectivePrice = product.salePrice - discountAmount;
+      lines.push(`Цена: ${formatPrice(effectivePrice)} (скидка −${formatPrice(discountAmount)})`);
+    } else {
+      lines.push(`Цена: ${formatPrice(product.salePrice)}`);
+    }
     lines.push(`Доступный остаток: ${formatStock(product.availableStock)} шт`);
 
     if (product.pathName) {
@@ -334,6 +340,42 @@ export function createVkPublisher(config) {
           code,
           viewerId,
           status,
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+        },
+      );
+    },
+    async publishDiscountUpdate(activeLot) {
+      if (!isEnabled || !activeLot?.lotSessionId) {
+        logger.info("vk", "publish_skipped_not_configured", {
+          kind: "discount_update",
+          lotSessionId: activeLot?.lotSessionId || null,
+          hasUserToken: Boolean(userToken),
+          ownerId: liveOwnerId || null,
+          videoId: liveVideoId || null,
+        });
+        return { ok: false, skipped: true };
+      }
+
+      const discountAmount = activeLot.discountAmount || 0;
+      const effectivePrice = (activeLot.product?.salePrice || 0) - discountAmount;
+      const message = [
+        `Обновлённая цена: ${formatPrice(effectivePrice)}`,
+        `Скидка: −${formatPrice(discountAmount)}`,
+        `Код товара: ${activeLot.code}`,
+        `lotSessionId: ${activeLot.lotSessionId}`,
+      ].join("\n");
+
+      return sendWithRetry(
+        () => callVkApi("video.createComment", {
+          owner_id: liveOwnerId,
+          video_id: liveVideoId,
+          message,
+        }),
+        {
+          kind: "discount_update",
+          code: activeLot.code,
+          lotSessionId: activeLot.lotSessionId,
           ownerId: liveOwnerId,
           videoId: liveVideoId,
         },

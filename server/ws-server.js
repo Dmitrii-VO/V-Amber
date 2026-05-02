@@ -2,6 +2,7 @@ import { WebSocketServer } from "ws";
 import { logger } from "./logger.js";
 import { SpeechKitStreamingSession } from "./speechkit-stream.js";
 import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
+import { detectDiscount } from "./discount-detector.js";
 import { createTelegramNotifier } from "./telegram.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
@@ -52,6 +53,13 @@ export function attachWsServer(httpServer, config) {
   const detectionConfig = config.articleExtraction;
   const reservationKeyword = "бронь";
 
+  let activeDiscountApplier = null;
+  telegram.setDiscountHandler(async (amount) => {
+    if (activeDiscountApplier) {
+      await activeDiscountApplier(amount);
+    }
+  });
+
   httpServer.on("upgrade", (request, socket, head) => {
     let pathname;
 
@@ -89,6 +97,7 @@ export function attachWsServer(httpServer, config) {
     let commentPollingActive = false;
     let customerOrdersByViewerId = new Map();
     let customerOrderSessionVersion = 1;
+    activeDiscountApplier = applyDiscount;
 
     function emitState() {
       sendJson(websocket, {
@@ -466,6 +475,60 @@ export function attachWsServer(httpServer, config) {
       });
     }
 
+    async function applyDiscount(amount) {
+      if (!activeLot?.vkPublication?.commentId || !activeLot.product) {
+        return;
+      }
+
+      if (amount <= 0 || amount >= activeLot.product.salePrice) {
+        logger.warn("discount", "invalid_discount", {
+          connectionId,
+          amount,
+          salePrice: activeLot.product.salePrice,
+          lotSessionId: activeLot.lotSessionId,
+        });
+        return;
+      }
+
+      const originalPrice = activeLot.product.salePrice;
+      activeLot.discountAmount = amount;
+      const newPrice = originalPrice - amount;
+
+      logger.info("discount", "discount_applied", {
+        connectionId,
+        amount,
+        originalPrice,
+        newPrice,
+        code: activeLot.code,
+        lotSessionId: activeLot.lotSessionId,
+      });
+
+      await Promise.all([
+        vk.publishDiscountUpdate(activeLot).catch((error) => {
+          logger.error("vk", "discount_publish_failed", {
+            connectionId,
+            lotSessionId: activeLot?.lotSessionId,
+            error,
+          });
+        }),
+        telegram.sendDiscountApplied({
+          discountAmount: amount,
+          originalPrice,
+          newPrice,
+          code: activeLot.code,
+          lotSessionId: activeLot.lotSessionId,
+        }).catch((error) => {
+          logger.error("telegram", "discount_notify_failed", {
+            connectionId,
+            lotSessionId: activeLot?.lotSessionId,
+            error,
+          });
+        }),
+      ]);
+
+      emitState();
+    }
+
     function rememberFinal(text) {
       if (transcriptHasTrigger(text, detectionConfig.triggers)) {
         triggerActiveUntil = Date.now() + detectionConfig.triggerWindowMs;
@@ -556,6 +619,7 @@ export function attachWsServer(httpServer, config) {
           availableStock: productCard.availableStock,
           hasPhoto: Boolean(productCard.photo),
         } : null,
+        discountAmount: 0,
         vkPublication: null,
         reservations: {
           lastCommentId: 0,
@@ -740,6 +804,13 @@ export function attachWsServer(httpServer, config) {
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
               rememberFinal(text);
+
+              const discountResult = detectDiscount(text, config.discount.triggers);
+              if (discountResult) {
+                void applyDiscount(discountResult.discountAmount).catch((error) => {
+                  logger.error("discount", "apply_failed", { connectionId, text, error });
+                });
+              }
 
               void (async () => {
                 const detectionInputs = buildDetectionInputs(text);
@@ -933,6 +1004,9 @@ export function attachWsServer(httpServer, config) {
       session = null;
       resetCustomerOrders();
       resetDetectionState();
+      if (activeDiscountApplier === applyDiscount) {
+        activeDiscountApplier = null;
+      }
     });
   });
 

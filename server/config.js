@@ -17,6 +17,20 @@ function parseIntEnv(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseArticleTriggers(value) {
+  const configured = parseCsvEnv(value, ["код товара"])
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  const triggers = new Set(configured);
+
+  if (triggers.has("код товара") || triggers.has("артикул")) {
+    triggers.add("код товара");
+    triggers.add("артикул");
+  }
+
+  return [...triggers];
+}
+
 function getRequiredEnv(name) {
   const value = process.env[name]?.trim();
 
@@ -43,7 +57,7 @@ export const config = {
     imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
   },
   articleExtraction: {
-    triggers: parseCsvEnv(process.env.VOICE_ARTICLE_TRIGGERS, ["код товара"]),
+    triggers: parseArticleTriggers(process.env.VOICE_ARTICLE_TRIGGERS),
     minLength: parseIntEnv(process.env.VOICE_ARTICLE_MIN_LENGTH, 1),
     maxLength: parseIntEnv(process.env.VOICE_ARTICLE_MAX_LENGTH, 10),
     finalBufferSize: parseIntEnv(process.env.VOICE_ARTICLE_FINAL_BUFFER_SIZE, 3),
@@ -55,6 +69,9 @@ export const config = {
       model: process.env.YANDEX_GPT_MODEL?.trim() || "yandexgpt-5-lite/latest",
       endpoint: process.env.YANDEX_GPT_ENDPOINT?.trim() || "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
     },
+  },
+  discount: {
+    triggers: parseCsvEnv(process.env.VOICE_DISCOUNT_TRIGGERS, ["скидка", "скидку", "скидки"]),
   },
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
