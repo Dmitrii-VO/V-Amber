@@ -1,41 +1,90 @@
 # Repository notes
 
-Repo currently contains product spec only. No application code, package
-manifests, CI, test config, or local agent config present at root.
+Repo no longer spec-only. Current tree contains runnable MVP prototype:
+- `server/` Node.js backend on ESM modules.
+- `web-ui/` static browser UI for microphone control and session status.
+- `package.json` with single verified runtime command: `npm start`.
+- `.env` for secrets, `logs/` for runtime logs, `todo.md` for product notes.
+
+Do not treat `node_modules/`, `logs/`, or `.env` as source files.
 
 # Source of truth
 
-`Amberry_Voice_Technical_Specification.md` is current source of truth for
-project scope and architecture.
+`Amberry_Voice_Technical_Specification.md` remains product source of truth for
+scope, business rules, and terminology.
 
-Spec language is Russian. Preserve product terms and API names exactly when
-adding code or docs.
+When spec conflicts with executable code or verified runtime behavior, trust
+code for current implementation details and update docs accordingly.
+
+Spec language is Russian. Preserve product terms and external API names exactly
+when adding code or docs.
+
+# Current implementation
+
+Current stack in repo:
+- JavaScript on Node.js, not TypeScript yet.
+- Browser Web UI served by local HTTP server.
+- WebSocket audio streaming from browser to backend.
+- Yandex SpeechKit Streaming API integration for realtime STT.
+- Article extraction from transcript with regex/number-word parsing and
+  YandexGPT fallback config.
+- Telegram callback workflow for ambiguous article confirmation.
+- MoySklad integration for product lookup and customer order reservation.
+- VK integration for live comment polling, lot-card publishing, and reservation
+  handling.
+
+Main entrypoints and modules:
+- `server/index.js`: starts HTTP server.
+- `server/http-server.js`: serves `web-ui/` assets.
+- `server/ws-server.js`: WebSocket session flow, active lot state, VK comments,
+  reservations.
+- `server/speechkit-stream.js`: SpeechKit gRPC streaming session.
+- `server/article-extractor.js`: spoken article parsing.
+- `server/moysklad.js`: MoySklad API client.
+- `server/vk.js`: VK publishing and comment polling.
+- `server/telegram.js`: Telegram notifications and confirmations.
+- `server/config.js`: environment-driven config.
+
+# Verified commands
+
+Only use commands backed by repo config:
+- `npm start` runs `node server/index.js`.
+
+No verified test, lint, build, Docker Compose, Redis, SQLite migration, or CI
+commands exist in repo yet. Do not invent them.
+
+# Environment and runtime assumptions
+
+Runtime depends on `.env` values. `server/config.js` currently requires at
+least `YANDEX_SPEECHKIT_API_KEY` at startup.
+
+Several integrations are optional at code level and degrade to skipped actions
+when not configured, but STT startup is not optional.
+
+Logs write to `logs/server.log`.
 
 # Product context
 
-Project goal: voice-assisted live-commerce workflow for VK.
+Project goal unchanged: voice-assisted live-commerce workflow for VK.
 
-Main integrations named in spec:
-- Yandex SpeechKit Streaming API for low-latency STT.
-- YandexGPT 5 Lite as fallback LLM for spoken product code parsing.
-- VK API LongPoll for comment intake and chat replies.
-- MoySklad API for stock lookup and customer-order reservation.
-- Telegram Bot API for operator notifications and control actions.
-
-Planned stack from spec:
-- TypeScript/Node.js for core logic.
-- Optional Python only for audio-driver work.
-- Local Web UI for microphone/session control.
-- Redis for stock cache and realtime queue/state.
-- Docker for cross-platform deployment.
+Implemented or partially implemented integrations in code:
+- Yandex SpeechKit Streaming API.
+- YandexGPT fallback configuration for article extraction.
+- VK API for live comment read/publish flow.
+- MoySklad API for product lookup and reservation orders.
+- Telegram Bot API for operator notifications and confirmations.
 
 # Working rules for future sessions
 
-Do not invent build, test, lint, or run commands until repo adds executable
-config.
+Prefer minimal changes inside existing modules. Repo already has working JS
+implementation patterns; follow them unless user asks for refactor.
 
-If implementation starts, infer command flow from manifests and config before
-editing this file.
+Do not assume planned architecture from spec is already present. In
+particular, Redis, SQLite, Docker Compose, TypeScript, and Python audio-driver
+code are described in spec but not present in this repo state.
 
-If docs or code conflict with spec later, trust executable config and update
-this file with verified commands and boundaries.
+Before adding new commands to this file, verify them from `package.json` or
+other executable config first.
+
+If docs or code drift from spec later, keep this file aligned with verified
+repository state and note missing planned pieces explicitly.

@@ -108,9 +108,9 @@ export function createVkPublisher(config) {
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
-  const liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
-  const liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
-  const isEnabled = Boolean(userToken && liveOwnerId && liveVideoId);
+  let liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
+  let liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
+  const isEnabled = Boolean(userToken);
 
   async function callVkApi(method, params) {
     const url = new URL(`https://api.vk.com/method/${method}`);
@@ -380,6 +380,17 @@ export function createVkPublisher(config) {
           videoId: liveVideoId,
         },
       );
+    },
+
+    setLiveVideoUrl(url) {
+      const parsed = parseLiveVideoReference(url || "");
+      liveOwnerId = normalizeVkOwnerId(parsed.ownerId);
+      liveVideoId = normalizeVkVideoId(parsed.videoId);
+      logger.info("vk", "live_video_url_updated", { url, liveOwnerId, liveVideoId });
+    },
+
+    getLiveVideoUrl() {
+      return liveOwnerId && liveVideoId ? `https://vk.com/video${liveOwnerId}_${liveVideoId}` : "";
     },
   };
 }

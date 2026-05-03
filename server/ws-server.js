@@ -1,5 +1,6 @@
 import { WebSocketServer } from "ws";
 import { logger } from "./logger.js";
+import { createSessionLog } from "./session-log.js";
 import { SpeechKitStreamingSession } from "./speechkit-stream.js";
 import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount } from "./discount-detector.js";
@@ -83,6 +84,7 @@ export function attachWsServer(httpServer, config) {
 
   wsServer.on("connection", (websocket) => {
     const connectionId = `ws-${nextConnectionId++}`;
+    const sessionLog = createSessionLog();
     let session = null;
     let activeLot = null;
     let lastDetection = null;
@@ -286,6 +288,13 @@ export function attachWsServer(httpServer, config) {
           orderId: order?.id || null,
           appended: Boolean(existingOrder?.id),
         });
+        sessionLog.logOrderCreated({
+          viewerName: event.viewerName,
+          viewerId: event.viewerId,
+          orderId: order?.id || null,
+          lotCode: lot.code,
+          appended: Boolean(existingOrder?.id),
+        });
         notifyReservationStatus(lot, event);
       } catch (error) {
         state.acceptedUserIds = state.acceptedUserIds.filter((viewerId) => viewerId !== event.viewerId);
@@ -426,6 +435,11 @@ export function attachWsServer(httpServer, config) {
                 viewerId,
                 viewerName: event.viewerName,
               });
+              sessionLog.logReservation({
+                viewerName: event.viewerName,
+                viewerId,
+                lotCode: currentLot.code,
+              });
               emitState();
               void processReservationEvent(currentLot, event);
             }
@@ -502,6 +516,7 @@ export function attachWsServer(httpServer, config) {
         code: activeLot.code,
         lotSessionId: activeLot.lotSessionId,
       });
+      sessionLog.logDiscount({ amount, originalPrice, newPrice, code: activeLot.code });
 
       await Promise.all([
         vk.publishDiscountUpdate(activeLot).catch((error) => {
@@ -731,6 +746,15 @@ export function attachWsServer(httpServer, config) {
       }
 
       activateConfirmedLot(detection, confirmedLot, source);
+      sessionLog.logLotOpened({
+        code: confirmedLot.code,
+        lotSessionId: confirmedLot.lotSessionId,
+        productName: productCard?.name || null,
+        salePrice: productCard?.salePrice ?? null,
+        availableStock: productCard?.availableStock ?? null,
+        transcript: confirmedLot.transcript,
+        source: confirmedLot.source,
+      });
       startCommentPolling(confirmedLot);
 
       if (shouldSendNotification(selectedCode, detection.transcript)) {
@@ -781,12 +805,19 @@ export function attachWsServer(httpServer, config) {
           activeRunId = null;
           session?.close();
           session = null;
+
+          if (payload.vkLiveVideoUrl) {
+            vk.setLiveVideoUrl(payload.vkLiveVideoUrl);
+          }
+
           logger.info("ws", "stream_start_requested", {
             connectionId,
             sampleRate: payload.sampleRate,
             encoding: payload.encoding,
             deviceId: payload.deviceId,
+            vkLiveVideoUrl: payload.vkLiveVideoUrl || null,
           });
+          sessionLog.logSessionStart({ connectionId, vkLiveVideoUrl: payload.vkLiveVideoUrl || null });
           activeRunId = runId;
           session = new SpeechKitStreamingSession(config.speechkit, {
             onPartial: ({ text, latencyMs }) => {
@@ -951,6 +982,7 @@ export function attachWsServer(httpServer, config) {
 
               publishLotClosed(activeLot, "stream_error");
               logger.error("speechkit", "stream_error", { connectionId, error });
+              sessionLog.logSessionEnd({ reason: "stream_error" });
               activeRunId = null;
               session?.close();
               session = null;
@@ -963,6 +995,7 @@ export function attachWsServer(httpServer, config) {
 
               logger.info("speechkit", "stream_ended", { connectionId });
               publishLotClosed(activeLot, "stream_end");
+              sessionLog.logSessionEnd({ reason: "stream_end" });
               activeRunId = null;
               session?.close();
               session = null;
@@ -980,6 +1013,7 @@ export function attachWsServer(httpServer, config) {
         if (payload.type === "stop") {
           logger.info("ws", "stream_stop_requested", { connectionId });
           publishLotClosed(activeLot, "stream_stop");
+          sessionLog.logSessionEnd({ reason: "stream_stop" });
           activeRunId = null;
           session?.close();
           session = null;
@@ -999,6 +1033,7 @@ export function attachWsServer(httpServer, config) {
     websocket.on("close", () => {
       logger.info("ws", "client_disconnected", { connectionId });
       publishLotClosed(activeLot, "socket_close");
+      sessionLog.logSessionEnd({ reason: "socket_close" });
       activeRunId = null;
       session?.close();
       session = null;

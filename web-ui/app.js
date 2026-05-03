@@ -1,6 +1,7 @@
 const elements = {
   microphoneSelect: document.querySelector("#microphoneSelect"),
   wsUrlInput: document.querySelector("#wsUrlInput"),
+  vkLiveUrlInput: document.querySelector("#vkLiveUrlInput"),
   refreshDevicesButton: document.querySelector("#refreshDevicesButton"),
   startButton: document.querySelector("#startButton"),
   stopButton: document.querySelector("#stopButton"),
@@ -347,6 +348,7 @@ async function startStreaming() {
         encoding: "pcm_s16le",
         deviceId: state.selectedDeviceId || null,
         startedAt: new Date().toISOString(),
+        vkLiveVideoUrl: elements.vkLiveUrlInput.value.trim() || null,
       }),
     );
 
@@ -420,6 +422,14 @@ elements.stopButton.addEventListener("click", stopStreaming);
 elements.microphoneSelect.addEventListener("change", (event) => {
   state.selectedDeviceId = event.target.value;
 });
+elements.vkLiveUrlInput.addEventListener("change", () => {
+  localStorage.setItem("vkLiveVideoUrl", elements.vkLiveUrlInput.value.trim());
+});
+
+const savedVkUrl = localStorage.getItem("vkLiveVideoUrl");
+if (savedVkUrl) {
+  elements.vkLiveUrlInput.value = savedVkUrl;
+}
 
 navigator.mediaDevices.addEventListener("devicechange", loadInputDevices);
 
