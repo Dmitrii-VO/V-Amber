@@ -2,151 +2,190 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Amberry Voice - Stage 2 UI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Amberry Voice — Operator Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="app-shell">
-      <section class="panel hero">
-        <div>
-          <p class="eyebrow">Amberry Voice</p>
-          <h1>Локальный контроль микрофона и стриминга</h1>
-          <p class="lede">
-            Минимальный Web UI для Этапа 2: выбор микрофона, старт/стоп
-            стриминга, realtime-транскрипт, извлечение артикулов, ошибки и базовые метрики.
-          </p>
-        </div>
-        <div class="status-stack">
-          <div class="status-card">
-            <span class="status-label">Сессия</span>
-            <strong id="sessionState">idle</strong>
-          </div>
-          <div class="status-card">
-            <span class="status-label">WebSocket</span>
-            <strong id="socketState">disconnected</strong>
-          </div>
-          <div class="status-card">
-            <span class="status-label">Активный лот</span>
-            <strong id="activeLot">-</strong>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">A</div>
+          <div style="display:flex; flex-direction:column; line-height:1.1;">
+            <span class="brand-name">Amberry Voice</span>
+            <span class="brand-sub">operator console</span>
           </div>
         </div>
-      </section>
 
-      <section class="panel controls-grid">
-        <label class="field">
-          <span>Микрофон</span>
-          <select id="microphoneSelect"></select>
-        </label>
+        <span id="sessionPill" class="pill">
+          <span id="sessionDot" class="dot"></span>
+          <span id="sessionLabel">Idle</span>
+        </span>
 
-        <label class="field">
-          <span>WebSocket endpoint</span>
-          <input
-            id="wsUrlInput"
-            type="text"
-            value="ws://localhost:8080/ws/stt"
-            spellcheck="false"
-          />
-        </label>
-
-        <label class="field">
-          <span>Ссылка на эфир VK</span>
-          <input
-            id="vkLiveUrlInput"
-            type="text"
-            placeholder="https://vk.com/video-12345_678"
-            spellcheck="false"
-          />
-        </label>
-
-        <div class="button-row">
-          <button id="refreshDevicesButton" type="button">Обновить устройства</button>
-          <button id="startButton" type="button">Старт</button>
-          <button id="stopButton" type="button" disabled>Стоп</button>
+        <div class="topbar-controls">
+          <select id="microphoneSelect" class="select mic-select"></select>
+          <input id="vkLiveUrlInput" class="input" type="text" placeholder="VK live URL" style="flex:1; min-width:200px;" hidden />
+          <button id="toggleAdvanced" class="btn btn--ghost" title="Дополнительно" style="padding:0 10px;">+ VK</button>
+          <button id="refreshDevicesButton" class="btn btn--ghost" title="Обновить устройства" style="padding:0 10px;">↻</button>
         </div>
 
-        <div class="safe-mode-row">
-          <label class="safe-mode-toggle">
+        <div class="topbar-actions">
+          <label id="safeModeLabel" class="toggle">
             <input id="safeModeToggle" type="checkbox" />
-            <span class="safe-mode-track"><span class="safe-mode-thumb"></span></span>
-            <span class="safe-mode-label">
-              <strong>Safe Mode</strong>
-              <span class="safe-mode-hint">
-                Только логирование. Заказы в МойСклад, посты VK и уведомления Telegram отключаются.
-              </span>
-            </span>
+            <span class="toggle-track"></span>
+            <span>Safe mode</span>
           </label>
-          <span id="safeModeStatus" class="safe-mode-status safe-mode-status--off">Боевой режим</span>
+
+          <button id="startButton" class="btn btn--primary">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M2 1l7 4-7 4z"></path></svg>
+            Старт
+          </button>
+          <button id="stopButton" class="btn btn--danger" disabled hidden>
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><rect x="2" y="2" width="6" height="6" rx="1"></rect></svg>
+            Стоп
+          </button>
         </div>
-      </section>
+      </header>
 
-      <section class="data-grid">
-        <section class="panel transcript-panel">
-          <div class="panel-header">
-            <h2>Realtime-транскрипт</h2>
-            <span id="transcriptMeta">Нет данных</span>
-          </div>
-          <div id="transcriptOutput" class="transcript-output">
-            Ожидание запуска стриминга...
-          </div>
-        </section>
+      <div class="main">
+        <div class="col col--left">
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Активный лот</span>
+                <span id="lotArticle" class="count"></span>
+              </div>
+              <div id="lotStockPill"></div>
+            </div>
 
-        <section class="panel metrics-panel">
-          <div class="panel-header">
-            <h2>Метрики</h2>
-          </div>
-          <dl class="metrics-list">
-            <div>
-              <dt>Chunks sent</dt>
-              <dd id="chunksSent">0</dd>
+            <div id="detectionInset" class="detection" hidden>
+              <div>
+                <span class="muted" style="font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:0.08em; margin-right:8px;">Извлечено →</span>
+                <span id="detectionCode" class="detection-code">—</span>
+              </div>
+              <div id="detectionSourceLine" class="detection-source"></div>
+              <div id="detectionCandidatesWrap" class="detection-candidates"></div>
             </div>
-            <div>
-              <dt>Bytes sent</dt>
-              <dd id="bytesSent">0</dd>
-            </div>
-            <div>
-              <dt>Last partial latency</dt>
-              <dd id="partialLatency">-</dd>
-            </div>
-            <div>
-              <dt>Last final latency</dt>
-              <dd id="finalLatency">-</dd>
-            </div>
-          </dl>
-        </section>
 
-        <section class="panel detection-panel">
-          <div class="panel-header">
-            <h2>Извлечение артикула</h2>
-            <span id="detectionStatus">Нет данных</span>
-          </div>
-          <dl class="metrics-list detection-list">
-            <div>
-              <dt>Confirmed code</dt>
-              <dd id="detectedCode">-</dd>
-            </div>
-            <div>
-              <dt>Source</dt>
-              <dd id="detectionSource">-</dd>
-            </div>
-            <div>
-              <dt>Candidates</dt>
-              <dd id="detectionCandidates">-</dd>
-            </div>
-          </dl>
-          <div id="detectionTranscript" class="transcript-output detection-transcript">
-            Ожидание извлечения...
-          </div>
-        </section>
+            <div class="panel-body panel-body--flush">
+              <div id="lotEmpty" class="lot--empty">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" style="opacity:0.4;">
+                  <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                  <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"></path>
+                </svg>
+                <div>
+                  <div style="color:var(--text-muted); margin-bottom:4px;">Нет активного лота</div>
+                  <div id="lotHint" class="hint">Нажмите «Старт» для запуска сессии</div>
+                </div>
+              </div>
 
-        <section class="panel log-panel">
-          <div class="panel-header">
-            <h2>События и ошибки</h2>
-          </div>
-          <ul id="eventLog" class="event-log"></ul>
-        </section>
-      </section>
-    </main>
+              <div id="lotCard" class="lot" hidden>
+                <div class="lot-photo" id="lotPhoto">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                    <path d="M21 15l-5-5L5 21"></path>
+                  </svg>
+                </div>
+                <div>
+                  <div class="lot-code">
+                    <span class="label">код</span>
+                    <span id="lotCode">—</span>
+                  </div>
+                  <div id="lotName" class="lot-name">—</div>
+                  <dl class="lot-meta">
+                    <div>
+                      <dt>Артикул</dt>
+                      <dd id="lotArticleValue" class="mono">—</dd>
+                    </div>
+                    <div>
+                      <dt>Цена</dt>
+                      <dd id="lotPrice" class="mono">—</dd>
+                    </div>
+                    <div>
+                      <dt>Остаток</dt>
+                      <dd id="lotStock" class="mono">—</dd>
+                    </div>
+                  </dl>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Транскрипт</span>
+                <span id="transcriptCount" class="count">· 0</span>
+              </div>
+              <div id="transcriptStatus" style="display:flex; align-items:center; gap:var(--gap-3); font-size:var(--fs-xs); color:var(--text-dim); font-family:var(--font-mono);">
+                <span>idle</span>
+              </div>
+            </div>
+            <div class="panel-body panel-body--flush" style="display:flex; flex-direction:column;">
+              <div id="transcriptOutput" class="transcript-empty">
+                Запустите сессию для начала транскрипции
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="col col--right">
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Брони</span>
+                <span id="reservationCount" class="count">· 0</span>
+              </div>
+              <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">VK live</span>
+            </div>
+            <div class="panel-body panel-body--flush">
+              <div id="reservationList" class="res-list"></div>
+              <div id="reservationEmpty" class="res-empty">
+                Брони появятся здесь по мере поступления комментариев «бронь» в VK
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>События</span>
+                <span id="eventCount" class="count">· 0</span>
+              </div>
+            </div>
+            <div class="panel-body panel-body--flush">
+              <div id="eventLog" class="events"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <footer class="statusbar">
+        <div>
+          <span id="socketDot" class="dot"></span>
+          <strong id="socketState">disconnected</strong>
+        </div>
+        <span class="sep"></span>
+        <div><strong>endpoint</strong> <span id="endpointLabel">ws://localhost:8080/ws/stt</span></div>
+        <span class="sep"></span>
+        <div><strong>uptime</strong> <span id="uptimeLabel">0s</span></div>
+        <span class="sep"></span>
+        <div><strong>chunks</strong> <span id="chunksSent">0</span></div>
+        <div><strong>bytes</strong> <span id="bytesSent">0</span></div>
+        <span class="sep"></span>
+        <div><strong>partial</strong> <span id="partialLatency">—</span></div>
+        <div><strong>final</strong> <span id="finalLatency">—</span></div>
+        <div style="margin-left:auto;">
+          <span id="safeModeBadge" class="pill pill--amber" hidden>SAFE MODE · no writes</span>
+        </div>
+      </footer>
+    </div>
+
+    <input id="wsUrlInput" type="hidden" value="ws://localhost:8080/ws/stt" />
 
     <script type="module" src="./app.js"></script>
   </body>
