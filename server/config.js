@@ -46,14 +46,15 @@ export const config = {
   vk: resolveVkConfig(process.env),
   moysklad: {
     baseUrl: process.env.MOYSKLAD_BASE_URL?.trim() || "https://api.moysklad.ru/api/remap/1.2/",
-    token: process.env.MOYSKLAD_TOKEN?.trim() || "",
     login: process.env.MOYSKLAD_LOGIN?.trim() || "",
     password: process.env.MOYSKLAD_PASSWORD?.trim() || "",
     organizationId: process.env.MOYSKLAD_ORGANIZATION_ID?.trim() || "",
+    preferredOrganizationName: process.env.MOYSKLAD_PREFERRED_ORGANIZATION_NAME?.trim() || "ИП Куницына Татьяна Васильевна",
     storeId: process.env.MOYSKLAD_STORE_ID?.trim() || "",
     preferredStoreName: process.env.MOYSKLAD_PREFERRED_STORE_NAME?.trim() || "Аукцион",
     customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
     salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
+    vkIdAttributeId: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_ID?.trim() || "",
     imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
   },
   articleExtraction: {
