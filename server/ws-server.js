@@ -7,6 +7,7 @@ import { detectDiscount } from "./discount-detector.js";
 import { createTelegramNotifier } from "./telegram.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
+import { isSafeMode, setSafeMode, onSafeModeChange, wrapWithSafeMode } from "./safe-mode.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -48,9 +49,21 @@ function getVkApiErrorCode(error) {
 
 export function attachWsServer(httpServer, config) {
   const wsServer = new WebSocketServer({ noServer: true });
-  const telegram = createTelegramNotifier(config.telegram);
-  const moysklad = createMoySkladClient(config.moysklad);
-  const vk = createVkPublisher(config.vk);
+  const telegram = wrapWithSafeMode(
+    createTelegramNotifier(config.telegram),
+    ["sendArticleDetected", "sendAmbiguousArticle", "sendDiscountApplied"],
+    "telegram",
+  );
+  const moysklad = wrapWithSafeMode(
+    createMoySkladClient(config.moysklad),
+    ["createCustomerOrderReservation", "appendPositionToCustomerOrder"],
+    "moysklad",
+  );
+  const vk = wrapWithSafeMode(
+    createVkPublisher(config.vk),
+    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishReservationReply"],
+    "vk",
+  );
   const detectionConfig = config.articleExtraction;
   const reservationKeyword = "бронь";
 
@@ -106,8 +119,13 @@ export function attachWsServer(httpServer, config) {
         type: "state",
         activeLot,
         lastDetection,
+        safeMode: isSafeMode(),
       });
     }
+
+    const unsubscribeSafeMode = onSafeModeChange(() => {
+      emitState();
+    });
 
     function resetDetectionState() {
       commentPollingGeneration += 1;
@@ -216,6 +234,20 @@ export function attachWsServer(httpServer, config) {
     async function processReservationEvent(lot, event) {
       const state = ensureReservationState(lot);
       const reservationSessionVersion = customerOrderSessionVersion;
+
+      if (isSafeMode()) {
+        event.status = "safe_mode_logged";
+        logger.warn("safe-mode", "reservation_logged_only", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          viewerName: event.viewerName,
+        });
+        emitState();
+        return;
+      }
 
       if (state.primaryReservation) {
         event.status = "waitlist_pending";
@@ -1010,6 +1042,19 @@ export function attachWsServer(httpServer, config) {
           return;
         }
 
+        if (payload.type === "setSafeMode") {
+          const changed = setSafeMode(payload.enabled, { source: "web-ui", connectionId });
+          logger.info("ws", "safe_mode_request", {
+            connectionId,
+            enabled: Boolean(payload.enabled),
+            changed,
+          });
+          if (!changed) {
+            emitState();
+          }
+          return;
+        }
+
         if (payload.type === "stop") {
           logger.info("ws", "stream_stop_requested", { connectionId });
           publishLotClosed(activeLot, "stream_stop");
@@ -1042,6 +1087,7 @@ export function attachWsServer(httpServer, config) {
       if (activeDiscountApplier === applyDiscount) {
         activeDiscountApplier = null;
       }
+      unsubscribeSafeMode();
     });
   });
 

@@ -20,6 +20,8 @@ const elements = {
   partialLatency: document.querySelector("#partialLatency"),
   finalLatency: document.querySelector("#finalLatency"),
   eventLog: document.querySelector("#eventLog"),
+  safeModeToggle: document.querySelector("#safeModeToggle"),
+  safeModeStatus: document.querySelector("#safeModeStatus"),
 };
 
 const state = {
@@ -37,6 +39,8 @@ const state = {
   bytesSent: 0,
   finalTranscript: "",
   lastDetection: null,
+  safeMode: false,
+  safeModeRequestInFlight: false,
 };
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -267,6 +271,9 @@ function handleServerMessage(payload) {
   if (payload.type === "state") {
     elements.activeLot.textContent = payload.activeLot?.code || "-";
     updateDetection(payload.lastDetection || null);
+    if (typeof payload.safeMode === "boolean") {
+      applySafeModeFromServer(payload.safeMode);
+    }
     return;
   }
 
@@ -415,6 +422,41 @@ function handleError(error, prefix) {
   logEvent(`${prefix}: ${details}`);
   console.error(error);
 }
+
+function renderSafeMode() {
+  elements.safeModeToggle.checked = state.safeMode;
+  if (state.safeMode) {
+    elements.safeModeStatus.textContent = "Safe mode: только логи";
+    elements.safeModeStatus.classList.remove("safe-mode-status--off");
+    elements.safeModeStatus.classList.add("safe-mode-status--on");
+  } else {
+    elements.safeModeStatus.textContent = "Боевой режим";
+    elements.safeModeStatus.classList.remove("safe-mode-status--on");
+    elements.safeModeStatus.classList.add("safe-mode-status--off");
+  }
+}
+
+function applySafeModeFromServer(value) {
+  state.safeMode = Boolean(value);
+  state.safeModeRequestInFlight = false;
+  renderSafeMode();
+}
+
+elements.safeModeToggle.addEventListener("change", (event) => {
+  const desired = event.target.checked;
+
+  if (!state.websocket || state.websocket.readyState !== WebSocket.OPEN) {
+    elements.safeModeToggle.checked = state.safeMode;
+    logEvent("Safe mode: нет подключения. Запустите стриминг, чтобы переключить режим.");
+    return;
+  }
+
+  state.safeModeRequestInFlight = true;
+  state.websocket.send(JSON.stringify({ type: "setSafeMode", enabled: desired }));
+  logEvent(desired ? "Safe mode: запрос на включение" : "Safe mode: запрос на выключение");
+});
+
+renderSafeMode();
 
 elements.refreshDevicesButton.addEventListener("click", loadInputDevices);
 elements.startButton.addEventListener("click", startStreaming);

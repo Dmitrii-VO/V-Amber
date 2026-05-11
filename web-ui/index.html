@@ -64,6 +64,20 @@
           <button id="startButton" type="button">Старт</button>
           <button id="stopButton" type="button" disabled>Стоп</button>
         </div>
+
+        <div class="safe-mode-row">
+          <label class="safe-mode-toggle">
+            <input id="safeModeToggle" type="checkbox" />
+            <span class="safe-mode-track"><span class="safe-mode-thumb"></span></span>
+            <span class="safe-mode-label">
+              <strong>Safe Mode</strong>
+              <span class="safe-mode-hint">
+                Только логирование. Заказы в МойСклад, посты VK и уведомления Telegram отключаются.
+              </span>
+            </span>
+          </label>
+          <span id="safeModeStatus" class="safe-mode-status safe-mode-status--off">Боевой режим</span>
+        </div>
       </section>
 
       <section class="data-grid">
