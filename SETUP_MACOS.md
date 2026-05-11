@@ -70,7 +70,8 @@ cp .env.example .env
 | `VK_TOKEN` | Нет | VK → Управление сообществом → Работа с API → Ключи доступа |
 | `TELEGRAM_BOT_TOKEN` | Нет | @BotFather в Telegram |
 | `TELEGRAM_CHAT_ID` | Нет | @userinfobot в Telegram |
-| `MOYSKLAD_TOKEN` | Нет | МойСклад → Настройки → Доступ → Токены |
+| `MOYSKLAD_LOGIN` | Нет | Логин от аккаунта МойСклад |
+| `MOYSKLAD_PASSWORD` | Нет | Пароль от аккаунта МойСклад |
 | `MOYSKLAD_ORGANIZATION_ID` | Нет | UUID из адресной строки в МойСклад |
 | `MOYSKLAD_STORE_ID` | Нет | UUID склада в МойСклад |
 

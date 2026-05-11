@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logger } from "./logger.js";
+import { isSafeMode, setSafeMode } from "./safe-mode.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = normalize(join(__dirname, "..", "web-ui"));
@@ -46,6 +47,44 @@ export function createStaticServer() {
     if (pathname === "/health") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (pathname === "/api/safe-mode") {
+      if (request.method === "GET") {
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ safeMode: isSafeMode() }));
+        return;
+      }
+
+      if (request.method === "POST") {
+        let body = "";
+        request.on("data", (chunk) => {
+          body += chunk;
+          if (body.length > 1024) {
+            request.destroy();
+          }
+        });
+        request.on("end", () => {
+          let enabled;
+          try {
+            ({ enabled } = JSON.parse(body || "{}"));
+          } catch {
+            response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ error: "invalid_json" }));
+            return;
+          }
+
+          const changed = setSafeMode(enabled, { source: "http" });
+          logger.info("http", "safe_mode_request", { enabled: Boolean(enabled), changed });
+          response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          response.end(JSON.stringify({ safeMode: isSafeMode(), changed }));
+        });
+        return;
+      }
+
+      response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET, POST" });
+      response.end(JSON.stringify({ error: "method_not_allowed" }));
       return;
     }
 

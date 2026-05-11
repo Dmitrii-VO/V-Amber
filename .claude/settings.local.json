@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls D:/myprojects/Amberry-Dashboard)",
+      "Bash(powershell -Command \"Expand-Archive -Path V-Amber.zip -DestinationPath V-Amber-extracted -Force; Get-ChildItem -Recurse V-Amber-extracted | Select-Object FullName\")",
+      "Bash(ls \"D:/myprojects/AuctionBot Amberry\")",
+      "Bash(ssh -G cloud)",
+      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=10 cloud 'echo OK && uname -a && ls ~/ 2>/dev/null | head -20')",
+      "Bash(curl -s -u \"admin@amberry:Amberry39\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/metadata\" -H \"Accept: application/json;charset=utf-8\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(a['id'], a['name'], a['type']\\) for a in d.get\\('attributes',[]\\)]\")",
+      "Bash(curl -sw \"\\\\nHTTP=%{http_code}\\\\n\" -u \"admin@amberry:Amberry39\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/metadata\" -H \"Accept: application/json;charset=utf-8\" -o /tmp/ms_meta.json)",
+      "Read(//tmp/**)",
+      "Bash(curl -sw \"\\\\nHTTP=%{http_code}\\\\n\" -H \"Authorization: Bearer f31155daf19a045916bbcae030def3c75f7981d0\" -H \"Accept: application/json;charset=utf-8\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/metadata\" -o /tmp/ms_meta.json)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('/tmp/ms_meta.json'\\)\\); [print\\(a['id'], '|', a['name'], '|', a['type']\\) for a in d.get\\('attributes',[]\\)]\")",
+      "Bash(curl -sw \"\\\\nHTTP=%{http_code}\\\\n\" --compressed -H \"Authorization: Bearer f31155daf19a045916bbcae030def3c75f7981d0\" -H \"Accept-Encoding: gzip\" -H \"Accept: application/json;charset=utf-8\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/metadata\" -o C:/temp/ms_meta.json)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('C:/temp/ms_meta.json',encoding='utf-8'\\)\\); [print\\(a['id'], '|', a['name'], '|', a['type']\\) for a in d.get\\('attributes',[]\\)]\")",
+      "Bash(mkdir -p C:/temp)",
+      "Bash(curl -sw \"\\\\nHTTP=%{http_code}\\\\n\" --compressed -u \"admin@amberry:Amberry39\" -H \"Accept-Encoding: gzip\" -H \"Accept: application/json;charset=utf-8\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/metadata\" -o C:/temp/ms_meta.json)",
+      "Bash(curl -s --compressed -u \"admin@amberry:Amberry39\" -H \"Accept-Encoding: gzip\" -H \"Accept: application/json;charset=utf-8\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/metadata/attributes\" -o C:/temp/ms_attrs.json)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('C:/temp/ms_attrs.json',encoding='utf-8'\\)\\); [print\\(a.get\\('id'\\),'|',a.get\\('name'\\),'|',a.get\\('type'\\)\\) for a in d.get\\('rows',[]\\)]\")",
+      "Bash(ssh cloud *)",
+      "Bash(python backfill_vkid.py --limit 5)",
+      "Bash(python -c ' *)",
+      "Bash(export VK_TOKEN=$\\(ssh cloud 'cd ~/AuctionBot-Amberry && grep \"^VK_USER_TOKEN=\" .env | cut -d= -f2-'\\))",
+      "Bash(python backfill_vkid.py --apply)",
+      "Bash(tee C:/temp/backfill_run.log)",
+      "Bash(curl -s --compressed -u \"admin@amberry:Amberry39\" -H \"Accept-Encoding: gzip\" \"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/1bea8c6f-fc6f-11ef-0a80-18ca001b0e48\" -o C:/temp/check.json)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('C:/temp/check.json',encoding='utf-8'\\)\\); print\\('name:',d.get\\('name'\\)\\); [print\\(' attr:',a.get\\('name'\\),'=',a.get\\('value'\\)\\) for a in d.get\\('attributes',[]\\)]\")",
+      "Bash(node --check server/moysklad.js)",
+      "Bash(node --check server/config.js)",
+      "Bash(node -e \"import\\('./server/config.js'\\).then\\(\\({config}\\) => { console.log\\('vkIdAttributeId:', config.moysklad.vkIdAttributeId\\); console.log\\('baseUrl:', config.moysklad.baseUrl\\); }\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
