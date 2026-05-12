@@ -1,0 +1,7 @@
+.git
+.claude
+.env
+logs
+node_modules
+V-Amber.zip
+npm-debug.log*

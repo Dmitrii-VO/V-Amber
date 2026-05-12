@@ -1,0 +1,11 @@
+services:
+  v-amber:
+    build:
+      context: .
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped

@@ -62,7 +62,7 @@ if [ ! -f .env ]; then
   NEED_SETUP=true
 else
   # .env есть, но ключ SpeechKit пустой — тоже запускаем мастер
-  SPEECHKIT_VAL=$(grep -E '^YANDEX_SPEECHKIT_API_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ' || echo "")
+  SPEECHKIT_VAL=$(grep -E '^YANDEX_SPEECHKIT_API_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/#.*$//' | tr -d ' ' || echo "")
   if [ -z "$SPEECHKIT_VAL" ]; then
     NEED_SETUP=true
   fi
@@ -195,7 +195,7 @@ if [ ! -d node_modules ]; then
 fi
 
 # ── запуск ─────────────────────────────────────
-PORT=$(grep -E '^PORT=' .env 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ' || echo "8080")
+PORT=$(grep -E '^PORT=' .env 2>/dev/null | head -1 | cut -d= -f2 | sed 's/#.*$//' | tr -d ' ' || echo "8080")
 PORT="${PORT:-8080}"
 
 echo ""
