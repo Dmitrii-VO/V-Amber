@@ -67,3 +67,4 @@ Preserve these exactly in code, logs, and comments:
 - `article-extractor.js` has a regex path and a YandexGPT fallback; changes to number parsing must handle both.
 - `safe-mode.js` wraps external write methods for Telegram, MoySklad, and VK. Keep write-blocking behavior explicit when adding new side effects.
 - `todo.md` tracks open bugs and planned features (Russian); check it before implementing adjacent features.
+- Versioning is automated: pushing to `main` triggers `.github/workflows/release.yml`, which patch-bumps `package.json` and publishes a matching `vX.Y.Z` release. For minor/major bumps, edit `version` in the same commit. The startup check in `server/version-check.js` uses the latest release tag to detect outdated installs.

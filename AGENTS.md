@@ -60,6 +60,12 @@ Main entrypoints and modules:
 - `server/safe-mode.js`: process-wide safe mode state and write guards.
 - `server/session-log.js`: per-stream Markdown session log writer.
 - `server/logger.js`: JSON console/file logger.
+- `server/version-check.js`: startup check against GitHub Releases that prints
+  a console banner when local `package.json` version is behind the latest tag.
+  Disabled by `DISABLE_UPDATE_CHECK=1`.
+- `.github/workflows/release.yml`: on push to `main`, auto-bumps patch version
+  (or honors a manual bump in `package.json`) and publishes the matching
+  `vX.Y.Z` GitHub Release. Skips itself on commits containing `[skip ci]`.
 - `Dockerfile`: Node 20 production image for the MVP.
 - `docker-compose.yml`: local one-service runtime, `.env` injection, port
   mapping, and `logs/` bind mount.
@@ -76,8 +82,22 @@ Only use commands backed by repo config:
 `npm install` is valid for installing dependencies from `package-lock.json`, but
 it is not a verification command.
 
-No verified test, lint, standalone build, Redis, SQLite migration, or CI
-commands exist in repo yet. Do not invent them.
+No verified test, lint, standalone build, Redis, or SQLite migration commands
+exist in repo yet. Do not invent them. The only CI in the repo is the auto
+release workflow described above; do not add unrelated jobs to it.
+
+# Release process
+
+Versions follow `package.json` `version` ↔ git tag `vX.Y.Z`. The release
+workflow runs on every push to `main`:
+
+- For routine commits, it bumps patch automatically and tags the result.
+- For minor or major bumps, edit `version` in `package.json` in the same push;
+  the workflow will use that value verbatim.
+
+The startup banner in `server/version-check.js` relies on this convention — if
+the workflow is disabled or tags are created out of band, the check will
+silently no-op rather than fail the server.
 
 # Environment and runtime assumptions
 
