@@ -9,7 +9,7 @@ async function main() {
   await checkForUpdates();
 
   const telegram = createTelegramNotifier(config.telegram);
-  const httpServer = createStaticServer({ telegram });
+  const httpServer = createStaticServer({ telegram, config });
   attachWsServer(httpServer, config, { telegram });
 
   httpServer.on("error", (error) => {

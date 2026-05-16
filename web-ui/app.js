@@ -53,6 +53,16 @@ const elements = {
   safeModeToggle: $("safeModeToggle"),
   safeModeBadge: $("safeModeBadge"),
   sendLogsButton: $("sendLogsButton"),
+  sendLogsModal: $("sendLogsModal"),
+  sendLogsClose: $("sendLogsClose"),
+  sendLogsCancel: $("sendLogsCancel"),
+  sendLogsSubmit: $("sendLogsSubmit"),
+  sendLogsDownload: $("sendLogsDownload"),
+  sendLogsNote: $("sendLogsNote"),
+  sendLogsMeta: $("sendLogsMeta"),
+  sendLogsFileCount: $("sendLogsFileCount"),
+  sendLogsFileList: $("sendLogsFileList"),
+  sendLogsStatus: $("sendLogsStatus"),
 };
 
 const state = {
@@ -676,30 +686,139 @@ elements.safeModeToggle.addEventListener("change", (event) => {
   });
 });
 
-elements.sendLogsButton.addEventListener("click", async () => {
-  const button = elements.sendLogsButton;
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "Отправляю...";
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "?";
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} МБ`;
+}
+
+function setSendLogsStatus(text, level) {
+  const el = elements.sendLogsStatus;
+  if (!text) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = text;
+  el.classList.toggle("ok", level === "ok");
+  el.classList.toggle("error", level === "error");
+}
+
+function setSendLogsBusy(busy) {
+  elements.sendLogsSubmit.disabled = busy;
+  elements.sendLogsDownload.disabled = busy;
+  elements.sendLogsCancel.disabled = busy;
+  elements.sendLogsClose.disabled = busy;
+}
+
+function closeSendLogsModal() {
+  elements.sendLogsModal.hidden = true;
+  setSendLogsStatus("", null);
+}
+
+async function loadSendLogsPreview() {
+  elements.sendLogsMeta.textContent = "Загружаю список файлов...";
+  elements.sendLogsFileList.innerHTML = "";
+  elements.sendLogsFileCount.textContent = "0";
+  elements.sendLogsSubmit.disabled = true;
+  elements.sendLogsDownload.disabled = true;
+  try {
+    const response = await fetch("/api/send-logs/preview");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+    elements.sendLogsFileCount.textContent = String(payload.files.length);
+    elements.sendLogsFileList.innerHTML = payload.files.map((f) => {
+      const note = f.truncated ? ` (обрезано из ${formatBytes(f.originalBytes)})` : "";
+      return `<li><span>${f.name}</span><span>${formatBytes(f.bytes)}${note}</span></li>`;
+    }).join("");
+    const cooldownLabel = payload.cooldownMs > 0
+      ? ` · повторно через ${Math.ceil(payload.cooldownMs / 1000)} с`
+      : "";
+    const telegramLabel = payload.telegramConfigured ? "Telegram настроен" : "Telegram не настроен — доступно только скачивание";
+    elements.sendLogsMeta.textContent =
+      `Всего: ${formatBytes(payload.totalBytes)} в исходном виде · ${telegramLabel}${cooldownLabel}`;
+    elements.sendLogsSubmit.disabled = !payload.telegramConfigured || payload.cooldownMs > 0;
+    elements.sendLogsDownload.disabled = false;
+  } catch (error) {
+    elements.sendLogsMeta.textContent = `Ошибка: ${error.message}`;
+  }
+}
+
+function openSendLogsModal() {
+  elements.sendLogsModal.hidden = false;
+  setSendLogsStatus("", null);
+  elements.sendLogsNote.value = "";
+  loadSendLogsPreview();
+}
+
+elements.sendLogsButton.addEventListener("click", openSendLogsModal);
+elements.sendLogsClose.addEventListener("click", closeSendLogsModal);
+elements.sendLogsCancel.addEventListener("click", closeSendLogsModal);
+elements.sendLogsModal.addEventListener("click", (event) => {
+  if (event.target === elements.sendLogsModal) closeSendLogsModal();
+});
+
+elements.sendLogsSubmit.addEventListener("click", async () => {
+  const userNote = elements.sendLogsNote.value.trim();
+  setSendLogsBusy(true);
+  setSendLogsStatus("Отправляю в Telegram...", null);
   logEvent("Отправка логов разработчику...", "info");
   try {
-    const response = await fetch("/api/send-logs", { method: "POST" });
+    const response = await fetch("/api/send-logs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userNote }),
+    });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const reason = payload?.error || `HTTP ${response.status}`;
-      throw new Error(payload?.message ? `${reason}: ${payload.message}` : reason);
+      const detail = payload?.retryAfterMs ? ` (повторите через ${Math.ceil(payload.retryAfterMs / 1000)} с)` : "";
+      throw new Error(`${payload?.message || reason}${detail}`);
     }
-    const sizeKb = Math.max(1, Math.round((payload.size || 0) / 1024));
-    logEvent(`Логи отправлены (${sizeKb} КБ)`, "success");
-    button.textContent = "Отправлено";
-    setTimeout(() => {
-      button.textContent = originalText;
-      button.disabled = false;
-    }, 2500);
+    const totalKb = Math.max(1, Math.round((payload.totalBytes || 0) / 1024));
+    const partsLabel = payload.parts?.length > 1 ? ` в ${payload.parts.length} частях` : "";
+    setSendLogsStatus(`Отправлено${partsLabel} (${totalKb} КБ)`, "ok");
+    logEvent(`Логи отправлены${partsLabel} (${totalKb} КБ)`, "success");
+    setTimeout(closeSendLogsModal, 1500);
   } catch (error) {
+    setSendLogsStatus(`Не удалось отправить: ${error.message}`, "error");
     handleError(error, "Не удалось отправить логи");
-    button.textContent = originalText;
-    button.disabled = false;
+  } finally {
+    setSendLogsBusy(false);
+  }
+});
+
+elements.sendLogsDownload.addEventListener("click", async () => {
+  const userNote = elements.sendLogsNote.value.trim();
+  setSendLogsBusy(true);
+  setSendLogsStatus("Готовлю архив...", null);
+  try {
+    const response = await fetch("/api/send-logs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userNote, download: true }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = /filename="([^"]+)"/.exec(disposition);
+    const filename = match ? match[1] : "v-amber-logs.zip";
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setSendLogsStatus(`Архив скачан (${formatBytes(blob.size)})`, "ok");
+    logEvent(`Логи скачаны (${formatBytes(blob.size)})`, "success");
+  } catch (error) {
+    setSendLogsStatus(`Не удалось скачать: ${error.message}`, "error");
+    handleError(error, "Не удалось скачать логи");
+  } finally {
+    setSendLogsBusy(false);
   }
 });
 

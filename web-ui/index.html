@@ -191,6 +191,31 @@
 
     <input id="wsUrlInput" type="hidden" value="ws://localhost:8080/ws/stt" />
 
+    <div id="sendLogsModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Отправить логи разработчику</h3>
+          <button id="sendLogsClose" class="btn btn--ghost" aria-label="Закрыть">×</button>
+        </div>
+        <div class="modal-body">
+          <label class="modal-label" for="sendLogsNote">Что случилось? (необязательно)</label>
+          <textarea id="sendLogsNote" class="input modal-textarea" rows="3" maxlength="4000"
+            placeholder="Опишите проблему: что делали, что ожидали, что увидели"></textarea>
+          <div class="modal-meta" id="sendLogsMeta">Подготовка…</div>
+          <details class="modal-files">
+            <summary>Файлы в архиве (<span id="sendLogsFileCount">0</span>)</summary>
+            <ul id="sendLogsFileList"></ul>
+          </details>
+          <div id="sendLogsStatus" class="modal-status" hidden></div>
+        </div>
+        <div class="modal-actions">
+          <button id="sendLogsCancel" class="btn btn--ghost">Отмена</button>
+          <button id="sendLogsDownload" class="btn btn--ghost">Скачать ZIP</button>
+          <button id="sendLogsSubmit" class="btn btn--primary">Отправить в Telegram</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="./app.js"></script>
   </body>
 </html>

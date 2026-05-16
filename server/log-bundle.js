@@ -1,37 +1,74 @@
 import { readFile, readdir, stat } from "node:fs/promises";
+import { release } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
 import { logger } from "./logger.js";
+import { getInstallId } from "./install-id.js";
+import { buildZip } from "./zip-writer.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const logsDir = join(__dirname, "..", "logs");
 const sessionsDir = join(logsDir, "sessions");
 const serverLogPath = join(logsDir, "server.log");
+const pkgPath = join(__dirname, "..", "package.json");
 
-const MAX_BUNDLE_BYTES = 40 * 1024 * 1024;
-const MAX_SERVER_LOG_BYTES = 25 * 1024 * 1024;
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const PART_SIZE = 40 * 1024 * 1024;
 
-async function readTail(filePath, maxBytes) {
-  const stats = await stat(filePath);
-  if (stats.size <= maxBytes) {
-    return await readFile(filePath, "utf8");
-  }
-  const { open } = await import("node:fs/promises");
-  const handle = await open(filePath, "r");
+async function readPackageVersion() {
   try {
-    const start = stats.size - maxBytes;
-    const buffer = Buffer.alloc(maxBytes);
-    await handle.read(buffer, 0, maxBytes, start);
-    const text = buffer.toString("utf8");
-    const newlineAt = text.indexOf("\n");
-    return newlineAt >= 0 ? text.slice(newlineAt + 1) : text;
-  } finally {
-    await handle.close();
+    const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
   }
 }
 
-async function listSessionFiles() {
+async function readMaybe(filePath) {
+  try {
+    const stats = await stat(filePath);
+    if (stats.size > MAX_FILE_BYTES) {
+      const { open } = await import("node:fs/promises");
+      const handle = await open(filePath, "r");
+      try {
+        const start = stats.size - MAX_FILE_BYTES;
+        const buffer = Buffer.alloc(MAX_FILE_BYTES);
+        await handle.read(buffer, 0, MAX_FILE_BYTES, start);
+        const newlineAt = buffer.indexOf(0x0a);
+        return {
+          name: filePath,
+          buffer: newlineAt >= 0 ? buffer.slice(newlineAt + 1) : buffer,
+          truncated: true,
+          originalSize: stats.size,
+        };
+      } finally {
+        await handle.close();
+      }
+    }
+    return {
+      name: filePath,
+      buffer: await readFile(filePath),
+      truncated: false,
+      originalSize: stats.size,
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    logger.warn("log-bundle", "read_failed", { filePath, error: error?.message || String(error) });
+    return null;
+  }
+}
+
+async function collectLogFiles() {
+  const files = [];
+
+  const main = await readMaybe(serverLogPath);
+  if (main) files.push({ archiveName: "server.log", ...main });
+
+  for (let i = 1; i <= logger.rotateKeep; i += 1) {
+    const rotated = await readMaybe(logger.rotatedPath(i));
+    if (rotated) files.push({ archiveName: `server.log.${i}`, ...rotated });
+  }
+
   try {
     const entries = await readdir(sessionsDir, { withFileTypes: true });
     const mdFiles = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".md"));
@@ -42,62 +79,96 @@ async function listSessionFiles() {
         return { name: entry.name, fullPath, mtimeMs: stats.mtimeMs };
       }),
     );
-    return withStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    logger.warn("log-bundle", "sessions_listing_failed", { error: error?.message || String(error) });
-    return [];
-  }
-}
-
-function separator(title) {
-  return `\n\n===== ${title} =====\n`;
-}
-
-export async function buildLogBundle() {
-  const parts = [];
-  let totalBytes = 0;
-
-  parts.push(`V-Amber log bundle\nGenerated: ${new Date().toISOString()}\n`);
-
-  try {
-    const serverLogText = await readTail(serverLogPath, MAX_SERVER_LOG_BYTES);
-    parts.push(separator(`server.log (tail ${serverLogText.length} bytes)`));
-    parts.push(serverLogText);
-    totalBytes += serverLogText.length;
-  } catch (error) {
-    parts.push(separator("server.log"));
-    parts.push(`<unable to read: ${error?.message || String(error)}>`);
-  }
-
-  const sessionFiles = await listSessionFiles();
-  for (const file of sessionFiles) {
-    if (totalBytes >= MAX_BUNDLE_BYTES) {
-      parts.push(separator("truncated"));
-      parts.push(`<bundle reached ${MAX_BUNDLE_BYTES} byte cap; remaining session files skipped>`);
-      break;
+    withStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const entry of withStats) {
+      const data = await readMaybe(entry.fullPath);
+      if (data) files.push({ archiveName: `sessions/${entry.name}`, ...data });
     }
-    try {
-      const raw = await readFile(file.fullPath, "utf8");
-      parts.push(separator(`sessions/${file.name}`));
-      parts.push(raw);
-      totalBytes += raw.length;
-    } catch (error) {
-      parts.push(separator(`sessions/${file.name}`));
-      parts.push(`<unable to read: ${error?.message || String(error)}>`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      logger.warn("log-bundle", "sessions_listing_failed", { error: error?.message || String(error) });
     }
   }
 
-  const text = parts.join("");
-  const gz = gzipSync(Buffer.from(text, "utf8"));
+  return files;
+}
+
+export async function listBundleFiles() {
+  const files = await collectLogFiles();
+  return files.map((f) => ({
+    name: f.archiveName,
+    bytes: f.buffer.length,
+    originalBytes: f.originalSize,
+    truncated: f.truncated,
+  }));
+}
+
+function activeIntegrationFlags(config) {
+  return {
+    telegram: Boolean(config?.telegram?.botToken && (config.telegram.primaryChatId || config.telegram.chatIds?.length)),
+    vk: Boolean(config?.vk?.token),
+    moysklad: Boolean(config?.moysklad?.login && config.moysklad?.password),
+    yandexgpt: Boolean(config?.articleExtraction?.yandexgpt?.apiKey),
+    speechkit: Boolean(config?.speechkit?.apiKey),
+  };
+}
+
+export async function buildLogBundle({ userNote = "", config } = {}) {
+  const files = await collectLogFiles();
+  const [installId, version] = await Promise.all([getInstallId(), readPackageVersion()]);
+
+  const manifest = {
+    installId,
+    vamberVersion: version,
+    node: process.version,
+    platform: `${process.platform} ${process.arch}`,
+    osRelease: release(),
+    generatedAt: new Date().toISOString(),
+    userNote: typeof userNote === "string" ? userNote.slice(0, 4000) : "",
+    integrations: activeIntegrationFlags(config),
+    files: files.map((f) => ({
+      name: f.archiveName,
+      bytes: f.buffer.length,
+      originalBytes: f.originalSize,
+      truncated: f.truncated,
+    })),
+  };
+
+  const entries = [
+    { name: "manifest.json", content: JSON.stringify(manifest, null, 2) },
+    ...files.map((f) => ({ name: f.archiveName, content: f.buffer })),
+  ];
+
+  const zipBuffer = buildZip(entries);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
+  const parts = [];
+  if (zipBuffer.length <= PART_SIZE) {
+    parts.push({
+      filename: `v-amber-logs-${stamp}.zip`,
+      buffer: zipBuffer,
+      partNumber: 1,
+      partTotal: 1,
+    });
+  } else {
+    const total = Math.ceil(zipBuffer.length / PART_SIZE);
+    for (let i = 0; i < total; i += 1) {
+      const start = i * PART_SIZE;
+      const end = Math.min(start + PART_SIZE, zipBuffer.length);
+      parts.push({
+        filename: `v-amber-logs-${stamp}.part-${i + 1}-of-${total}.zip`,
+        buffer: zipBuffer.subarray(start, end),
+        partNumber: i + 1,
+        partTotal: total,
+      });
+    }
+  }
+
   return {
-    filename: `v-amber-logs-${stamp}.txt.gz`,
-    buffer: gz,
-    contentType: "application/gzip",
-    uncompressedBytes: text.length,
-    compressedBytes: gz.length,
-    sessionFileCount: sessionFiles.length,
+    parts,
+    totalBytes: zipBuffer.length,
+    fileCount: files.length,
+    manifest,
+    singleFilename: `v-amber-logs-${stamp}.zip`,
   };
 }

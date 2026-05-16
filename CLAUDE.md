@@ -42,6 +42,8 @@ Most business orchestration lives in `server/ws-server.js`. It owns the active-l
 | `GET /health` | Returns `{ ok: true }` |
 | `GET /api/safe-mode` | Returns current safe mode state |
 | `POST /api/safe-mode` | Accepts `{ "enabled": true|false }` |
+| `GET /api/send-logs/preview` | Lists files that would be sent + cooldown |
+| `POST /api/send-logs` | Sends ZIP bundle to Telegram (or returns it for download with `{download:true}`) |
 
 ## Configuration
 

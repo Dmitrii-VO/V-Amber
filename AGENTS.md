@@ -63,6 +63,13 @@ Main entrypoints and modules:
 - `server/version-check.js`: startup check against GitHub Releases that prints
   a console banner when local `package.json` version is behind the latest tag.
   Disabled by `DISABLE_UPDATE_CHECK=1`.
+- `server/log-bundle.js`: collects `server.log` (+ rotated copies) and
+  `logs/sessions/*.md` into a ZIP with a `manifest.json` (install ID,
+  version, integrations, user note). Splits >40 MB into sequential parts.
+- `server/install-id.js`: persists a per-installation UUID in
+  `logs/install-id` for deduplicating bug reports.
+- `server/zip-writer.js`: dependency-free ZIP archive builder (deflate +
+  CRC32) used by the log bundle.
 - `.github/workflows/release.yml`: on push to `main`, auto-bumps patch version
   (or honors a manual bump in `package.json`) and publishes the matching
   `vX.Y.Z` GitHub Release. Skips itself on commits containing `[skip ci]`.
@@ -119,6 +126,13 @@ HTTP surface:
 - `GET /health` returns `{ ok: true }`.
 - `GET /api/safe-mode` returns current safe mode state.
 - `POST /api/safe-mode` accepts JSON `{ "enabled": true|false }`.
+- `GET /api/send-logs/preview` returns the list of files that would be
+  included in the diagnostic bundle plus telegram-configured / cooldown
+  status.
+- `POST /api/send-logs` accepts JSON `{ "userNote": "...", "download": false }`.
+  Default behavior ships the ZIP to the configured Telegram chat (rate-limited
+  to once per 60 s). With `download: true` the same archive is streamed back
+  as `application/zip` for the operator to save locally.
 
 Web UI sends microphone PCM frames over WebSocket. It also lets the operator
 choose a microphone, enter or persist a VK live video URL, start/stop streaming,
