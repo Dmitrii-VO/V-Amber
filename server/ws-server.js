@@ -372,9 +372,12 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     function isFatalCommentReadError(error) {
+      // Genuinely unrecoverable for THIS video: access denied, bad params,
+      // video missing. Auth errors (code 5) are LOUD but recoverable on
+      // token refresh, so they no longer kill the poll loop.
       const errorCode = getVkApiErrorCode(error);
       if (errorCode !== null) {
-        return [5, 15, 100].includes(errorCode);
+        return [15, 100].includes(errorCode);
       }
 
       const message = error instanceof Error ? error.message : String(error);
@@ -396,7 +399,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         while (generation === commentPollingGeneration && activeLot?.lotSessionId === lotSessionId) {
           try {
-            const comments = await vk.getComments(50);
+            const comments = await vk.getComments(100);
             if (generation !== commentPollingGeneration || activeLot?.lotSessionId !== lotSessionId) {
               break;
             }
@@ -476,28 +479,58 @@ export function attachWsServer(httpServer, config, services = {}) {
               void processReservationEvent(currentLot, event);
             }
 
+            if (consecutiveFailures > 0) {
+              logger.info("vk", "comment_poll_recovered", {
+                connectionId,
+                lotSessionId,
+                afterFailures: consecutiveFailures,
+              });
+              sendJson(websocket, { type: "info", message: "VK комменты снова приходят" });
+            }
             consecutiveFailures = 0;
           } catch (error) {
             consecutiveFailures += 1;
+            const errorCode = getVkApiErrorCode(error);
             logger.warn("vk", "comment_poll_failed", {
               connectionId,
               lotSessionId,
               consecutiveFailures,
+              errorCode,
               error,
             });
 
-            if (isFatalCommentReadError(error) || consecutiveFailures >= 5) {
+            if (isFatalCommentReadError(error)) {
               logger.warn("vk", "comment_poll_stopped", {
                 connectionId,
                 lotSessionId,
-                reason: isFatalCommentReadError(error) ? "fatal_api_error" : "too_many_failures",
+                reason: "fatal_api_error",
+                errorCode,
+              });
+              sendJson(websocket, {
+                type: "error",
+                message: `VK comments недоступны для этого видео: ${error?.message || "unknown"}`,
               });
               break;
             }
+
+            // Notify operator ONCE per outage instead of breaking the loop.
+            if (consecutiveFailures === 5) {
+              const hint = errorCode === 5
+                ? "истёк VK-токен — обновите VK_TOKEN в .env и перезапустите"
+                : "проверьте сеть/VK API";
+              sendJson(websocket, {
+                type: "warning",
+                message: `VK комменты не приходят (${consecutiveFailures} ошибок подряд): ${hint}`,
+              });
+            }
           }
 
+          // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
+          const delayMs = consecutiveFailures === 0
+            ? 2000
+            : Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
           await new Promise((resolve) => {
-            setTimeout(resolve, 2000);
+            setTimeout(resolve, delayMs);
           });
         }
 

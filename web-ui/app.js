@@ -511,7 +511,17 @@ function handleServerMessage(payload) {
   }
 
   if (payload.type === "error") {
-    logEvent(`SpeechKit error: ${payload.message || "unknown"}`, "err");
+    logEvent(payload.message || "Ошибка", "err");
+    return;
+  }
+
+  if (payload.type === "warning") {
+    logEvent(payload.message || "Предупреждение", "warn");
+    return;
+  }
+
+  if (payload.type === "info") {
+    logEvent(payload.message || "", "info");
     return;
   }
 

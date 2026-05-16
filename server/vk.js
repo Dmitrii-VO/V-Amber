@@ -163,12 +163,16 @@ export function createVkPublisher(config) {
   }
 
   async function fetchComments(count = 20) {
+    // sort=desc → VK returns the LATEST `count` comments. With sort=asc on a
+    // long livestream this would return the earliest comments forever and
+    // miss every reservation. Items are re-sorted ascending on the caller
+    // side via id, so behaviour downstream is unchanged.
     const response = await callVkApi("video.getComments", {
       owner_id: liveOwnerId,
       video_id: liveVideoId,
-      count,
+      count: Math.min(Math.max(count, 1), 100),
       extended: 1,
-      sort: "asc",
+      sort: "desc",
     });
 
     return {

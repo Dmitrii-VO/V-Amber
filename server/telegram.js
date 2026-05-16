@@ -204,12 +204,31 @@ export function createTelegramNotifier(config) {
     }
   }
 
+  async function discardBacklog() {
+    // Telegram retains updates up to 24 h. On startup we don't want to
+    // execute /скидка commands or stale callback_query that arrived while
+    // the server was down — they belong to a previous broadcast. Pull the
+    // single most recent update with negative offset and advance lastUpdateId
+    // past it without acting on it.
+    try {
+      const payload = await callTelegram("getUpdates", { offset: -1, limit: 1, timeout: 0 });
+      const latest = (payload.result || [])[0];
+      if (latest?.update_id) {
+        lastUpdateId = latest.update_id;
+        logger.info("telegram", "backlog_discarded", { lastUpdateId });
+      }
+    } catch (error) {
+      logger.warn("telegram", "backlog_discard_failed", { error });
+    }
+  }
+
   async function pollUpdatesLoop() {
     if (!isEnabled || pollingActive) {
       return;
     }
 
     pollingActive = true;
+    await discardBacklog();
 
     while (pollingStarted) {
       try {
