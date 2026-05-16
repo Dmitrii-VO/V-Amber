@@ -851,7 +851,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
           sessionLog.logSessionStart({ connectionId, vkLiveVideoUrl: payload.vkLiveVideoUrl || null });
           activeRunId = runId;
-          session = new SpeechKitStreamingSession(config.speechkit, {
+          const speechKitHandlers = {
             onPartial: ({ text, latencyMs }) => {
               if (runId !== activeRunId) {
                 return;
@@ -1021,21 +1021,34 @@ export function attachWsServer(httpServer, config, services = {}) {
               sendJson(websocket, { type: "error", message: error.message });
             },
             onEnd: () => {
+              // On manual stop the handler clears activeRunId before close(),
+              // so guard below skips reconnect for operator-initiated stops.
               if (runId !== activeRunId) {
                 return;
               }
 
-              logger.info("speechkit", "stream_ended", { connectionId });
-              publishLotClosed(activeLot, "stream_end");
-              sessionLog.logSessionEnd({ reason: "stream_end" });
-              activeRunId = null;
+              // Yandex SpeechKit closes a streaming gRPC session after ~10 min.
+              // Re-open transparently so the operator does not have to restart.
+              logger.info("speechkit", "stream_ended", { connectionId, autoReconnect: true });
               session?.close();
-              session = null;
-              resetCustomerOrders();
-              resetDetectionState();
-              emitState();
+              try {
+                session = new SpeechKitStreamingSession(config.speechkit, speechKitHandlers, { connectionId });
+                logger.info("speechkit", "stream_auto_reconnected", { connectionId });
+                sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
+              } catch (error) {
+                logger.error("speechkit", "stream_auto_reconnect_failed", { connectionId, error });
+                publishLotClosed(activeLot, "stream_end");
+                sessionLog.logSessionEnd({ reason: "stream_end" });
+                activeRunId = null;
+                session = null;
+                resetCustomerOrders();
+                resetDetectionState();
+                emitState();
+                sendJson(websocket, { type: "error", message: "STT-поток оборвался и не удалось перезапустить" });
+              }
             },
-          }, { connectionId });
+          };
+          session = new SpeechKitStreamingSession(config.speechkit, speechKitHandlers, { connectionId });
 
           resetDetectionState();
           emitState();
