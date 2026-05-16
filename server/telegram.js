@@ -400,8 +400,76 @@ export function createTelegramNotifier(config) {
     throw lastError;
   }
 
+  async function sendDocument({ filename, buffer, contentType = "application/octet-stream", caption = "", meta = {} }) {
+    if (!isEnabled) {
+      logger.info("telegram", "send_skipped_not_configured", { ...meta, kind: "document" });
+      return { ok: false, skipped: true };
+    }
+
+    let lastError = null;
+    let firstMessageId = null;
+    const failedChatIds = [];
+
+    for (const chatId of chatIds) {
+      let delivered = false;
+
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const formData = new FormData();
+          formData.set("chat_id", chatId);
+          if (caption) {
+            formData.set("caption", caption);
+          }
+          formData.set("document", new Blob([buffer], { type: contentType }), filename);
+
+          const payload = await callTelegram("sendDocument", null, { body: formData });
+
+          if (firstMessageId === null) {
+            firstMessageId = payload.result?.message_id ?? null;
+          }
+
+          logger.info("telegram", "document_sent", {
+            ...meta,
+            attempt,
+            chatId,
+            filename,
+            size: buffer.length,
+            messageId: payload.result?.message_id,
+          });
+
+          delivered = true;
+          break;
+        } catch (error) {
+          lastError = error;
+          logger.warn("telegram", "document_send_failed", {
+            ...meta,
+            attempt,
+            chatId,
+            filename,
+            error,
+          });
+
+          if (attempt < 3) {
+            await delay(400 * attempt);
+          }
+        }
+      }
+
+      if (!delivered) {
+        failedChatIds.push(chatId);
+      }
+    }
+
+    if (firstMessageId !== null) {
+      return { ok: true, skipped: false, messageId: firstMessageId, failedChatIds };
+    }
+
+    throw lastError;
+  }
+
   return {
     isEnabled,
+    sendDocument,
     async sendArticleDetected({ code, lotSessionId, transcript, productCard }) {
       ensurePollingStarted();
       const text = buildArticleCardText({ code, lotSessionId, transcript, productCard });

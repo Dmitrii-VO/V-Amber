@@ -47,10 +47,10 @@ function getVkApiErrorCode(error) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function attachWsServer(httpServer, config) {
+export function attachWsServer(httpServer, config, services = {}) {
   const wsServer = new WebSocketServer({ noServer: true });
   const telegram = wrapWithSafeMode(
-    createTelegramNotifier(config.telegram),
+    services.telegram || createTelegramNotifier(config.telegram),
     ["sendArticleDetected", "sendAmbiguousArticle", "sendDiscountApplied"],
     "telegram",
   );

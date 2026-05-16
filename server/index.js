@@ -3,12 +3,14 @@ import { createStaticServer } from "./http-server.js";
 import { attachWsServer } from "./ws-server.js";
 import { logger } from "./logger.js";
 import { checkForUpdates } from "./version-check.js";
+import { createTelegramNotifier } from "./telegram.js";
 
 async function main() {
   await checkForUpdates();
 
-  const httpServer = createStaticServer();
-  attachWsServer(httpServer, config);
+  const telegram = createTelegramNotifier(config.telegram);
+  const httpServer = createStaticServer({ telegram });
+  attachWsServer(httpServer, config, { telegram });
 
   httpServer.on("error", (error) => {
     logger.error("http", "server_listen_failed", {

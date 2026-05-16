@@ -5,6 +5,7 @@ import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logger } from "./logger.js";
 import { isSafeMode, setSafeMode } from "./safe-mode.js";
+import { buildLogBundle } from "./log-bundle.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = normalize(join(__dirname, "..", "web-ui"));
@@ -27,7 +28,9 @@ function resolveAssetPath(urlPathname) {
   return resolvedPath;
 }
 
-export function createStaticServer() {
+export function createStaticServer({ telegram } = {}) {
+  let logsInFlight = false;
+
   return createServer(async (request, response) => {
     if (!request.url) {
       response.writeHead(400).end("Bad request");
@@ -47,6 +50,57 @@ export function createStaticServer() {
     if (pathname === "/health") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (pathname === "/api/send-logs") {
+      if (request.method !== "POST") {
+        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
+        response.end(JSON.stringify({ error: "method_not_allowed" }));
+        return;
+      }
+
+      if (!telegram?.isEnabled) {
+        logger.warn("http", "send_logs_not_configured");
+        response.writeHead(503, { "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "telegram_not_configured" }));
+        return;
+      }
+
+      if (logsInFlight) {
+        response.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "already_in_progress" }));
+        return;
+      }
+
+      logsInFlight = true;
+      try {
+        const bundle = await buildLogBundle();
+        const caption =
+          `Логи V-Amber\n` +
+          `Сессий: ${bundle.sessionFileCount}\n` +
+          `Размер: ${bundle.compressedBytes} байт (распакованный ${bundle.uncompressedBytes})`;
+        const result = await telegram.sendDocument({
+          filename: bundle.filename,
+          buffer: bundle.buffer,
+          contentType: bundle.contentType,
+          caption,
+          meta: { kind: "log_bundle" },
+        });
+        logger.info("http", "logs_sent", {
+          filename: bundle.filename,
+          size: bundle.compressedBytes,
+          messageId: result?.messageId ?? null,
+        });
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ ok: true, filename: bundle.filename, size: bundle.compressedBytes }));
+      } catch (error) {
+        logger.error("http", "logs_send_failed", { error: error?.message || String(error) });
+        response.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "send_failed", message: error?.message || String(error) }));
+      } finally {
+        logsInFlight = false;
+      }
       return;
     }
 

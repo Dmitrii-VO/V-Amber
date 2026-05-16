@@ -52,6 +52,7 @@ const elements = {
 
   safeModeToggle: $("safeModeToggle"),
   safeModeBadge: $("safeModeBadge"),
+  sendLogsButton: $("sendLogsButton"),
 };
 
 const state = {
@@ -673,6 +674,33 @@ elements.safeModeToggle.addEventListener("change", (event) => {
     elements.safeModeToggle.checked = state.safeMode;
     handleError(error, "Safe mode: не удалось переключить");
   });
+});
+
+elements.sendLogsButton.addEventListener("click", async () => {
+  const button = elements.sendLogsButton;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Отправляю...";
+  logEvent("Отправка логов разработчику...", "info");
+  try {
+    const response = await fetch("/api/send-logs", { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const reason = payload?.error || `HTTP ${response.status}`;
+      throw new Error(payload?.message ? `${reason}: ${payload.message}` : reason);
+    }
+    const sizeKb = Math.max(1, Math.round((payload.size || 0) / 1024));
+    logEvent(`Логи отправлены (${sizeKb} КБ)`, "success");
+    button.textContent = "Отправлено";
+    setTimeout(() => {
+      button.textContent = originalText;
+      button.disabled = false;
+    }, 2500);
+  } catch (error) {
+    handleError(error, "Не удалось отправить логи");
+    button.textContent = originalText;
+    button.disabled = false;
+  }
 });
 
 elements.toggleAdvanced.addEventListener("click", () => {
