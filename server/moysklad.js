@@ -190,8 +190,8 @@ export function createMoySkladClient(config) {
 
     vkIdAttributeResolvePromise = (async () => {
       try {
-        const metadata = await requestJson("entity/counterparty/metadata");
-        const attributes = Array.isArray(metadata?.attributes) ? metadata.attributes : [];
+        const payload = await requestJson("entity/counterparty/metadata/attributes");
+        const attributes = Array.isArray(payload?.rows) ? payload.rows : [];
         const match = attributes.find((attr) => attr?.name === vkIdAttributeName);
         if (match?.id) {
           resolvedVkIdAttributeId = match.id;
