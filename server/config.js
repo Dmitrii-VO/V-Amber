@@ -57,6 +57,7 @@ export const config = {
     vkIdAttributeId: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_ID?.trim() || "",
     vkIdAttributeName: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_NAME?.trim() || "VK ID",
     imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
+    requestTimeoutMs: parseIntEnv(process.env.MOYSKLAD_REQUEST_TIMEOUT_MS, 8000),
   },
   articleExtraction: {
     triggers: parseArticleTriggers(process.env.VOICE_ARTICLE_TRIGGERS),

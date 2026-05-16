@@ -68,14 +68,40 @@ function buildProductSnapshot(product, stockRow) {
 export function createMoySkladClient(config) {
   const authHeader = getAuthHeader(config || {});
   const isEnabled = Boolean(config?.baseUrl && authHeader);
+  // Cap every API call. Without this, Node fetch can hang minutes on a TCP
+  // half-open socket; the reservation hot path (findCounterpartyByVkId,
+  // createCustomerOrderReservation) is especially sensitive — a stalled
+  // request blocks the whole бронь queue while customers wait.
+  const requestTimeoutMs = Math.max(1000, Number(config?.requestTimeoutMs || 8000));
+
+  async function fetchWithTimeout(url, init, label) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    try {
+      return await fetch(url, { ...(init || {}), signal: controller.signal });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        const timeoutError = new Error(`MoySklad ${label} timed out after ${requestTimeoutMs}ms`);
+        timeoutError.code = "MOYSKLAD_TIMEOUT";
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function requestJson(path, searchParams) {
-    const response = await fetch(buildApiUrl(config.baseUrl, path, searchParams), {
-      headers: {
-        Authorization: authHeader,
-        Accept: "application/json;charset=utf-8",
+    const response = await fetchWithTimeout(
+      buildApiUrl(config.baseUrl, path, searchParams),
+      {
+        headers: {
+          Authorization: authHeader,
+          Accept: "application/json;charset=utf-8",
+        },
       },
-    });
+      `GET ${path}`,
+    );
 
     if (!response.ok) {
       throw new Error(`MoySklad HTTP ${response.status}`);
@@ -90,15 +116,19 @@ export function createMoySkladClient(config) {
   }
 
   async function patchJson(path, payload) {
-    const response = await fetch(buildApiUrl(config.baseUrl, path), {
-      method: "PUT",
-      headers: {
-        Authorization: authHeader,
-        Accept: "application/json;charset=utf-8",
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      buildApiUrl(config.baseUrl, path),
+      {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          Accept: "application/json;charset=utf-8",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
+      `PUT ${path}`,
+    );
 
     if (!response.ok) {
       throw new Error(`MoySklad HTTP ${response.status}`);
@@ -113,15 +143,19 @@ export function createMoySkladClient(config) {
   }
 
   async function postJson(path, payload) {
-    const response = await fetch(buildApiUrl(config.baseUrl, path), {
-      method: "POST",
-      headers: {
-        Authorization: authHeader,
-        Accept: "application/json;charset=utf-8",
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      buildApiUrl(config.baseUrl, path),
+      {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          Accept: "application/json;charset=utf-8",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
+      `POST ${path}`,
+    );
 
     if (!response.ok) {
       throw new Error(`MoySklad HTTP ${response.status}`);
