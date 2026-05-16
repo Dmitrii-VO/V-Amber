@@ -181,6 +181,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     function getReservationReplyMessage(event) {
+      if (event.status === "out_of_stock") {
+        return "Товар закончился. Бронь не создана.";
+      }
+
       if (event.status === "waitlist_pending") {
         return "Бронь принята. Вы в очереди, подтвердим следующим сообщением.";
       }
@@ -198,6 +202,19 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       return "";
+    }
+
+    function getCommittedReservationCount(state) {
+      return state.events.filter((event) => ["creating_order", "reserved", "reserved_appended"].includes(event.status)).length;
+    }
+
+    function getRemainingAvailableStock(lot, state) {
+      const availableStock = lot?.product?.availableStock;
+      if (typeof availableStock !== "number" || !Number.isFinite(availableStock)) {
+        return null;
+      }
+
+      return Math.max(0, Math.floor(availableStock) - getCommittedReservationCount(state));
     }
 
     function notifyReservationStatus(lot, event) {
@@ -256,6 +273,22 @@ export function attachWsServer(httpServer, config, services = {}) {
           lotSessionId: lot.lotSessionId,
           commentId: event.commentId,
           viewerId: event.viewerId,
+        });
+        emitState();
+        notifyReservationStatus(lot, event);
+        return;
+      }
+
+      const remainingStock = getRemainingAvailableStock(lot, state);
+      if (remainingStock !== null && remainingStock <= 0) {
+        event.status = "out_of_stock";
+        logger.info("vk", "reservation_out_of_stock", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          availableStock: lot.product?.availableStock ?? null,
         });
         emitState();
         notifyReservationStatus(lot, event);
