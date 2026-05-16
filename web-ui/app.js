@@ -832,9 +832,61 @@ elements.sendLogsDownload.addEventListener("click", async () => {
   }
 });
 
+const vkLiveUrlWrap = document.getElementById("vkLiveUrlWrap");
+const vkUrlStatus = document.getElementById("vkUrlStatus");
+
+function setVkUrlStatus(level, text) {
+  if (!vkUrlStatus) return;
+  if (!level) {
+    vkUrlStatus.hidden = true;
+    vkUrlStatus.className = "vk-url-status";
+    vkUrlStatus.textContent = "";
+    state.vkUrlValid = null;
+    return;
+  }
+  vkUrlStatus.hidden = false;
+  vkUrlStatus.className = `vk-url-status ${level}`;
+  vkUrlStatus.textContent = text;
+}
+state.vkUrlValid = null;
+
+let vkUrlValidationToken = 0;
+async function validateVkUrl(url) {
+  const myToken = ++vkUrlValidationToken;
+  if (!url) {
+    setVkUrlStatus(null);
+    return;
+  }
+  setVkUrlStatus("checking", "Проверяю канал...");
+  try {
+    const response = await fetch("/api/vk/validate-url?url=" + encodeURIComponent(url));
+    const payload = await response.json();
+    if (myToken !== vkUrlValidationToken) return;
+    if (payload.ok) {
+      const titleSnippet = payload.title ? ` · ${payload.title.slice(0, 40)}` : "";
+      const liveMark = payload.isLive ? " · LIVE" : "";
+      setVkUrlStatus("ok", `✓ Канал доступен${liveMark}${titleSnippet}`);
+      state.vkUrlValid = true;
+    } else {
+      setVkUrlStatus("error", `✗ ${payload.message || payload.code || "Не могу подтвердить ссылку"}`);
+      state.vkUrlValid = false;
+    }
+  } catch (error) {
+    if (myToken !== vkUrlValidationToken) return;
+    setVkUrlStatus("error", `✗ Ошибка проверки: ${error.message}`);
+    state.vkUrlValid = false;
+  }
+}
+
+let vkUrlDebounce = null;
+function scheduleVkUrlValidation(url) {
+  clearTimeout(vkUrlDebounce);
+  vkUrlDebounce = setTimeout(() => validateVkUrl(url), 400);
+}
+
 elements.toggleAdvanced.addEventListener("click", () => {
-  elements.vkLiveUrlInput.hidden = !elements.vkLiveUrlInput.hidden;
-  if (!elements.vkLiveUrlInput.hidden) elements.vkLiveUrlInput.focus();
+  vkLiveUrlWrap.hidden = !vkLiveUrlWrap.hidden;
+  if (!vkLiveUrlWrap.hidden) elements.vkLiveUrlInput.focus();
 });
 
 elements.refreshDevicesButton.addEventListener("click", loadInputDevices);
@@ -843,14 +895,17 @@ elements.stopButton.addEventListener("click", stopStreaming);
 elements.microphoneSelect.addEventListener("change", (event) => {
   state.selectedDeviceId = event.target.value;
 });
-elements.vkLiveUrlInput.addEventListener("change", () => {
-  localStorage.setItem("vkLiveVideoUrl", elements.vkLiveUrlInput.value.trim());
+elements.vkLiveUrlInput.addEventListener("input", () => {
+  const url = elements.vkLiveUrlInput.value.trim();
+  localStorage.setItem("vkLiveVideoUrl", url);
+  scheduleVkUrlValidation(url);
 });
 
 const savedVkUrl = localStorage.getItem("vkLiveVideoUrl");
 if (savedVkUrl) {
   elements.vkLiveUrlInput.value = savedVkUrl;
-  elements.vkLiveUrlInput.hidden = false;
+  vkLiveUrlWrap.hidden = false;
+  validateVkUrl(savedVkUrl);
 }
 
 elements.endpointLabel.textContent = elements.wsUrlInput.value;

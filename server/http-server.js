@@ -58,7 +58,7 @@ function jsonResponse(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-export function createStaticServer({ telegram, config } = {}) {
+export function createStaticServer({ telegram, vk, config } = {}) {
   let logsInFlight = false;
   let lastSendAt = 0;
 
@@ -81,6 +81,26 @@ export function createStaticServer({ telegram, config } = {}) {
     if (pathname === "/health") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (pathname === "/api/vk/validate-url") {
+      if (request.method !== "GET") {
+        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET" });
+        response.end(JSON.stringify({ error: "method_not_allowed" }));
+        return;
+      }
+      const { searchParams } = new URL(request.url, "http://localhost");
+      const url = searchParams.get("url") || "";
+      try {
+        const result = vk?.validateLiveVideoUrl
+          ? await vk.validateLiveVideoUrl(url)
+          : { ok: false, code: "vk_disabled", message: "VK integration unavailable" };
+        jsonResponse(response, 200, result);
+      } catch (error) {
+        logger.error("http", "vk_validate_failed", { error: error?.message || String(error) });
+        jsonResponse(response, 500, { ok: false, code: "internal_error", message: error?.message || String(error) });
+      }
       return;
     }
 

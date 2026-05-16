@@ -60,7 +60,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     "moysklad",
   );
   const vk = wrapWithSafeMode(
-    createVkPublisher(config.vk),
+    services.vk || createVkPublisher(config.vk),
     ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishReservationReply"],
     "vk",
   );

@@ -396,6 +396,79 @@ export function createVkPublisher(config) {
     getLiveVideoUrl() {
       return liveOwnerId && liveVideoId ? `https://vk.com/video${liveOwnerId}_${liveVideoId}` : "";
     },
+
+    async validateLiveVideoUrl(url) {
+      if (!isEnabled) {
+        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_USER_TOKEN)" };
+      }
+
+      const trimmed = String(url || "").trim();
+      if (!trimmed) {
+        return { ok: false, code: "no_url", message: "Ссылка не указана" };
+      }
+
+      const parsed = parseLiveVideoReference(trimmed);
+      const ownerId = normalizeVkOwnerId(parsed.ownerId);
+      const videoId = normalizeVkVideoId(parsed.videoId);
+      if (!ownerId || !videoId) {
+        return {
+          ok: false,
+          code: "bad_url",
+          message: "Не удалось разобрать ссылку. Ожидаю что-то вроде https://vk.com/video-123_456",
+        };
+      }
+
+      try {
+        const response = await callVkApi("video.get", {
+          owner_id: ownerId,
+          videos: `${ownerId}_${videoId}`,
+          extended: 1,
+        });
+        const video = response?.items?.[0];
+        if (!video) {
+          return {
+            ok: false,
+            code: "not_found",
+            message: "Видео не найдено или у токена нет к нему доступа",
+            ownerId,
+            videoId,
+          };
+        }
+        if (video.can_comment === 0) {
+          return {
+            ok: false,
+            code: "comments_closed",
+            message: "У видео закрыты комментарии — брони не смогут прийти",
+            title: video.title || "",
+            ownerId,
+            videoId,
+          };
+        }
+        return {
+          ok: true,
+          title: video.title || "",
+          ownerId,
+          videoId,
+          isLive: video.live_status === "started",
+          liveStatus: video.live_status || null,
+        };
+      } catch (error) {
+        const vkErrorCode = error?.vkErrorCode ?? null;
+        let code = "api_error";
+        let message = error?.message || String(error);
+        if (vkErrorCode === 5) {
+          code = "auth_failed";
+          message = "VK-токен недействителен (обновите VK_TOKEN в .env и перезапустите)";
+        } else if (vkErrorCode === 15) {
+          code = "access_denied";
+          message = "Доступ запрещён — видео приватное или скрыто";
+        } else if (vkErrorCode === 100) {
+          code = "not_found";
+          message = "VK не распознал owner_id/video_id";
+        }
+        return { ok: false, code, message, vkErrorCode, ownerId, videoId };
+      }
+    },
   };
 }
 

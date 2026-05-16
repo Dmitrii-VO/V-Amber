@@ -4,13 +4,15 @@ import { attachWsServer } from "./ws-server.js";
 import { logger } from "./logger.js";
 import { checkForUpdates } from "./version-check.js";
 import { createTelegramNotifier } from "./telegram.js";
+import { createVkPublisher } from "./vk.js";
 
 async function main() {
   await checkForUpdates();
 
   const telegram = createTelegramNotifier(config.telegram);
-  const httpServer = createStaticServer({ telegram, config });
-  attachWsServer(httpServer, config, { telegram });
+  const vk = createVkPublisher(config.vk);
+  const httpServer = createStaticServer({ telegram, vk, config });
+  attachWsServer(httpServer, config, { telegram, vk });
 
   httpServer.on("error", (error) => {
     logger.error("http", "server_listen_failed", {

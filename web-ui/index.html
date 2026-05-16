@@ -27,7 +27,10 @@
 
         <div class="topbar-controls">
           <select id="microphoneSelect" class="select mic-select"></select>
-          <input id="vkLiveUrlInput" class="input" type="text" placeholder="VK live URL" style="flex:1; min-width:200px;" hidden />
+          <div id="vkLiveUrlWrap" style="flex:1; min-width:200px; display:flex; flex-direction:column; gap:4px;" hidden>
+            <input id="vkLiveUrlInput" class="input" type="text" placeholder="VK live URL" />
+            <div id="vkUrlStatus" class="vk-url-status" hidden></div>
+          </div>
           <button id="toggleAdvanced" class="btn btn--ghost" title="Дополнительно" style="padding:0 10px;">+ VK</button>
           <button id="refreshDevicesButton" class="btn btn--ghost" title="Обновить устройства" style="padding:0 10px;">↻</button>
         </div>
