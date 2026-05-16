@@ -295,19 +295,41 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
         }
 
+        // safe-mode flipped on between the early check and the wrapped call —
+        // the safe-mode wrapper returns { skipped: true, safeMode: true } and
+        // nothing was actually written to MoySklad. Mark the event accordingly
+        // instead of falling through to the success path.
+        if (order && order.skipped === true && order.safeMode === true) {
+          event.status = "safe_mode_logged";
+          logger.warn("safe-mode", "reservation_blocked_mid_flight", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+          });
+          notifyReservationStatus(lot, event);
+          return;
+        }
+
+        // The order was created/appended in MoySklad. Even if the lot has
+        // moved on since we started, register it so a future reservation by
+        // the same viewer appends to this order instead of creating a third
+        // orphan record. This is the orphan-prevention path.
+        if (!existingOrder?.id && order?.id) {
+          customerOrdersByViewerId.set(event.viewerId, order);
+        }
+
         if (!isReservationSessionCurrent(lot, reservationSessionVersion)) {
           logger.info("vk", "reservation_result_discarded", {
             connectionId,
             lotSessionId: lot.lotSessionId,
             commentId: event.commentId,
             viewerId: event.viewerId,
+            orderId: order?.id || null,
             reason: existingOrder?.id ? "stale_session_after_append" : "stale_session_after_create",
+            note: "MoySklad write completed; recorded in customerOrdersByViewerId to avoid duplicate orders.",
           });
           return;
-        }
-
-        if (!existingOrder?.id && order?.id) {
-          customerOrdersByViewerId.set(event.viewerId, order);
         }
 
         event.status = existingOrder?.id ? "reserved_appended" : "reserved";
@@ -971,6 +993,11 @@ export function attachWsServer(httpServer, config, services = {}) {
 
                   if (shouldSendAmbiguousNotification(detectionWithId)) {
                     activeDetectionActionId = detectionWithId.detectionId;
+                    // Drain the accumulated finals window so a follow-up
+                    // trigger doesn't splice the next phrase onto this one
+                    // and produce a phantom code while the operator is busy
+                    // confirming in Telegram.
+                    triggerSessionFinals = [];
                     void telegram.sendAmbiguousArticle({
                       transcript: detectionWithId.transcript,
                       candidates: detectionWithId.candidates,

@@ -256,6 +256,41 @@ function buildCandidateMap(candidates) {
   return [...unique.values()].sort((left, right) => right.confidence - left.confidence);
 }
 
+// Greedy extension after an initial numeric run: keep consuming digit words
+// (ноль/один/…/девять), cardinal groups (двадцать два, сто пять, тысяча сто)
+// and bare numeric tokens. This is what unblocks transcripts like
+// "ноль один ноль двадцать два" — the digit-words branch alone stops at
+// "двадцать" and emits "010"; this loop continues to fold "22" in.
+function extendWithMixedDigits(initialCode, words, startIdx) {
+  let code = initialCode;
+  let idx = startIdx;
+  while (idx < words.length) {
+    const word = words[idx];
+
+    if (/^\d{1,10}$/.test(word)) {
+      code += word;
+      idx += 1;
+      continue;
+    }
+
+    if (DIGIT_WORDS.has(word)) {
+      code += DIGIT_WORDS.get(word);
+      idx += 1;
+      continue;
+    }
+
+    const cardinal = parseCardinalNumber(words.slice(idx));
+    if (cardinal) {
+      code += cardinal.value;
+      idx += cardinal.consumed;
+      continue;
+    }
+
+    break;
+  }
+  return { code, consumed: idx - startIdx };
+}
+
 function extractLeadingCandidatesFromSuffix(suffix, config) {
   const words = splitWords(suffix);
   let index = 0;
@@ -279,6 +314,20 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
   }
 
   if (numericTokens.length > 0) {
+    // Extend past the bare-digit run into digit-words / cardinals so that
+    // mixed transcripts like "01 ноль два два" produce "01022" instead of
+    // silently dropping the tail.
+    const baseCode = numericTokens[0];
+    const extended = extendWithMixedDigits(baseCode, remainingWords, numericTokens.length);
+    if (extended.consumed > 0) {
+      const combined = numericTokens.join("") + extended.code.slice(baseCode.length);
+      return [{
+        code: combined,
+        source: "regex_mixed",
+        fragment: remainingWords.slice(0, numericTokens.length + extended.consumed).join(" "),
+        confidence: 0.97,
+      }];
+    }
     return numericTokens.map((word, candidateIndex) => ({
       code: word,
       source: "regex",
@@ -289,10 +338,15 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
 
   const digitSequence = parseDigitSequenceWords(remainingWords);
   if (digitSequence) {
+    const extended = extendWithMixedDigits(
+      digitSequence.value,
+      remainingWords,
+      digitSequence.consumed,
+    );
     return [{
-      code: digitSequence.value,
+      code: extended.code,
       source: "digit_words",
-      fragment: remainingWords.slice(0, digitSequence.consumed).join(" "),
+      fragment: remainingWords.slice(0, digitSequence.consumed + extended.consumed).join(" "),
       confidence: 0.98,
     }];
   }
@@ -424,7 +478,14 @@ async function extractWithYandexGpt(text, config) {
   });
 
   if (!response.ok) {
-    throw new Error(`YandexGPT HTTP ${response.status}`);
+    // Surface the actual response body — without this the caller only sees
+    // "YandexGPT HTTP 400" and cannot tell whether it's a malformed prompt,
+    // a folder/model permission issue, or a quota problem.
+    let body = "";
+    try { body = (await response.text()).slice(0, 400); } catch { /* ignore */ }
+    const error = new Error(`YandexGPT HTTP ${response.status}: ${body}`);
+    error.yandexBody = body;
+    throw error;
   }
 
   const payload = await response.json();
@@ -433,7 +494,22 @@ async function extractWithYandexGpt(text, config) {
     return null;
   }
 
-  const parsed = JSON.parse(textResult);
+  // Models sometimes wrap the JSON in ```json fences or add commentary. Strip
+  // the most common patterns before parsing so a single misformatted reply
+  // doesn't poison the entire detection result.
+  const cleanedJson = textResult
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleanedJson);
+  } catch (parseError) {
+    const error = new Error(`YandexGPT response is not valid JSON: ${parseError.message}`);
+    error.yandexBody = cleanedJson.slice(0, 400);
+    throw error;
+  }
   const codes = Array.isArray(parsed.codes)
     ? parsed.codes.filter((value) => typeof value === "string" && /^\d{1,10}$/.test(value))
     : [];
@@ -538,6 +614,7 @@ export async function detectArticle(text, config) {
       candidates: [],
       chosen: null,
       error: error instanceof Error ? error.message : String(error),
+      yandexBody: error?.yandexBody || null,
     };
   }
 
