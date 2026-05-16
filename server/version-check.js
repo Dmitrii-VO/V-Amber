@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { logger } from "./logger.js";
 
 const RELEASES_API = "https://api.github.com/repos/Dmitrii-VO/V-Amber/releases/latest";
@@ -30,26 +30,51 @@ function compareVersions(a, b) {
   return 0;
 }
 
-function printBanner(localVersion, remoteVersion) {
+async function pathExists(relPath) {
+  try {
+    await stat(new URL(`../${relPath}`, import.meta.url));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function buildUpdateInstructions() {
+  const [hasGit, hasMacScript, hasWinScript] = await Promise.all([
+    pathExists(".git"),
+    pathExists("update.command"),
+    pathExists("update.cmd"),
+  ]);
+  const lines = [];
+  if (hasMacScript && process.platform === "darwin") {
+    lines.push("Обновить: двойной клик на update.command в папке проекта");
+  } else if (hasWinScript && process.platform === "win32") {
+    lines.push("Обновить: двойной клик на update.cmd в папке проекта");
+  } else if (hasGit) {
+    lines.push("Обновить: git pull && npm install");
+  } else {
+    lines.push("Обновить: скачайте свежий ZIP и распакуйте поверх,");
+    lines.push("          сохранив .env и logs/");
+  }
+  return lines;
+}
+
+function printBanner(localVersion, remoteVersion, instructionLines) {
   const yellow = "\x1b[33m";
   const bold = "\x1b[1m";
   const reset = "\x1b[0m";
-  const line1 = `Доступна новая версия V-Amber: ${remoteVersion} (у вас ${localVersion})`;
-  const line2 = `Релиз:    ${RELEASES_PAGE}`;
-  const line3 = `Обновить: git pull && npm install`;
-  const line4 = `В Docker: docker compose up --build`;
-  const width = Math.max(line1.length, line2.length, line3.length, line4.length) + 2;
+  const top = `Доступна новая версия V-Amber: ${remoteVersion} (у вас ${localVersion})`;
+  const release = `Релиз:    ${RELEASES_PAGE}`;
+  const contentLines = [top, "", release, ...instructionLines];
+  const width = Math.max(...contentLines.map((l) => l.length)) + 2;
   const pad = (s) => ` ${s}${" ".repeat(width - s.length - 1)}`;
-  const top = `╔${"═".repeat(width)}╗`;
-  const bottom = `╚${"═".repeat(width)}╝`;
-  const mid = `║${" ".repeat(width)}║`;
-  console.log(`${yellow}${bold}${top}`);
-  console.log(`║${pad(line1)}║`);
-  console.log(mid);
-  console.log(`║${pad(line2)}║`);
-  console.log(`║${pad(line3)}║`);
-  console.log(`║${pad(line4)}║`);
-  console.log(`${bottom}${reset}`);
+  const border = (ch) => `${ch}${"═".repeat(width)}${ch === "╔" ? "╗" : "╝"}`;
+  const empty = `║${" ".repeat(width)}║`;
+  console.log(`${yellow}${bold}${border("╔")}`);
+  for (const line of contentLines) {
+    console.log(line === "" ? empty : `║${pad(line)}║`);
+  }
+  console.log(`${border("╚")}${reset}`);
 }
 
 export async function checkForUpdates() {
@@ -100,7 +125,8 @@ export async function checkForUpdates() {
   if (!remoteParts) return;
 
   if (compareVersions(remoteParts, localParts) > 0) {
-    printBanner(localVersion, remoteVersion);
+    const instructions = await buildUpdateInstructions();
+    printBanner(localVersion, remoteVersion, instructions);
     logger.info("update-check", "update_available", { local: localVersion, remote: remoteVersion });
   }
 }
