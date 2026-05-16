@@ -243,8 +243,9 @@ export function createMoySkladClient(config) {
       return null;
     }
 
+    const attributeHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/metadata/attributes/${attributeId}`;
     const payload = await requestJson("entity/counterparty", {
-      filter: `${attributeId}=${viewerId}`,
+      filter: `${attributeHref}=${viewerId}`,
       limit: 1,
     });
 
