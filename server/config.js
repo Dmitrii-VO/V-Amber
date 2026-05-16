@@ -55,6 +55,7 @@ export const config = {
     customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
     salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
     vkIdAttributeId: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_ID?.trim() || "",
+    vkIdAttributeName: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_NAME?.trim() || "VK ID",
     imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
   },
   articleExtraction: {

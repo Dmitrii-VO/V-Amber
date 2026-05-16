@@ -175,12 +175,54 @@ export function createMoySkladClient(config) {
     return (payload.rows || []).find((item) => item.name === name) || null;
   }
 
-  const vkIdAttributeId = config.vkIdAttributeId || "";
+  const configuredVkIdAttributeId = config.vkIdAttributeId || "";
+  const vkIdAttributeName = config.vkIdAttributeName || "VK ID";
+  let resolvedVkIdAttributeId = configuredVkIdAttributeId;
+  let vkIdAttributeResolvePromise = null;
 
-  function buildVkIdAttributePayload(viewerId) {
+  async function resolveVkIdAttributeId() {
+    if (resolvedVkIdAttributeId) {
+      return resolvedVkIdAttributeId;
+    }
+    if (vkIdAttributeResolvePromise) {
+      return vkIdAttributeResolvePromise;
+    }
+
+    vkIdAttributeResolvePromise = (async () => {
+      try {
+        const metadata = await requestJson("entity/counterparty/metadata");
+        const attributes = Array.isArray(metadata?.attributes) ? metadata.attributes : [];
+        const match = attributes.find((attr) => attr?.name === vkIdAttributeName);
+        if (match?.id) {
+          resolvedVkIdAttributeId = match.id;
+          logger.info("moysklad", "vk_id_attribute_discovered", {
+            attributeName: vkIdAttributeName,
+            attributeId: match.id,
+          });
+          return match.id;
+        }
+        logger.warn("moysklad", "vk_id_attribute_missing", {
+          attributeName: vkIdAttributeName,
+          available: attributes.map((a) => a?.name).filter(Boolean),
+        });
+        return "";
+      } catch (error) {
+        logger.warn("moysklad", "vk_id_attribute_lookup_failed", {
+          error: error?.message || String(error),
+        });
+        return "";
+      } finally {
+        vkIdAttributeResolvePromise = null;
+      }
+    })();
+
+    return vkIdAttributeResolvePromise;
+  }
+
+  function buildVkIdAttributePayload(viewerId, attributeId) {
     return {
       meta: {
-        href: `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/metadata/attributes/${vkIdAttributeId}`,
+        href: `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/metadata/attributes/${attributeId}`,
         type: "attributemetadata",
         mediaType: "application/json",
       },
@@ -188,36 +230,46 @@ export function createMoySkladClient(config) {
     };
   }
 
-  function findVkIdAttributeValue(counterparty) {
-    if (!vkIdAttributeId) {
+  function findVkIdAttributeValue(counterparty, attributeId) {
+    if (!attributeId) {
       return null;
     }
-    const attr = (counterparty?.attributes || []).find((item) => item?.id === vkIdAttributeId);
+    const attr = (counterparty?.attributes || []).find((item) => item?.id === attributeId);
     return attr?.value ?? null;
   }
 
-  async function findCounterpartyByVkId(viewerId) {
-    if (!vkIdAttributeId) {
+  async function findCounterpartyByVkId(viewerId, attributeId) {
+    if (!attributeId) {
       return null;
     }
 
     const payload = await requestJson("entity/counterparty", {
-      filter: `${vkIdAttributeId}=${viewerId}`,
+      filter: `${attributeId}=${viewerId}`,
       limit: 1,
     });
 
     return payload.rows?.[0] || null;
   }
 
-  async function stampVkIdOnCounterparty(counterparty, viewerId) {
-    if (!vkIdAttributeId || !counterparty?.id) {
+  async function findCounterpartyByViewerIdInDescription(viewerId) {
+    const marker = `viewerId=${viewerId}`;
+    const payload = await requestJson("entity/counterparty", {
+      search: marker,
+      limit: 25,
+    });
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    return rows.find((item) => String(item?.description || "").includes(marker)) || null;
+  }
+
+  async function stampVkIdOnCounterparty(counterparty, viewerId, attributeId) {
+    if (!attributeId || !counterparty?.id) {
       return counterparty;
     }
 
     const existingAttrs = Array.isArray(counterparty.attributes) ? counterparty.attributes : [];
     const merged = existingAttrs
-      .filter((attr) => attr?.id !== vkIdAttributeId)
-      .concat([buildVkIdAttributePayload(viewerId)]);
+      .filter((attr) => attr?.id !== attributeId)
+      .concat([buildVkIdAttributePayload(viewerId, attributeId)]);
 
     return patchJson(`entity/counterparty/${counterparty.id}`, { attributes: merged });
   }
@@ -351,10 +403,33 @@ export function createMoySkladClient(config) {
       const promise = (async () => {
         const normalizedViewerName = String(viewerName || "").trim() || `VK User ${viewerId}`;
         const counterpartyName = `VK: ${normalizedViewerName}`;
+        const attributeId = await resolveVkIdAttributeId();
 
-        // 1. Точный поиск по VK ID (атрибут). Основной путь после бэкфилла.
-        if (vkIdAttributeId) {
-          const byVkId = await findCounterpartyByVkId(viewerId);
+        async function backfillIfMissing(found, source) {
+          if (!attributeId) return found;
+          if (findVkIdAttributeValue(found, attributeId)) return found;
+          try {
+            const updated = await stampVkIdOnCounterparty(found, viewerId, attributeId);
+            logger.info("moysklad", "counterparty_backfilled_vk_id", {
+              viewerId,
+              counterpartyId: found.id,
+              source,
+            });
+            return updated;
+          } catch (error) {
+            logger.warn("moysklad", "counterparty_backfill_vk_id_failed", {
+              viewerId,
+              counterpartyId: found.id,
+              source,
+              error,
+            });
+            return found;
+          }
+        }
+
+        // 1. Поиск по атрибуту VK ID (основной путь).
+        if (attributeId) {
+          const byVkId = await findCounterpartyByVkId(viewerId, attributeId);
           if (byVkId) {
             logger.info("moysklad", "counterparty_matched_by_vk_id", {
               viewerId,
@@ -365,43 +440,39 @@ export function createMoySkladClient(config) {
           }
         }
 
-        // 2. Fallback: поиск по имени `VK: <name>`. Если нашли — проставляем VK ID
-        //    (heal-on-read для контрагентов, созданных V-Amber до бэкфилла).
-        const existing = await findCounterpartyByName(counterpartyName);
-        if (existing) {
-          let result = existing;
-          if (vkIdAttributeId && !findVkIdAttributeValue(existing)) {
-            try {
-              result = await stampVkIdOnCounterparty(existing, viewerId);
-              logger.info("moysklad", "counterparty_backfilled_vk_id", {
-                viewerId,
-                counterpartyId: existing.id,
-                counterpartyName,
-              });
-            } catch (error) {
-              logger.warn("moysklad", "counterparty_backfill_vk_id_failed", {
-                viewerId,
-                counterpartyId: existing.id,
-                error,
-              });
-            }
-          } else {
-            logger.info("moysklad", "counterparty_reused", {
-              viewerId,
-              counterpartyId: existing.id,
-              counterpartyName,
-            });
-          }
-          return result;
+        // 2. Fallback: поиск по имени `VK: <name>`.
+        const byName = await findCounterpartyByName(counterpartyName);
+        if (byName) {
+          logger.info("moysklad", "counterparty_reused", {
+            viewerId,
+            counterpartyId: byName.id,
+            counterpartyName,
+            source: "name",
+          });
+          return backfillIfMissing(byName, "name");
         }
 
-        // 3. Создаём нового — сразу с VK ID в атрибуте.
+        // 3. Fallback: поиск по маркеру `viewerId=N` в description.
+        //    Закрывает старых контрагентов до бэкфилла и кейс «имя в МойСклад
+        //    отредактировали вручную».
+        const byDescription = await findCounterpartyByViewerIdInDescription(viewerId);
+        if (byDescription) {
+          logger.info("moysklad", "counterparty_reused", {
+            viewerId,
+            counterpartyId: byDescription.id,
+            counterpartyName: byDescription.name,
+            source: "description",
+          });
+          return backfillIfMissing(byDescription, "description");
+        }
+
+        // 4. Создаём нового — сразу с VK ID в атрибуте, если он известен.
         const payload = {
           name: counterpartyName,
           description: `Создано из VK live comment. viewerId=${viewerId}`,
         };
-        if (vkIdAttributeId) {
-          payload.attributes = [buildVkIdAttributePayload(viewerId)];
+        if (attributeId) {
+          payload.attributes = [buildVkIdAttributePayload(viewerId, attributeId)];
         }
 
         const created = await postJson("entity/counterparty", payload);
@@ -409,7 +480,7 @@ export function createMoySkladClient(config) {
           viewerId,
           counterpartyId: created.id,
           counterpartyName,
-          vkIdStamped: Boolean(vkIdAttributeId),
+          vkIdStamped: Boolean(attributeId),
         });
 
         return created;
