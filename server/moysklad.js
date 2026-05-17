@@ -190,11 +190,33 @@ export function createMoySkladClient(config) {
       defaults.organizationId = preferredOrganization?.id || "";
     }
 
+    // Список складов нужен и для выбора storeId, и для расчёта суммарного
+    // остатка по разрешённым складам. Берём его один раз и переиспользуем.
+    const storeRows = await requestJson("entity/store", { limit: 100 });
+    const stores = Array.isArray(storeRows.rows) ? storeRows.rows : [];
+
     if (!defaults.storeId) {
-      const stores = await requestJson("entity/store", { limit: 10 });
-      const preferredStore = stores.rows?.find((item) => item.name === config.preferredStoreName) || stores.rows?.[0];
+      const preferredStore = stores.find((item) => item.name === config.preferredStoreName) || stores[0];
       defaults.storeId = preferredStore?.id || "";
     }
+
+    const excluded = new Set(
+      (Array.isArray(config.excludedStoreNames) ? config.excludedStoreNames : [])
+        .map((name) => String(name || "").trim())
+        .filter(Boolean),
+    );
+    defaults.stockStoreHrefs = stores
+      .filter((item) => item?.name && !excluded.has(item.name))
+      .map((item) => item.meta?.href)
+      .filter(Boolean);
+
+    logger.info("moysklad", "stock_stores_resolved", {
+      includedCount: defaults.stockStoreHrefs.length,
+      excludedNames: [...excluded],
+      includedNames: stores
+        .filter((item) => item?.name && !excluded.has(item.name))
+        .map((item) => item.name),
+    });
 
     cachedDefaults = defaults;
     return defaults;
@@ -387,8 +409,19 @@ export function createMoySkladClient(config) {
         return null;
       }
 
+      // Суммируем остаток по разрешённым складам (по умолчанию все, кроме
+      // «Брак»). report/stock/all агрегирует одну строку на продукт, а
+      // несколько `store=...` сегментов в filter работают как OR — поэтому
+      // отфильтрованный ответ возвращает уже сумму по нужным складам.
+      const { stockStoreHrefs } = await resolveDefaults();
+      const stockFilterParts = [`product=${product.meta?.href}`];
+      if (Array.isArray(stockStoreHrefs) && stockStoreHrefs.length > 0) {
+        for (const href of stockStoreHrefs) {
+          stockFilterParts.push(`store=${href}`);
+        }
+      }
       const stockPayload = await requestJson("report/stock/all", {
-        filter: `product=${product.meta?.href}`,
+        filter: stockFilterParts.join(";"),
         limit: 1,
       });
 

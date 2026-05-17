@@ -51,7 +51,10 @@ export const config = {
     organizationId: process.env.MOYSKLAD_ORGANIZATION_ID?.trim() || "",
     preferredOrganizationName: process.env.MOYSKLAD_PREFERRED_ORGANIZATION_NAME?.trim() || "ИП Куницына Татьяна Васильевна",
     storeId: process.env.MOYSKLAD_STORE_ID?.trim() || "",
-    preferredStoreName: process.env.MOYSKLAD_PREFERRED_STORE_NAME?.trim() || "Аукцион",
+    preferredStoreName: process.env.MOYSKLAD_PREFERRED_STORE_NAME?.trim() || "Основной склад",
+    // Склады, которые исключаются из суммарного остатка для stock guard и UI.
+    // По умолчанию исключаем «Брак» — товар там физически непродаваем.
+    excludedStoreNames: parseCsvEnv(process.env.MOYSKLAD_EXCLUDED_STORE_NAMES, ["Брак"]),
     customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
     salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
     vkIdAttributeId: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_ID?.trim() || "",
