@@ -7,7 +7,6 @@ import { logger } from "./logger.js";
 import { isSafeMode, setSafeMode } from "./safe-mode.js";
 import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 
-const SEND_LOGS_COOLDOWN_MS = 60000;
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -58,9 +57,8 @@ function jsonResponse(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-export function createStaticServer({ telegram, vk, config } = {}) {
+export function createStaticServer({ vk, moysklad, productCodeCache, config } = {}) {
   let logsInFlight = false;
-  let lastSendAt = 0;
 
   return createServer(async (request, response) => {
     if (!request.url) {
@@ -104,6 +102,33 @@ export function createStaticServer({ telegram, vk, config } = {}) {
       return;
     }
 
+    if (pathname === "/api/product-codes/status") {
+      if (request.method !== "GET") {
+        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET" });
+        response.end(JSON.stringify({ error: "method_not_allowed" }));
+        return;
+      }
+      jsonResponse(response, 200, productCodeCache?.getSnapshot?.() || { count: 0, loadedAt: null, refreshing: false });
+      return;
+    }
+
+    if (pathname === "/api/product-codes/refresh") {
+      if (request.method !== "POST") {
+        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
+        response.end(JSON.stringify({ error: "method_not_allowed" }));
+        return;
+      }
+      try {
+        const result = productCodeCache?.refresh
+          ? await productCodeCache.refresh(moysklad)
+          : { count: 0, loadedAt: null, refreshing: false, lastError: "product_code_cache_unavailable" };
+        jsonResponse(response, 200, { ok: true, ...result });
+      } catch (error) {
+        jsonResponse(response, 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
     if (pathname === "/api/send-logs/preview") {
       if (request.method !== "GET") {
         response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET" });
@@ -113,12 +138,10 @@ export function createStaticServer({ telegram, vk, config } = {}) {
       try {
         const files = await listBundleFiles();
         const totalBytes = files.reduce((acc, f) => acc + f.bytes, 0);
-        const cooldownMs = Math.max(0, SEND_LOGS_COOLDOWN_MS - (Date.now() - lastSendAt));
         jsonResponse(response, 200, {
           files,
           totalBytes,
-          telegramConfigured: Boolean(telegram?.isEnabled),
-          cooldownMs,
+          cooldownMs: 0,
         });
       } catch (error) {
         logger.error("http", "logs_preview_failed", { error: error?.message || String(error) });
@@ -151,68 +174,24 @@ export function createStaticServer({ telegram, vk, config } = {}) {
       }
 
       if (!downloadOnly) {
-        if (!telegram?.isEnabled) {
-          logger.warn("http", "send_logs_not_configured");
-          jsonResponse(response, 503, { error: "telegram_not_configured" });
-          return;
-        }
-        const elapsed = Date.now() - lastSendAt;
-        if (elapsed < SEND_LOGS_COOLDOWN_MS) {
-          jsonResponse(response, 429, {
-            error: "rate_limited",
-            retryAfterMs: SEND_LOGS_COOLDOWN_MS - elapsed,
-          });
-          return;
-        }
+        jsonResponse(response, 410, { error: "remote_delivery_disabled", message: "Remote delivery is disabled. Use download mode." });
+        return;
       }
 
       logsInFlight = true;
       try {
         const bundle = await buildLogBundle({ userNote, config });
 
-        if (downloadOnly) {
-          const buffer = bundle.parts.length === 1
-            ? bundle.parts[0].buffer
-            : Buffer.concat(bundle.parts.map((p) => p.buffer));
-          response.writeHead(200, {
-            "content-type": "application/zip",
-            "content-disposition": `attachment; filename="${bundle.singleFilename}"`,
-            "content-length": buffer.length,
-          });
-          response.end(buffer);
-          logger.info("http", "logs_downloaded", { filename: bundle.singleFilename, size: buffer.length });
-          return;
-        }
-
-        const baseCaption =
-          `Логи V-Amber\n` +
-          `Файлов: ${bundle.fileCount}\n` +
-          `Размер: ${bundle.totalBytes} байт\n` +
-          `Install: ${bundle.manifest.installId}\n` +
-          `Версия: ${bundle.manifest.vamberVersion}` +
-          (userNote ? `\n\nЗаметка оператора:\n${userNote}` : "");
-
-        const sentParts = [];
-        for (const part of bundle.parts) {
-          const caption = bundle.parts.length === 1
-            ? baseCaption
-            : `${baseCaption}\n\nЧасть ${part.partNumber} из ${part.partTotal}`;
-          const result = await telegram.sendDocument({
-            filename: part.filename,
-            buffer: part.buffer,
-            contentType: "application/zip",
-            caption,
-            meta: { kind: "log_bundle", part: part.partNumber, total: part.partTotal },
-          });
-          sentParts.push({ filename: part.filename, size: part.buffer.length, messageId: result?.messageId ?? null });
-        }
-        lastSendAt = Date.now();
-        logger.info("http", "logs_sent", {
-          totalBytes: bundle.totalBytes,
-          fileCount: bundle.fileCount,
-          parts: sentParts,
+        const buffer = bundle.parts.length === 1
+          ? bundle.parts[0].buffer
+          : Buffer.concat(bundle.parts.map((p) => p.buffer));
+        response.writeHead(200, {
+          "content-type": "application/zip",
+          "content-disposition": `attachment; filename="${bundle.singleFilename}"`,
+          "content-length": buffer.length,
         });
-        jsonResponse(response, 200, { ok: true, parts: sentParts, totalBytes: bundle.totalBytes });
+        response.end(buffer);
+        logger.info("http", "logs_downloaded", { filename: bundle.singleFilename, size: buffer.length });
       } catch (error) {
         logger.error("http", "logs_send_failed", { error: error?.message || String(error) });
         jsonResponse(response, 500, { error: "send_failed", message: error?.message || String(error) });

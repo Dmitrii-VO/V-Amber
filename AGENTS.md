@@ -35,9 +35,8 @@ Current stack in repo:
 - WebSocket audio streaming from browser to backend.
 - Yandex SpeechKit Streaming API integration for realtime STT.
 - Article extraction from transcript with regex/number-word parsing and
-  YandexGPT fallback config.
-- Telegram callback workflow for ambiguous article confirmation.
-- Voice discount detection and Telegram-triggered discount application.
+  optional MoySklad product-code cache hints.
+- Voice discount detection and VK discount publication.
 - MoySklad integration for product lookup and customer order reservation.
 - VK integration for live comment polling, lot-card publishing, and reservation
   handling.
@@ -59,8 +58,10 @@ Main entrypoints and modules:
 - `server/article-extractor.js`: spoken article parsing.
 - `server/discount-detector.js`: spoken discount parsing.
 - `server/moysklad.js`: MoySklad API client.
-- `server/vk.js`: VK publishing and comment polling.
-- `server/telegram.js`: Telegram notifications and confirmations.
+- `server/product-code-cache.js`: in-memory MoySklad product-code cache used
+  to disambiguate spoken article codes from sizes/prices.
+- `server/vk.js`: VK publishing, comment polling, URL validation, and VK API
+  throttling/backoff for `VK API 6`.
 - `server/config.js`: environment-driven config.
 - `server/safe-mode.js`: process-wide safe mode state and write guards.
 - `server/session-log.js`: per-stream Markdown session log writer.
@@ -141,12 +142,13 @@ HTTP surface:
 - `GET /api/safe-mode` returns current safe mode state.
 - `POST /api/safe-mode` accepts JSON `{ "enabled": true|false }`.
 - `GET /api/send-logs/preview` returns the list of files that would be
-  included in the diagnostic bundle plus telegram-configured / cooldown
-  status.
-- `POST /api/send-logs` accepts JSON `{ "userNote": "...", "download": false }`.
-  Default behavior ships the ZIP to the configured Telegram chat (rate-limited
-  to once per 60 s). With `download: true` the same archive is streamed back
-  as `application/zip` for the operator to save locally.
+  included in the diagnostic bundle.
+- `POST /api/send-logs` accepts JSON `{ "userNote": "...", "download": true }`
+  and streams the archive back as `application/zip` for the operator to save
+  locally.
+- `POST /api/product-codes/refresh` refreshes the in-memory product-code cache
+  from MoySklad.
+- `GET /api/product-codes/status` returns product-code cache status.
 
 Web UI sends microphone PCM frames over WebSocket. It also lets the operator
 choose a microphone, enter or persist a VK live video URL, start/stop streaming,
@@ -158,10 +160,8 @@ Project goal unchanged: voice-assisted live-commerce workflow for VK.
 
 Implemented or partially implemented integrations in code:
 - Yandex SpeechKit Streaming API.
-- YandexGPT fallback configuration for article extraction.
 - VK API for live comment read/publish flow.
 - MoySklad API for product lookup and reservation orders.
-- Telegram Bot API for operator notifications and confirmations.
 
 # Working rules for future sessions
 
@@ -181,7 +181,7 @@ waitlist event status, `customerOrderSessionVersion`, and safe mode handling in
 `server/ws-server.js`.
 
 Before changing article or discount parsing, check both regex/number-word logic
-and YandexGPT fallback behavior where applicable.
+and MoySklad product-code cache behavior where applicable.
 
 If docs or code drift from spec later, keep this file aligned with verified
 repository state and note missing planned pieces explicitly.

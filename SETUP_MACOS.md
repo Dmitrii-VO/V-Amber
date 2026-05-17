@@ -159,8 +159,6 @@ cp .env.example .env
 | `YANDEX_SPEECHKIT_API_KEY` | **Да** | [Yandex Cloud Console](https://console.yandex.cloud) → IAM → Сервисные аккаунты → API-ключи |
 | `YANDEX_SPEECHKIT_FOLDER_ID` | **Да** | Yandex Cloud Console → Каталог → ID каталога |
 | `VK_TOKEN` | Нет | VK → Управление сообществом → Работа с API → Ключи доступа |
-| `TELEGRAM_BOT_TOKEN` | Нет | @BotFather в Telegram |
-| `TELEGRAM_CHAT_ID` | Нет | @userinfobot в Telegram |
 | `MOYSKLAD_LOGIN` | Нет | Логин от аккаунта МойСклад |
 | `MOYSKLAD_PASSWORD` | Нет | Пароль от аккаунта МойСклад |
 | `MOYSKLAD_ORGANIZATION_ID` | Нет | UUID из адресной строки в МойСклад |

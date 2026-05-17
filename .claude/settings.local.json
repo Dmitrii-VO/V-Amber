@@ -55,14 +55,19 @@
       "Bash(unzip -o -q logs/v-amber-logs-2026-05-16T15-07-12-453Z.zip -d logs/worklogs-2)",
       "Bash(node --check server/ws-server.js)",
       "Bash(node --check server/vk.js)",
-      "Bash(node --check server/telegram.js)",
       "Bash(node --check server/version-check.js)",
       "Bash(git update-index *)",
       "Bash(unzip -o -q logs/v-amber-logs-2026-05-16T17-45-47-053Z.zip -d logs/worklogs-3)",
       "Bash(python3 -m json.tool)",
       "Bash(node --check server/article-extractor.js)",
       "Bash(npm test *)",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Bash(grep -oE '\"code\":\"[0-9]{8,10}\"[^}]*\"transcript\":\"[^\"]+' logs/worklogs-3/server.log logs/worklogs-2/server.log logs/worklogs-4/server.log)",
+      "Bash(unzip -o -q logs/v-amber-logs-2026-05-17T13-12-37-349Z.zip -d logs/worklogs-5)",
+      "Bash(grep -E '\"code\":\"[0-9]{7,}\"|final_transcript.*тысяч|final_transcript.*размер' logs/worklogs-5/server.log)",
+      "Bash(grep -E '\"article_detected\".*\"code\":\"[0-9]{7,}\"' logs/worklogs-5/server.log)",
+      "Bash(git log *)",
+      "Bash(awk -F= '{print $1}')"
     ]
   }
 }

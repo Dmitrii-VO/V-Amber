@@ -65,7 +65,7 @@ export function createSessionLog() {
     logLotOpened({ code, lotSessionId, productName, salePrice, availableStock, transcript, source } = {}) {
       const priceStr = salePrice != null ? ` — ${salePrice} ₽` : "";
       const stockStr = availableStock != null ? `, остаток: ${availableStock} шт.` : "";
-      const sourceLabel = source === "voice" ? "голос" : source === "telegram_manual" ? "Telegram" : (source || "—");
+      const sourceLabel = source === "voice" ? "голос" : source === "manual" ? "ручной" : (source || "—");
 
       append([
         `## Лот: ${code}${priceStr}`,

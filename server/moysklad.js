@@ -517,6 +517,38 @@ export function createMoySkladClient(config) {
 
       return productCard;
     },
+    async getProductCodes() {
+      if (!isEnabled) {
+        logger.info("moysklad", "product_code_cache_skipped_not_configured");
+        return [];
+      }
+
+      const codes = [];
+      const limit = 1000;
+      let offset = 0;
+
+      while (true) {
+        const payload = await requestJson("entity/product", { limit, offset });
+        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+        for (const product of rows) {
+          if (product?.archived === true) {
+            continue;
+          }
+          const code = String(product?.code || "").trim();
+          if (/^\d{1,10}$/.test(code)) {
+            codes.push(code);
+          }
+        }
+
+        offset += rows.length;
+        const total = Number(payload?.meta?.size || 0);
+        if (rows.length === 0 || offset >= total) {
+          break;
+        }
+      }
+
+      return [...new Set(codes)];
+    },
     async findOpenCustomerOrderForCounterparty(counterpartyId) {
       if (!isEnabled) {
         return null;

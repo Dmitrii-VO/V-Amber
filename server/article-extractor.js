@@ -158,6 +158,75 @@ function filterCandidatesByLength(candidates, config) {
   return candidates.filter((candidate) => candidate.code.length >= minLength && candidate.code.length <= maxLength);
 }
 
+function normalizeKnownCodes(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Set) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return new Set(value.map((code) => String(code || "").trim()).filter(Boolean));
+  }
+
+  return null;
+}
+
+function findKnownPrefix(code, knownCodes, config) {
+  const minLength = Math.max(1, Number(config?.minLength || 1));
+  for (let length = code.length - 1; length >= minLength; length -= 1) {
+    const prefix = code.slice(0, length);
+    if (knownCodes.has(prefix)) {
+      return prefix;
+    }
+  }
+
+  return "";
+}
+
+function applyKnownCodeHints(candidates, config) {
+  const knownCodes = normalizeKnownCodes(config?.knownCodes);
+  if (!knownCodes || knownCodes.size === 0) {
+    return candidates;
+  }
+
+  const hinted = [];
+  for (const candidate of candidates) {
+    if (!candidate?.code) {
+      continue;
+    }
+
+    if (knownCodes.has(candidate.code)) {
+      hinted.push({
+        ...candidate,
+        confidence: Math.max(candidate.confidence || 0, 0.99),
+        knownCode: true,
+      });
+      continue;
+    }
+
+    const prefix = findKnownPrefix(candidate.code, knownCodes, config);
+    if (prefix) {
+      hinted.push({
+        ...candidate,
+        code: prefix,
+        originalCode: candidate.code,
+        source: `${candidate.source || "unknown"}_known_prefix`,
+        confidence: Math.max(candidate.confidence || 0, 0.985),
+        knownCode: true,
+      });
+      continue;
+    }
+
+    hinted.push(candidate);
+  }
+
+  const knownMatches = hinted.filter((candidate) => candidate.knownCode === true);
+  return knownMatches.length > 0 ? knownMatches : hinted;
+}
+
 function isCodeLengthAllowed(code, config) {
   const minLength = Math.max(1, Number(config?.minLength || 1));
   const maxLength = Math.max(minLength, Number(config?.maxLength || 10));
@@ -295,10 +364,15 @@ function buildCandidateMap(candidates) {
 }
 
 // Greedy extension after an initial numeric run: keep consuming digit words
-// (ноль/один/…/девять), cardinal groups (двадцать два, сто пять, тысяча сто)
-// and bare numeric tokens. This is what unblocks transcripts like
-// "ноль один ноль двадцать два" — the digit-words branch alone stops at
-// "двадцать" and emits "010"; this loop continues to fold "22" in.
+// (ноль/один/…/девять) and short cardinal groups like "двадцать два". This
+// unblocks transcripts like "ноль один ноль двадцать два" → "01022".
+//
+// Cardinals >= 100 are NOT folded in: in livestream context they almost
+// always indicate price/size/quantity following the article code, not part
+// of the code itself. Without this guard, "00301 тысяча четыреста" (i.e.
+// "код 00301, цена 1400") would merge into a phantom "003011400" code.
+const EXTENSION_CARDINAL_LIMIT = 100;
+
 function extendWithMixedDigits(initialCode, words, startIdx) {
   let code = initialCode;
   let idx = startIdx;
@@ -318,7 +392,7 @@ function extendWithMixedDigits(initialCode, words, startIdx) {
     }
 
     const cardinal = parseCardinalNumber(words.slice(idx));
-    if (cardinal) {
+    if (cardinal && Number(cardinal.value) < EXTENSION_CARDINAL_LIMIT) {
       code += cardinal.value;
       idx += cardinal.consumed;
       continue;
@@ -485,18 +559,12 @@ async function extractWithYandexGpt(text, config) {
           text:
             "Извлеки артикул товара из русской фразы. Если найден один уверенный артикул, верни JSON {\"status\":\"confirmed\",\"codes\":[\"12345\"],\"confidence\":0.9}. Если есть несколько вариантов или низкая уверенность, верни {\"status\":\"ambiguous\",\"codes\":[\"12345\",\"1234\"],\"confidence\":0.3}. Если артикула нет, верни {\"status\":\"none\",\"codes\":[],\"confidence\":0}. Только JSON без пояснений.",
         },
-        {
-          role: "user",
-          text,
-        },
+        { role: "user", text },
       ],
     }),
   });
 
   if (!response.ok) {
-    // Surface the actual response body — without this the caller only sees
-    // "YandexGPT HTTP 400" and cannot tell whether it's a malformed prompt,
-    // a folder/model permission issue, or a quota problem.
     let body = "";
     try { body = (await response.text()).slice(0, 400); } catch { /* ignore */ }
     const error = new Error(`YandexGPT HTTP ${response.status}: ${body}`);
@@ -510,9 +578,6 @@ async function extractWithYandexGpt(text, config) {
     return null;
   }
 
-  // Models sometimes wrap the JSON in ```json fences or add commentary. Strip
-  // the most common patterns before parsing so a single misformatted reply
-  // doesn't poison the entire detection result.
   const cleanedJson = textResult
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```\s*$/i, "")
@@ -526,6 +591,7 @@ async function extractWithYandexGpt(text, config) {
     error.yandexBody = cleanedJson.slice(0, 400);
     throw error;
   }
+
   const codes = Array.isArray(parsed.codes)
     ? parsed.codes.filter((value) => typeof value === "string" && /^\d{1,10}$/.test(value))
     : [];
@@ -555,7 +621,7 @@ export async function detectArticle(text, config) {
 
   const matchedTrigger = transcriptHasTrigger(transcript, config.triggers);
   const triggerCandidates = filterCandidatesByLength(
-    buildCandidateMap(extractCandidatesByTriggers(transcript, config.triggers, config)),
+    buildCandidateMap(applyKnownCodeHints(extractCandidatesByTriggers(transcript, config.triggers, config), config)),
     config,
   );
 
@@ -599,39 +665,56 @@ export async function detectArticle(text, config) {
     };
   }
 
-  try {
-    const llmResult = await extractWithYandexGpt(transcript, config.yandexgpt);
-    const llmCandidates = filterCandidatesByLength(buildCandidateMap(llmResult?.candidates || []), config);
+  // YandexGPT-фоллбек: только когда regex ничего не вытянул, триггер
+  // подтверждён, фраза не оборвана, ЕСТЬ загруженный каталог продуктов
+  // и LLM сконфигурирован. Каталог обязателен — без него LLM может
+  // галлюцинировать артикул, что хуже молчания (создаст ошибочную бронь).
+  const knownCodes = normalizeKnownCodes(config?.knownCodes);
+  const llmReady = Boolean(config?.yandexgpt?.apiKey && config?.yandexgpt?.folderId);
+  if (knownCodes && knownCodes.size > 0 && llmReady) {
+    try {
+      const llmResult = await extractWithYandexGpt(transcript, config.yandexgpt);
+      const validatedCandidates = filterCandidatesByLength(
+        buildCandidateMap(applyKnownCodeHints(llmResult?.candidates || [], config)),
+        config,
+      );
+      // applyKnownCodeHints оставляет только каталог-валидированных, если
+      // хоть один совпал. Если ни один LLM-кандидат не подтвердился —
+      // здесь будут НЕвалидированные, их публиковать нельзя.
+      const onlyKnown = validatedCandidates.filter((candidate) => candidate.knownCode === true);
 
-    if (llmCandidates.length === 1 && llmResult?.status !== "ambiguous") {
+      if (onlyKnown.length === 1) {
+        return {
+          transcript,
+          matchedTrigger,
+          status: "confirmed",
+          candidates: onlyKnown,
+          chosen: onlyKnown[0],
+        };
+      }
+
+      if (onlyKnown.length > 1) {
+        return {
+          transcript,
+          matchedTrigger,
+          status: "ambiguous",
+          candidates: onlyKnown.slice(0, 3),
+          chosen: null,
+        };
+      }
+      // ни один LLM-кандидат не прошёл валидацию каталога → fall through
+      // в no_match: оператор повторит код голосом, а не получит мусор.
+    } catch (error) {
       return {
         transcript,
         matchedTrigger,
-        status: "confirmed",
-        candidates: llmCandidates,
-        chosen: llmCandidates[0],
-      };
-    }
-
-    if (llmCandidates.length > 0) {
-      return {
-        transcript,
-        matchedTrigger,
-        status: "ambiguous",
-        candidates: llmCandidates.slice(0, 3),
+        status: "llm_error",
+        candidates: [],
         chosen: null,
+        error: error instanceof Error ? error.message : String(error),
+        yandexBody: error?.yandexBody || null,
       };
     }
-  } catch (error) {
-    return {
-      transcript,
-      matchedTrigger,
-      status: "llm_error",
-      candidates: [],
-      chosen: null,
-      error: error instanceof Error ? error.message : String(error),
-      yandexBody: error?.yandexBody || null,
-    };
   }
 
   return {

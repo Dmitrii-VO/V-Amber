@@ -12,7 +12,6 @@ const baseConfig = {
   triggers,
   minLength: 1,
   maxLength: 10,
-  yandexgpt: { apiKey: "", folderId: "", endpoint: "", model: "" },
 };
 
 test("transcriptHasTrigger matches a known trigger", () => {
@@ -77,6 +76,157 @@ test("detectArticle handles digit-word sequences", async () => {
   const result = await detectArticle("артикул один два три", baseConfig);
   assert.equal(result.status, "confirmed");
   assert.equal(result.chosen?.code, "123");
+});
+
+test("detectArticle does not fold a trailing thousands cardinal into the code", async () => {
+  // Operator says: "Код товара 00301. Размер тысяча четыреста." If SpeechKit
+  // elides "размер" or transcribes the digits as digit-words, the extender
+  // used to greedily absorb "тысяча четыреста" → "003011400". Guard against
+  // that — cardinals >= 100 must not extend a numeric run.
+  const result = await detectArticle(
+    "код товара ноль ноль три ноль один тысяча четыреста",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "00301");
+});
+
+test("detectArticle does not fold a trailing 1400 numeric token after a 5-digit code", async () => {
+  // Same hazard via the bare-numeric path: "код товара 00301 1400" must not
+  // collapse to "003011400"; both numbers are clearly separate utterances.
+  const result = await detectArticle(
+    "код товара 00301 1400",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  // The parser emits the two leading numerics as separate candidates, which
+  // surfaces as ambiguous to the operator.
+  assert.equal(result.status, "ambiguous");
+  const codes = result.candidates.map((candidate) => candidate.code);
+  assert.ok(codes.includes("00301"), `expected 00301 in candidates, got ${codes}`);
+});
+
+test("detectArticle still folds short cardinals into a mixed-form code", async () => {
+  // Regression guard: the old behaviour for short cardinals (< 100) must
+  // survive. "ноль один ноль двадцать два" historically resolves to "01022".
+  const result = await detectArticle(
+    "код товара ноль один ноль двадцать два",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01022");
+});
+
+test("detectArticle trims trailing size when known product code matches prefix", async () => {
+  const result = await detectArticle(
+    "код товара ноль один два три четыре семнадцать размер",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["01234"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01234");
+  assert.equal(result.chosen?.originalCode, "0123417");
+});
+
+test("detectArticle prefers known code over trailing numeric size candidate", async () => {
+  const result = await detectArticle(
+    "код товара 01234 17 размер",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["01234"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01234");
+});
+
+test("detectArticle keeps exact known code before trying known prefixes", async () => {
+  const result = await detectArticle(
+    "код товара ноль один ноль двадцать два",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["0102", "01022"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01022");
+});
+
+test("knownCodes accepts Array as well as Set", async () => {
+  // normalizeKnownCodes must handle both — settings.json loaders typically
+  // pass arrays, while productCodeCache.getCodes() returns a Set. Regression
+  // here would silently disable catalog filtering for one of the callers.
+  const result = await detectArticle(
+    "код товара ноль один два три четыре семнадцать размер",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: ["01234", "99999"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01234");
+});
+
+test("candidate without exact or prefix match in catalog passes through unchanged when alone", async () => {
+  // If no candidate matches the catalog at all, applyKnownCodeHints must
+  // not strip the lot. We surface the raw regex candidate so the operator
+  // can still confirm manually (or the catalog refresh fixes it later).
+  const result = await detectArticle(
+    "код товара 99999",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["01234"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "99999");
+  assert.notEqual(result.chosen?.knownCode, true);
+});
+
+test("known-catalog candidates win over unknown ones in the same transcript", async () => {
+  // Two leading numeric tokens: "01234" is in the catalog, "5555" is not.
+  // The old behaviour produced both as ambiguous. With catalog filtering,
+  // only the validated one survives — status flips to confirmed.
+  const result = await detectArticle(
+    "код товара 01234 5555",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["01234"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01234");
+  assert.equal(result.chosen?.knownCode, true);
+});
+
+test("LLM fallback is skipped when knownCodes is empty (no catalog = no LLM)", async () => {
+  // Even with an LLM key configured, an empty catalog means LLM output
+  // cannot be validated and must not be published — better to stay silent.
+  const result = await detectArticle(
+    "код товара какая-то невнятная фраза без чисел",
+    {
+      ...baseConfig,
+      triggers: ["код товара"],
+      knownCodes: new Set(),
+      yandexgpt: { apiKey: "fake", folderId: "fake", endpoint: "http://127.0.0.1:1", model: "x" },
+    },
+  );
+  // No fetch happens (catalog empty); status falls through to no_match.
+  assert.equal(result.status, "no_match");
+});
+
+test("LLM fallback is skipped when YandexGPT keys are missing", async () => {
+  // Symmetric guard: catalog present, LLM not configured — no fallback.
+  const result = await detectArticle(
+    "код товара какая-то невнятная фраза без чисел",
+    {
+      ...baseConfig,
+      triggers: ["код товара"],
+      knownCodes: new Set(["01234"]),
+      yandexgpt: { apiKey: "", folderId: "", endpoint: "", model: "" },
+    },
+  );
+  assert.equal(result.status, "no_match");
+});
+
+test("LLM fallback returns llm_error when fetch fails (used by ws-server early-exit)", async () => {
+  // ws-server's detection loop breaks on llm_error to avoid hammering a
+  // broken API. Verify the status surfaces so the guard has something to
+  // key off. We point at a non-routable host to force fetch to throw.
+  const result = await detectArticle(
+    "код товара какая-то невнятная фраза без чисел",
+    {
+      ...baseConfig,
+      triggers: ["код товара"],
+      knownCodes: new Set(["01234"]),
+      yandexgpt: { apiKey: "k", folderId: "f", endpoint: "http://127.0.0.1:1", model: "m" },
+    },
+  );
+  assert.equal(result.status, "llm_error");
+  assert.ok(typeof result.error === "string" && result.error.length > 0);
 });
 
 test("trigger cache stays consistent across calls with the same array", async () => {

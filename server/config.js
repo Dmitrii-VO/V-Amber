@@ -68,23 +68,19 @@ export const config = {
     maxLength: parseIntEnv(process.env.VOICE_ARTICLE_MAX_LENGTH, 10),
     finalBufferSize: parseIntEnv(process.env.VOICE_ARTICLE_FINAL_BUFFER_SIZE, 3),
     triggerWindowMs: parseIntEnv(process.env.VOICE_ARTICLE_TRIGGER_WINDOW_MS, 8000),
-    notificationDedupMs: parseIntEnv(process.env.VOICE_ARTICLE_NOTIFICATION_DEDUP_MS, 15000),
+    // YandexGPT fallback: вызывается ТОЛЬКО когда regex ничего не вернул,
+    // триггер найден и каталог продуктов загружен. Кандидаты от LLM
+    // обязательно проходят валидацию через knownCodes — выдуманный артикул
+    // не может попасть в публикацию.
     yandexgpt: {
-      apiKey: process.env.YANDEX_GPT_API_KEY?.trim() || process.env.YANDEX_SPEECHKIT_API_KEY?.trim() || "",
-      folderId: process.env.YANDEX_GPT_FOLDER_ID?.trim() || process.env.YANDEX_SPEECHKIT_FOLDER_ID?.trim() || "",
-      model: process.env.YANDEX_GPT_MODEL?.trim() || "yandexgpt-5-lite/latest",
+      apiKey: process.env.YANDEX_GPT_API_KEY?.trim() || "",
+      folderId: process.env.YANDEX_GPT_FOLDER_ID?.trim() || "",
+      model: process.env.YANDEX_GPT_MODEL?.trim() || "yandexgpt-lite/latest",
       endpoint: process.env.YANDEX_GPT_ENDPOINT?.trim() || "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
     },
   },
   discount: {
     triggers: parseCsvEnv(process.env.VOICE_DISCOUNT_TRIGGERS, ["скидка", "скидку", "скидки"]),
-  },
-  telegram: {
-    botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
-    chatIds: parseCsvEnv(process.env.TELEGRAM_CHAT_ID, []),
-    primaryChatId: parseCsvEnv(process.env.TELEGRAM_CHAT_ID, [])[0] || "",
-    pollingTimeoutSec: parseIntEnv(process.env.TELEGRAM_POLLING_TIMEOUT_SEC, 30),
-    confirmationTtlMs: parseIntEnv(process.env.TELEGRAM_CONFIRMATION_TTL_MS, 300000),
   },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),
@@ -100,11 +96,5 @@ export const config = {
 if (config.articleExtraction.minLength > config.articleExtraction.maxLength) {
   throw new Error(
     `VOICE_ARTICLE_MIN_LENGTH (${config.articleExtraction.minLength}) must be <= VOICE_ARTICLE_MAX_LENGTH (${config.articleExtraction.maxLength})`,
-  );
-}
-
-if (!config.articleExtraction.yandexgpt.apiKey || !config.articleExtraction.yandexgpt.folderId) {
-  process.emitWarning(
-    "YandexGPT fallback disabled: set YANDEX_GPT_API_KEY and YANDEX_GPT_FOLDER_ID (or SpeechKit equivalents).",
   );
 }

@@ -6,6 +6,11 @@ function delay(ms) {
   });
 }
 
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function normalizeVkOwnerId(value) {
   const normalized = String(value || "").trim();
   return /^-?\d+$/.test(normalized) && normalized !== "0" ? normalized : "";
@@ -103,6 +108,23 @@ function buildPhotoAttachment(photo) {
   return `photo${photo.owner_id}_${photo.id}${accessKey}`;
 }
 
+function isVkRateLimitError(error) {
+  return error?.vkErrorCode === 6;
+}
+
+// Ошибки, которые не лечатся ретраем: повторный запрос даст то же самое,
+// а квоту мы потратим. Бросаем сразу, выше по стеку лот может быть помечен
+// «битым» и опрос/публикации для него остановлены.
+//   14  — нужна капча (программно не решить);
+//   15  — доступ запрещён, видео приватное или удалено;
+//   100 — невалидный параметр (баг в коде, не в окружении);
+//   801 — комментарии у видео закрыты оператором.
+const VK_FATAL_ERROR_CODES = new Set([14, 15, 100, 801]);
+
+function isVkFatalError(error) {
+  return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
+}
+
 export function createVkPublisher(config) {
   const userToken = config?.userToken || "";
   const apiVersion = config?.apiVersion || "5.199";
@@ -111,6 +133,57 @@ export function createVkPublisher(config) {
   let liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
   let liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
   const isEnabled = Boolean(userToken);
+  const minApiIntervalMs = parsePositiveInt(config?.apiMinIntervalMs, 1100);
+  const rateLimitBackoffMs = parsePositiveInt(config?.apiRateLimitBackoffMs, 1500);
+  // Адаптивный backoff: при каждой ошибке 6 удваиваем «штраф» к интервалу,
+  // при первом успешном ответе сбрасываем. Так после серии rate-limit'ов
+  // мы автоматически замедляемся, а после восстановления — возвращаемся
+  // к норме без ручной настройки.
+  const MAX_BACKOFF_MULTIPLIER = 8;
+  let backoffMultiplier = 1;
+  let apiQueue = Promise.resolve();
+  let nextApiCallAt = 0;
+
+  function enqueueVkApiCall(method, operation) {
+    const run = apiQueue.then(async () => {
+      const waitMs = Math.max(0, nextApiCallAt - Date.now());
+      if (waitMs > 0) {
+        await delay(waitMs);
+      }
+
+      try {
+        const result = await operation();
+        // Успех — затухание адаптивного штрафа.
+        if (backoffMultiplier > 1) {
+          backoffMultiplier = 1;
+          logger.info("vk", "api_rate_limit_recovered", { method });
+        }
+        return result;
+      } catch (error) {
+        if (isVkRateLimitError(error)) {
+          // Внутренний ретрай убран: пусть верхний sendWithRetry решает,
+          // повторять ли. Здесь только наращиваем штраф к следующему вызову,
+          // чтобы не уходить в стену повторно сразу же.
+          const previousMultiplier = backoffMultiplier;
+          backoffMultiplier = Math.min(MAX_BACKOFF_MULTIPLIER, backoffMultiplier * 2);
+          logger.warn("vk", "api_rate_limited", {
+            method,
+            previousMultiplier,
+            nextMultiplier: backoffMultiplier,
+            adaptiveDelayMs: minApiIntervalMs * backoffMultiplier,
+            error,
+          });
+        }
+        throw error;
+      } finally {
+        // При rate-limit прибавляем не minApiIntervalMs, а штрафованный.
+        nextApiCallAt = Date.now() + minApiIntervalMs * backoffMultiplier;
+      }
+    });
+
+    apiQueue = run.catch(() => {});
+    return run;
+  }
 
   async function callVkApi(method, params) {
     const url = new URL(`https://api.vk.com/method/${method}`);
@@ -124,8 +197,10 @@ export function createVkPublisher(config) {
     url.searchParams.set("access_token", userToken);
     url.searchParams.set("v", apiVersion);
 
-    const response = await fetch(url, { method: "POST" });
-    return parseVkResponse(response);
+    return enqueueVkApiCall(method, async () => {
+      const response = await fetch(url, { method: "POST" });
+      return parseVkResponse(response);
+    });
   }
 
   async function uploadCommentPhoto(photo) {
@@ -197,6 +272,20 @@ export function createVkPublisher(config) {
         return response;
       } catch (error) {
         lastError = error;
+
+        // Безнадёжные ошибки (капча, закрытые комментарии и т.п.) — повтор
+        // не поможет, бросаем сразу. Это снижает шум в логах и экономит
+        // квоту: один такой запрос больше не превращается в 3+ выстрела.
+        if (isVkFatalError(error)) {
+          logger.warn("vk", "publish_failed_fatal", {
+            ...meta,
+            attempt,
+            vkErrorCode: error.vkErrorCode,
+            error,
+          });
+          throw error;
+        }
+
         logger.warn("vk", "publish_failed", {
           ...meta,
           attempt,
@@ -204,6 +293,8 @@ export function createVkPublisher(config) {
         });
 
         if (attempt < 3) {
+          // Экспоненциальная пауза 400ms → 800ms. На rate-limit поверх
+          // этого ещё сработает адаптивный backoff в enqueueVkApiCall.
           await delay(400 * attempt);
         }
       }
@@ -480,6 +571,8 @@ export function resolveVkConfig(env) {
     accessToken: env.VK_ACCESS_TOKEN?.trim() || "",
     groupId: env.VK_GROUP_ID?.trim() || "",
     apiVersion: env.VK_API_VERSION?.trim() || "5.199",
+    apiMinIntervalMs: env.VK_API_MIN_INTERVAL_MS?.trim() || "1100",
+    apiRateLimitBackoffMs: env.VK_API_RATE_LIMIT_BACKOFF_MS?.trim() || "1500",
     placeholderImageUrl: env.LOT_DEFAULT_PLACEHOLDER_IMAGE_URL?.trim() || "",
     liveVideoUrl: env.VK_LIVE_VIDEO_URL?.trim() || "",
     liveOwnerId: env.VK_LIVE_OWNER_ID?.trim() || liveVideo.ownerId,

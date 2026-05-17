@@ -36,8 +36,8 @@
         </div>
 
         <div class="topbar-actions">
-          <button id="sendLogsButton" class="btn btn--ghost" title="Отправить логи разработчику в Telegram">
-            Отправить логи
+          <button id="sendLogsButton" class="btn btn--ghost" title="Скачать диагностический ZIP">
+            Скачать логи
           </button>
 
           <label id="safeModeLabel" class="toggle">
@@ -197,7 +197,7 @@
     <div id="sendLogsModal" class="modal" hidden>
       <div class="modal-card">
         <div class="modal-head">
-          <h3>Отправить логи разработчику</h3>
+          <h3>Скачать логи</h3>
           <button id="sendLogsClose" class="btn btn--ghost" aria-label="Закрыть">×</button>
         </div>
         <div class="modal-body">
@@ -214,7 +214,7 @@
         <div class="modal-actions">
           <button id="sendLogsCancel" class="btn btn--ghost">Отмена</button>
           <button id="sendLogsDownload" class="btn btn--ghost">Скачать ZIP</button>
-          <button id="sendLogsSubmit" class="btn btn--primary">Отправить в Telegram</button>
+          <button id="sendLogsSubmit" class="btn btn--primary" hidden>Отправить</button>
         </div>
       </div>
     </div>

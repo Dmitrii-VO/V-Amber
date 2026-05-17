@@ -96,7 +96,7 @@ if [ "$NEED_SETUP" = true ]; then
 YANDEX_SPEECHKIT_API_KEY=${SPEECHKIT_KEY}
 YANDEX_SPEECHKIT_FOLDER_ID=${FOLDER_ID}
 
-# VK, Telegram и МойСклад можно добавить позже по примеру .env.example.
+# VK и МойСклад можно добавить позже по примеру .env.example.
 PORT=8080
 EOF
 

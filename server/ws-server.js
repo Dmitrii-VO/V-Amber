@@ -4,7 +4,6 @@ import { createSessionLog } from "./session-log.js";
 import { SpeechKitStreamingSession } from "./speechkit-stream.js";
 import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount } from "./discount-detector.js";
-import { createTelegramNotifier } from "./telegram.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange, wrapWithSafeMode } from "./safe-mode.js";
@@ -49,13 +48,8 @@ function getVkApiErrorCode(error) {
 
 export function attachWsServer(httpServer, config, services = {}) {
   const wsServer = new WebSocketServer({ noServer: true });
-  const telegram = wrapWithSafeMode(
-    services.telegram || createTelegramNotifier(config.telegram),
-    ["sendArticleDetected", "sendAmbiguousArticle", "sendDiscountApplied"],
-    "telegram",
-  );
   const moysklad = wrapWithSafeMode(
-    createMoySkladClient(config.moysklad),
+    services.moysklad || createMoySkladClient(config.moysklad),
     ["createCustomerOrderReservation", "appendPositionToCustomerOrder"],
     "moysklad",
   );
@@ -65,14 +59,8 @@ export function attachWsServer(httpServer, config, services = {}) {
     "vk",
   );
   const detectionConfig = config.articleExtraction;
+  const productCodeCache = services.productCodeCache || null;
   const reservationKeyword = "бронь";
-
-  let activeDiscountApplier = null;
-  telegram.setDiscountHandler(async (amount) => {
-    if (activeDiscountApplier) {
-      await activeDiscountApplier(amount);
-    }
-  });
 
   httpServer.on("upgrade", (request, socket, head) => {
     let pathname;
@@ -103,8 +91,6 @@ export function attachWsServer(httpServer, config, services = {}) {
     let lastDetection = null;
     let triggerActiveUntil = 0;
     let triggerSessionFinals = [];
-    let lastNotification = null;
-    let lastAmbiguousNotification = null;
     let nextRunId = 1;
     let activeRunId = null;
     let activeDetectionActionId = null;
@@ -112,7 +98,46 @@ export function attachWsServer(httpServer, config, services = {}) {
     let commentPollingActive = false;
     let customerOrdersByViewerId = new Map();
     let customerOrderSessionVersion = 1;
-    activeDiscountApplier = applyDiscount;
+    // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
+    // другая неустранимая ошибка. Любые публикации/опрос для такого лота —
+    // no-op до конца сессии; пользователь увидит уведомление в UI один раз.
+    const poisonedLotSessionIds = new Set();
+
+    function isLotPoisoned(lotSessionId) {
+      return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
+    }
+
+    function markLotPoisoned(lot, reason, error) {
+      const lotSessionId = lot?.lotSessionId;
+      if (!lotSessionId || poisonedLotSessionIds.has(lotSessionId)) {
+        return;
+      }
+      poisonedLotSessionIds.add(lotSessionId);
+      // Останавливаем активный poll-цикл этого лота — следующая итерация
+      // увидит увеличенный generation и выйдет.
+      commentPollingGeneration += 1;
+      commentPollingActive = false;
+      logger.warn("vk", "lot_poisoned", {
+        connectionId,
+        lotSessionId,
+        code: lot?.code || null,
+        reason,
+        vkErrorCode: error?.vkErrorCode ?? null,
+        error,
+      });
+      sendJson(websocket, {
+        type: "warning",
+        message: reason === "comments_closed"
+          ? "У видео отключены комментарии — включите их в VK и откройте лот заново"
+          : `Лот ${lot?.code || ""} больше не принимает действия VK: ${error?.message || reason}`,
+      });
+    }
+
+    function handleVkPublishError(lot, error) {
+      if (error?.vkErrorCode === 801) {
+        markLotPoisoned(lot, "comments_closed", error);
+      }
+    }
 
     function emitState() {
       sendJson(websocket, {
@@ -135,8 +160,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       activeDetectionActionId = null;
       triggerActiveUntil = 0;
       triggerSessionFinals = [];
-      lastNotification = null;
-      lastAmbiguousNotification = null;
     }
 
     function resetCustomerOrders() {
@@ -215,6 +238,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         return "Товар закончился. Бронь не создана.";
       }
 
+      if (event.status === "product_not_found") {
+        return "Товар не найден. Бронь не создана.";
+      }
+
       if (event.status === "waitlist_pending") {
         return "Бронь принята. Вы в очереди, подтвердим следующим сообщением.";
       }
@@ -256,6 +283,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      if (isLotPoisoned(lot?.lotSessionId)) {
+        return;
+      }
+
       void vk.publishReservationReply({
         commentId: event.commentId,
         message,
@@ -264,6 +295,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         viewerId: event.viewerId,
         status: event.status,
       }).catch((error) => {
+        handleVkPublishError(lot, error);
         logger.warn("vk", "reservation_reply_failed", {
           connectionId,
           lotSessionId: lot?.lotSessionId || null,
@@ -319,6 +351,20 @@ export function attachWsServer(httpServer, config, services = {}) {
         logger.info("vk", "reservation_waitlist_pending", {
           connectionId,
           lotSessionId: lot.lotSessionId,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+        });
+        emitState();
+        notifyReservationStatus(lot, event);
+        return;
+      }
+
+      if (!lot.product?.id) {
+        event.status = "product_not_found";
+        logger.warn("vk", "reservation_product_not_found", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
           commentId: event.commentId,
           viewerId: event.viewerId,
         });
@@ -520,11 +566,11 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function isFatalCommentReadError(error) {
       // Genuinely unrecoverable for THIS video: access denied, bad params,
-      // video missing. Auth errors (code 5) are LOUD but recoverable on
-      // token refresh, so they no longer kill the poll loop.
+      // video missing, comments closed. Auth errors (code 5) are LOUD but
+      // recoverable on token refresh, so they no longer kill the poll loop.
       const errorCode = getVkApiErrorCode(error);
       if (errorCode !== null) {
-        return [15, 100].includes(errorCode);
+        return [15, 100, 801].includes(errorCode);
       }
 
       const message = error instanceof Error ? error.message : String(error);
@@ -689,7 +735,12 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      if (isLotPoisoned(lot.lotSessionId)) {
+        return;
+      }
+
       void vk.publishLotClosed(lot).catch((error) => {
+        handleVkPublishError(lot, error);
         logger.error("vk", "lot_close_publish_failed", {
           connectionId,
           code: lot.code,
@@ -757,28 +808,18 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
       sessionLog.logDiscount({ amount, originalPrice, newPrice, code: activeLot.code });
 
-      await Promise.all([
-        vk.publishDiscountUpdate(activeLot).catch((error) => {
-          logger.error("vk", "discount_publish_failed", {
-            connectionId,
-            lotSessionId: activeLot?.lotSessionId,
-            error,
-          });
-        }),
-        telegram.sendDiscountApplied({
-          discountAmount: amount,
-          originalPrice,
-          newPrice,
-          code: activeLot.code,
-          lotSessionId: activeLot.lotSessionId,
-        }).catch((error) => {
-          logger.error("telegram", "discount_notify_failed", {
-            connectionId,
-            lotSessionId: activeLot?.lotSessionId,
-            error,
-          });
-        }),
-      ]);
+      if (isLotPoisoned(activeLot?.lotSessionId)) {
+        return;
+      }
+
+      await vk.publishDiscountUpdate(activeLot).catch((error) => {
+        handleVkPublishError(activeLot, error);
+        logger.error("vk", "discount_publish_failed", {
+          connectionId,
+          lotSessionId: activeLot?.lotSessionId,
+          error,
+        });
+      });
 
       emitState();
     }
@@ -810,38 +851,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       return [...new Set(inputs.filter(Boolean))];
     }
 
-    function shouldSendNotification(code, transcript) {
-      const key = `${code}|${transcript}`;
-      const now = Date.now();
-
-      if (
-        lastNotification
-        && lastNotification.key === key
-        && now - lastNotification.sentAt < detectionConfig.notificationDedupMs
-      ) {
-        return false;
-      }
-
-      lastNotification = { key, sentAt: now };
-      return true;
-    }
-
-    function shouldSendAmbiguousNotification(detection) {
-      const key = `${detection.transcript}|${detection.candidates.map((candidate) => candidate.code).join(",")}`;
-      const now = Date.now();
-
-      if (
-        lastAmbiguousNotification
-        && lastAmbiguousNotification.key === key
-        && now - lastAmbiguousNotification.sentAt < detectionConfig.notificationDedupMs
-      ) {
-        return false;
-      }
-
-      lastAmbiguousNotification = { key, sentAt: now };
-      return true;
-    }
-
     function isDetectionStillActive({ runId = null, enforceActiveRun = false, expectedDetectionId = null } = {}) {
       if (enforceActiveRun && runId !== activeRunId) {
         return false;
@@ -854,7 +863,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       return true;
     }
 
-    function buildConfirmedLot(detection, selectedCode, source = "telegram_manual", productCard = null) {
+    function buildConfirmedLot(detection, selectedCode, source = "voice", productCard = null) {
       const previousLot = activeLot;
 
       return {
@@ -884,7 +893,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       };
     }
 
-    function activateConfirmedLot(detection, nextLot, source = "telegram_manual") {
+    function activateConfirmedLot(detection, nextLot, source = "voice") {
       activeLot = nextLot;
       lastDetection = {
         ...detection,
@@ -937,10 +946,11 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       const previousLot = activeLot;
 
-      if (previousLot?.lotSessionId) {
+      if (previousLot?.lotSessionId && !isLotPoisoned(previousLot.lotSessionId)) {
         try {
           await vk.publishLotClosed(previousLot);
         } catch (error) {
+          handleVkPublishError(previousLot, error);
           logger.error("vk", "lot_close_publish_failed", {
             connectionId,
             code: previousLot.code,
@@ -961,6 +971,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         const publication = await vk.publishLotCard(confirmedLot, productCard);
         publicationCommentId = getVkPublicationCommentId(publication);
       } catch (error) {
+        handleVkPublishError(confirmedLot, error);
         logger.error("vk", "lot_card_publish_failed", {
           connectionId,
           code: selectedCode,
@@ -995,29 +1006,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         source: confirmedLot.source,
       });
       startCommentPolling(confirmedLot);
-
-      if (shouldSendNotification(selectedCode, detection.transcript)) {
-        if (
-          !isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })
-          || activeLot?.lotSessionId !== confirmedLot.lotSessionId
-        ) {
-          return;
-        }
-
-        await telegram.sendArticleDetected({
-          code: confirmedLot.code,
-          lotSessionId: confirmedLot.lotSessionId,
-          transcript: confirmedLot.transcript,
-          source: confirmedLot.source,
-          productCard,
-        });
-      } else {
-        logger.info("telegram", "message_skipped_duplicate", {
-          connectionId,
-          code: selectedCode,
-          transcript: detection.transcript,
-        });
-      }
 
       triggerActiveUntil = 0;
       triggerSessionFinals = [];
@@ -1090,7 +1078,10 @@ export function attachWsServer(httpServer, config, services = {}) {
                 let detection = null;
 
                 for (const input of detectionInputs) {
-                  const candidateDetection = await detectArticle(input, detectionConfig);
+                  const candidateDetection = await detectArticle(input, {
+                    ...detectionConfig,
+                    knownCodes: productCodeCache?.getCodes?.() || null,
+                  });
 
                   if (!detection) {
                     detection = candidateDetection;
@@ -1115,9 +1106,10 @@ export function attachWsServer(httpServer, config, services = {}) {
                     detection = candidateDetection;
                   }
 
-                  // YandexGPT is broken or rate-limited — running the rest of
-                  // the input variants would just rack up more failed LLM calls
-                  // with the same outcome. Bail out of the loop here.
+                  // YandexGPT упал — повторять вызов на остальных вариантах
+                  // из buildDetectionInputs бессмысленно: тот же ключ/квота
+                  // даст ту же ошибку. Выходим, чтобы не плодить N упавших
+                  // HTTP-запросов на один final transcript.
                   if (candidateDetection.status === "llm_error") {
                     break;
                   }
@@ -1152,39 +1144,6 @@ export function attachWsServer(httpServer, config, services = {}) {
                     transcript: detectionWithId.transcript,
                     candidates: detectionWithId.candidates,
                   });
-
-                  if (shouldSendAmbiguousNotification(detectionWithId)) {
-                    activeDetectionActionId = detectionWithId.detectionId;
-                    // Drain the accumulated finals window so a follow-up
-                    // trigger doesn't splice the next phrase onto this one
-                    // and produce a phantom code while the operator is busy
-                    // confirming in Telegram.
-                    triggerSessionFinals = [];
-                    void telegram.sendAmbiguousArticle({
-                      transcript: detectionWithId.transcript,
-                      candidates: detectionWithId.candidates,
-                      onConfirm: async (selectedCode) => {
-                        await handleConfirmedDetection(detectionWithId, selectedCode, "telegram_manual", {
-                          runId,
-                          enforceActiveRun: true,
-                          expectedDetectionId: detectionWithId.detectionId,
-                        });
-                      },
-                    }).catch((error) => {
-                      logger.error("telegram", "ambiguity_notification_failed", {
-                        connectionId,
-                        transcript: detectionWithId.transcript,
-                        candidates: detectionWithId.candidates,
-                        error,
-                      });
-                    });
-                  }
-                } else if (detectionWithId.status === "llm_error") {
-                  logger.warn("article", "article_llm_error", {
-                    connectionId,
-                    transcript: detectionWithId.transcript,
-                    error: detectionWithId.error,
-                  });
                 } else if (detectionWithId.status === "awaiting_continuation") {
                   logger.info("article", "article_awaiting_continuation", {
                     connectionId,
@@ -1198,15 +1157,6 @@ export function attachWsServer(httpServer, config, services = {}) {
 
                 emitState();
               })().catch((error) => {
-                if (activeLot?.code) {
-                  logger.error("telegram", "article_notification_failed", {
-                    connectionId,
-                    code: activeLot.code,
-                    lotSessionId: activeLot.lotSessionId,
-                    error,
-                  });
-                }
-
                 logger.error("article", "article_detection_failed", {
                   connectionId,
                   text,
@@ -1319,9 +1269,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       session = null;
       resetCustomerOrders();
       resetDetectionState();
-      if (activeDiscountApplier === applyDiscount) {
-        activeDiscountApplier = null;
-      }
       unsubscribeSafeMode();
     });
   });

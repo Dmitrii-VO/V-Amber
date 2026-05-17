@@ -105,10 +105,8 @@ export async function listBundleFiles() {
 
 function activeIntegrationFlags(config) {
   return {
-    telegram: Boolean(config?.telegram?.botToken && (config.telegram.primaryChatId || config.telegram.chatIds?.length)),
-    vk: Boolean(config?.vk?.token),
+    vk: Boolean(config?.vk?.userToken),
     moysklad: Boolean(config?.moysklad?.login && config.moysklad?.password),
-    yandexgpt: Boolean(config?.articleExtraction?.yandexgpt?.apiKey),
     speechkit: Boolean(config?.speechkit?.apiKey),
   };
 }

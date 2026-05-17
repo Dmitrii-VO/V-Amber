@@ -110,23 +110,6 @@ if [ "$NEED_SETUP" = true ]; then
       "")
   fi
 
-  # ── Telegram (опционально) ────────────────────
-  TG_TOKEN=""
-  TG_CHAT=""
-  if _confirm "V-Amber — Telegram" \
-    "Настроить Telegram-уведомления?\n\nБот будет сообщать об обнаруженных артикулах,\nпринятых бронях и ждать подтверждений при неоднозначных кодах.\n\nЕсли пропустить — можно добавить позже в файл .env"; then
-
-    TG_TOKEN=$(_ask \
-      "V-Amber — Telegram (1/2)" \
-      "Токен Telegram-бота\n\nГде взять:\n1. Напишите @BotFather в Telegram\n2. /newbot → задайте имя и username\n3. Скопируйте токен из ответа\n\nВставьте токен:" \
-      "")
-
-    TG_CHAT=$(_ask \
-      "V-Amber — Telegram (2/2)" \
-      "ID чата оператора\n\nГде взять:\n1. Напишите @userinfobot в Telegram\n2. Скопируйте число из поля «Id»\n\nВставьте ID:" \
-      "")
-  fi
-
   # ── МойСклад (опционально) ────────────────────
   MS_LOGIN=""
   MS_PASSWORD=""
@@ -167,10 +150,6 @@ YANDEX_SPEECHKIT_FOLDER_ID=${FOLDER_ID}
 
 # ── VK (опционально) ─────────────────────────
 VK_TOKEN=${VK_TOKEN}
-
-# ── Telegram (опционально) ───────────────────
-TELEGRAM_BOT_TOKEN=${TG_TOKEN}
-TELEGRAM_CHAT_ID=${TG_CHAT}
 
 # ── МойСклад (опционально) ───────────────────
 MOYSKLAD_LOGIN=${MS_LOGIN}

@@ -14,7 +14,7 @@ docker compose --env-file .env up --build  # Docker Desktop runtime
 
 Open `http://localhost:8080` in a browser after starting. Select a microphone and click Start.
 
-Mandatory at startup: `YANDEX_SPEECHKIT_API_KEY` in `.env`. Missing it crashes on launch. All other integrations (VK, MoySklad, Telegram) degrade gracefully when not configured.
+Mandatory at startup: `YANDEX_SPEECHKIT_API_KEY` in `.env`. Missing it crashes on launch. VK and MoySklad degrade gracefully when not configured.
 
 For macOS one-click startup, use `start.command` for local Node.js or
 `start-docker.command` for Docker Desktop. Use `update.command` to install the
@@ -22,16 +22,16 @@ latest GitHub Release while preserving `.env`, `logs/`, and `node_modules/`.
 
 ## Architecture in one paragraph
 
-Most business orchestration lives in `server/ws-server.js`. It owns the active-lot state machine, VK comment polling, reservation queue, active-lot stock guard, safe mode broadcasts, discount application, and per-session logging. The browser (`web-ui/app.js`) streams raw PCM audio over WebSocket; the server forwards it to Yandex SpeechKit via gRPC (`speechkit-stream.js`), extracts product article codes from final transcripts (`article-extractor.js`), detects spoken discounts (`discount-detector.js`), looks up inventory in MoySklad, publishes lot cards to VK, and notifies the operator via Telegram. Runtime state is in-memory and is lost on restart; durable output is limited to `logs/server.log` and `logs/sessions/*.md`.
+Most business orchestration lives in `server/ws-server.js`. It owns the active-lot state machine, VK comment polling, reservation queue, active-lot stock guard, safe mode broadcasts, discount application, and per-session logging. The browser (`web-ui/app.js`) streams raw PCM audio over WebSocket; the server forwards it to Yandex SpeechKit via gRPC (`speechkit-stream.js`), extracts product article codes from final transcripts (`article-extractor.js`) with optional MoySklad product-code cache hints, detects spoken discounts (`discount-detector.js`), looks up inventory in MoySklad, and publishes lot cards to VK. Runtime state is in-memory and is lost on restart; durable output is limited to `logs/server.log` and `logs/sessions/*.md`.
 
 ## Key flows
 
 | Flow | Entry point |
 |------|------------|
 | New lot opened (voice code detected) | `ws-server.js` → `article-extractor.js` → `moysklad.js` → `vk.js` |
-| Reservation received (VK "бронь" comment) | `vk.js` poll → `ws-server.js` → `moysklad.js` → `telegram.js` |
-| Discount command (voice or Telegram) | `discount-detector.js` / `telegram.js` → `ws-server.js` → `vk.js` / `telegram.js` |
-| Ambiguous article code | `ws-server.js` → `telegram.js` (await operator confirm before publishing) |
+| Reservation received (VK "бронь" comment) | `vk.js` poll → `ws-server.js` → `moysklad.js` |
+| Discount command (voice) | `discount-detector.js` → `ws-server.js` → `vk.js` |
+| Product-code cache refresh | `web-ui/app.js` → `/api/product-codes/refresh` → `moysklad.js` |
 | Safe mode toggle | `web-ui/app.js` or `/api/safe-mode` → `safe-mode.js` write guards |
 
 Reservation writes must not exceed the active lot's `product.availableStock`.
@@ -47,8 +47,10 @@ in VK without creating or appending a customer order.
 | `GET /health` | Returns `{ ok: true }` |
 | `GET /api/safe-mode` | Returns current safe mode state |
 | `POST /api/safe-mode` | Accepts `{ "enabled": true|false }` |
-| `GET /api/send-logs/preview` | Lists files that would be sent + cooldown |
-| `POST /api/send-logs` | Sends ZIP bundle to Telegram (or returns it for download with `{download:true}`) |
+| `GET /api/send-logs/preview` | Lists files that would be included in the ZIP |
+| `POST /api/send-logs` | Returns ZIP bundle for download with `{download:true}` |
+| `POST /api/product-codes/refresh` | Refreshes MoySklad product-code cache |
+| `GET /api/product-codes/status` | Returns product-code cache status |
 
 ## Configuration
 
@@ -73,7 +75,7 @@ Preserve these exactly in code, logs, and comments:
 - Before changing lot lifecycle logic in `ws-server.js`, trace `activeLot`, `primaryReservation`, waitlist event status, `customerOrderSessionVersion`, and safe mode behavior through the full reservation flow. Race conditions have caused bugs here before.
 - Before changing reservation capacity logic, verify that waitlist processing
   still subtracts already creating/confirmed events from `product.availableStock`.
-- `article-extractor.js` has a regex path and a YandexGPT fallback; changes to number parsing must handle both.
-- `safe-mode.js` wraps external write methods for Telegram, MoySklad, and VK. Keep write-blocking behavior explicit when adding new side effects.
+- `article-extractor.js` has a regex/number-word path plus optional known-code hints from MoySklad cache.
+- `safe-mode.js` wraps external write methods for MoySklad and VK. Keep write-blocking behavior explicit when adding new side effects.
 - `todo.md` tracks open bugs and planned features (Russian); check it before implementing adjacent features.
 - Versioning is automated: pushing to `main` triggers `.github/workflows/release.yml`, which patch-bumps `package.json` and publishes a matching `vX.Y.Z` release. For minor/major bumps, edit `version` in the same commit. The startup check in `server/version-check.js` uses the latest release tag to detect outdated installs.

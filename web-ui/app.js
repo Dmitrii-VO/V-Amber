@@ -533,14 +533,48 @@ function formatLatency(value) {
   return `${Math.round(value)} ms`;
 }
 
+async function refreshProductCodeCacheIfRequested() {
+  const confirmed = window.confirm(
+    "Загрузить коды товаров из МойСклад перед стартом?\n\nЭто поможет отличать артикул от размера и цены.",
+  );
+  if (!confirmed) {
+    logEvent("Загрузка кодов товаров пропущена", "warn");
+    return;
+  }
+
+  logEvent("Загружаю коды товаров из МойСклад…", "info");
+  const response = await fetch("/api/product-codes/refresh", { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error || `HTTP ${response.status}`);
+  }
+
+  logEvent(`Коды товаров загружены: ${payload.count || 0}`, "ok");
+}
+
 async function startStreaming() {
   if (state.lifecycle !== "idle") return;
 
   const setupGeneration = state.setupGeneration + 1;
   state.setupGeneration = setupGeneration;
-  setLifecycle("starting");
 
   try {
+    try {
+      await refreshProductCodeCacheIfRequested();
+    } catch (cacheError) {
+      logEvent(`Не удалось загрузить коды товаров: ${cacheError.message || cacheError}`, "warn");
+      const shouldContinue = window.confirm("Коды товаров не загрузились. Запустить эфир без кеша кодов?");
+      if (!shouldContinue) {
+        return;
+      }
+    }
+
+    if (state.setupGeneration !== setupGeneration || state.lifecycle !== "idle") {
+      return;
+    }
+
+    setLifecycle("starting");
+
     state.chunksSent = 0;
     state.bytesSent = 0;
     state.finalLines = [];
@@ -713,7 +747,7 @@ function setSendLogsStatus(text, level) {
 }
 
 function setSendLogsBusy(busy) {
-  elements.sendLogsSubmit.disabled = busy;
+  elements.sendLogsSubmit.disabled = true;
   elements.sendLogsDownload.disabled = busy;
   elements.sendLogsCancel.disabled = busy;
   elements.sendLogsClose.disabled = busy;
@@ -739,13 +773,10 @@ async function loadSendLogsPreview() {
       const note = f.truncated ? ` (обрезано из ${formatBytes(f.originalBytes)})` : "";
       return `<li><span>${f.name}</span><span>${formatBytes(f.bytes)}${note}</span></li>`;
     }).join("");
-    const cooldownLabel = payload.cooldownMs > 0
-      ? ` · повторно через ${Math.ceil(payload.cooldownMs / 1000)} с`
-      : "";
-    const telegramLabel = payload.telegramConfigured ? "Telegram настроен" : "Telegram не настроен — доступно только скачивание";
     elements.sendLogsMeta.textContent =
-      `Всего: ${formatBytes(payload.totalBytes)} в исходном виде · ${telegramLabel}${cooldownLabel}`;
-    elements.sendLogsSubmit.disabled = !payload.telegramConfigured || payload.cooldownMs > 0;
+      `Всего: ${formatBytes(payload.totalBytes)} в исходном виде · доступно только скачивание`;
+    elements.sendLogsSubmit.hidden = true;
+    elements.sendLogsSubmit.disabled = true;
     elements.sendLogsDownload.disabled = false;
   } catch (error) {
     elements.sendLogsMeta.textContent = `Ошибка: ${error.message}`;
@@ -764,36 +795,6 @@ elements.sendLogsClose.addEventListener("click", closeSendLogsModal);
 elements.sendLogsCancel.addEventListener("click", closeSendLogsModal);
 elements.sendLogsModal.addEventListener("click", (event) => {
   if (event.target === elements.sendLogsModal) closeSendLogsModal();
-});
-
-elements.sendLogsSubmit.addEventListener("click", async () => {
-  const userNote = elements.sendLogsNote.value.trim();
-  setSendLogsBusy(true);
-  setSendLogsStatus("Отправляю в Telegram...", null);
-  logEvent("Отправка логов разработчику...", "info");
-  try {
-    const response = await fetch("/api/send-logs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ userNote }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const reason = payload?.error || `HTTP ${response.status}`;
-      const detail = payload?.retryAfterMs ? ` (повторите через ${Math.ceil(payload.retryAfterMs / 1000)} с)` : "";
-      throw new Error(`${payload?.message || reason}${detail}`);
-    }
-    const totalKb = Math.max(1, Math.round((payload.totalBytes || 0) / 1024));
-    const partsLabel = payload.parts?.length > 1 ? ` в ${payload.parts.length} частях` : "";
-    setSendLogsStatus(`Отправлено${partsLabel} (${totalKb} КБ)`, "ok");
-    logEvent(`Логи отправлены${partsLabel} (${totalKb} КБ)`, "success");
-    setTimeout(closeSendLogsModal, 1500);
-  } catch (error) {
-    setSendLogsStatus(`Не удалось отправить: ${error.message}`, "error");
-    handleError(error, "Не удалось отправить логи");
-  } finally {
-    setSendLogsBusy(false);
-  }
 });
 
 elements.sendLogsDownload.addEventListener("click", async () => {
