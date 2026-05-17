@@ -91,6 +91,44 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Triggers come from config and are stable for the lifetime of a session, but
+// detectArticle runs on every final transcript. Without caching we re-normalize
+// every trigger and recompile three regexes per call. Keyed by the triggers
+// array identity (config object reuses the same reference across calls).
+const triggerCache = new WeakMap();
+
+function getTriggerCache(triggers) {
+  if (!Array.isArray(triggers) || triggers.length === 0) {
+    return { hasTriggerRegexes: [], captureRegexes: [], awaitingRegexes: [] };
+  }
+
+  const cached = triggerCache.get(triggers);
+  if (cached) {
+    return cached;
+  }
+
+  const fillerPattern = [...FILLER_WORDS].map(escapeRegex).join("|");
+  const hasTriggerRegexes = [];
+  const captureRegexes = [];
+  const awaitingRegexes = [];
+
+  for (const trigger of triggers) {
+    const normalizedTrigger = normalizeText(trigger);
+    if (!normalizedTrigger) {
+      continue;
+    }
+
+    const escaped = escapeRegex(normalizedTrigger);
+    hasTriggerRegexes.push(new RegExp(`(?:^|\\s)${escaped}(?:$|\\s)`));
+    captureRegexes.push(new RegExp(`(?:^|\\s)${escaped}(?:$|\\s)(.{0,80})`, "g"));
+    awaitingRegexes.push(new RegExp(`(?:^|\\s)${escaped}(?:\\s+(?:${fillerPattern}))*$`));
+  }
+
+  const entry = { hasTriggerRegexes, captureRegexes, awaitingRegexes };
+  triggerCache.set(triggers, entry);
+  return entry;
+}
+
 function normalizeText(text) {
   return text
     .toLowerCase()
@@ -396,16 +434,11 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
 function extractCandidatesByTriggers(text, triggers, config) {
   const normalized = normalizeText(text);
   const candidates = [];
+  const { captureRegexes } = getTriggerCache(triggers);
 
-  for (const trigger of triggers) {
-    const normalizedTrigger = normalizeText(trigger);
-    if (!normalizedTrigger) {
-      continue;
-    }
-
-    const pattern = new RegExp(`(?:^|\\s)${escapeRegex(normalizedTrigger)}(?:$|\\s)(.{0,80})`, "g");
+  for (const pattern of captureRegexes) {
+    pattern.lastIndex = 0;
     let match = pattern.exec(normalized);
-
     while (match) {
       candidates.push(...extractLeadingCandidatesFromSuffix(match[1], config));
       match = pattern.exec(normalized);
@@ -417,31 +450,14 @@ function extractCandidatesByTriggers(text, triggers, config) {
 
 export function transcriptHasTrigger(text, triggers) {
   const normalized = normalizeText(text);
-
-  return triggers.some((trigger) => {
-    const normalizedTrigger = normalizeText(trigger);
-    if (!normalizedTrigger) {
-      return false;
-    }
-
-    const pattern = new RegExp(`(?:^|\\s)${escapeRegex(normalizedTrigger)}(?:$|\\s)`);
-    return pattern.test(normalized);
-  });
+  const { hasTriggerRegexes } = getTriggerCache(triggers);
+  return hasTriggerRegexes.some((pattern) => pattern.test(normalized));
 }
 
 function isAwaitingContinuation(text, triggers) {
   const normalized = normalizeText(text);
-  const fillerPattern = [...FILLER_WORDS].map(escapeRegex).join("|");
-
-  return triggers.some((trigger) => {
-    const normalizedTrigger = normalizeText(trigger);
-    if (!normalizedTrigger) {
-      return false;
-    }
-
-    const pattern = new RegExp(`(?:^|\\s)${escapeRegex(normalizedTrigger)}(?:\\s+(?:${fillerPattern}))*$`);
-    return pattern.test(normalized);
-  });
+  const { awaitingRegexes } = getTriggerCache(triggers);
+  return awaitingRegexes.some((pattern) => pattern.test(normalized));
 }
 
 async function extractWithYandexGpt(text, config) {

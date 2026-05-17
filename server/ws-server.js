@@ -148,6 +148,26 @@ export function attachWsServer(httpServer, config, services = {}) {
       return String(text || "").trim().toLowerCase();
     }
 
+    const RESERVATION_HISTORY_LIMIT = 200;
+
+    function createBoundedIdSet(initial) {
+      const set = new Set(Array.isArray(initial) ? initial : []);
+      while (set.size > RESERVATION_HISTORY_LIMIT) {
+        set.delete(set.values().next().value);
+      }
+      return set;
+    }
+
+    function addBoundedId(set, id) {
+      if (set.has(id)) {
+        set.delete(id);
+      }
+      set.add(id);
+      while (set.size > RESERVATION_HISTORY_LIMIT) {
+        set.delete(set.values().next().value);
+      }
+    }
+
     function ensureReservationState(lot) {
       if (!lot) {
         return null;
@@ -156,26 +176,32 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (!lot.reservations) {
         lot.reservations = {
           lastCommentId: 0,
-          seenCommentIds: [],
-          acceptedUserIds: [],
+          seenCommentIds: createBoundedIdSet(),
+          acceptedUserIds: createBoundedIdSet(),
           events: [],
           // Persistent counter, separate from the trimmed events buffer above.
           // Without this, lots with more than 20 reservations under-report and
           // the stock guard lets extra orders through.
           committedReservationCount: 0,
         };
+      } else {
+        if (!(lot.reservations.seenCommentIds instanceof Set)) {
+          lot.reservations.seenCommentIds = createBoundedIdSet(lot.reservations.seenCommentIds);
+        }
+        if (!(lot.reservations.acceptedUserIds instanceof Set)) {
+          lot.reservations.acceptedUserIds = createBoundedIdSet(lot.reservations.acceptedUserIds);
+        }
       }
 
       return lot.reservations;
     }
 
     function rememberSeenComment(state, commentId) {
-      state.seenCommentIds.push(commentId);
-      state.seenCommentIds = state.seenCommentIds.slice(-200);
+      addBoundedId(state.seenCommentIds, commentId);
     }
 
     function hasSeenComment(state, commentId) {
-      return state.seenCommentIds.includes(commentId);
+      return state.seenCommentIds.has(commentId);
     }
 
     function addReservationEvent(lot, event) {
@@ -409,7 +435,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
         notifyReservationStatus(lot, event);
       } catch (error) {
-        state.acceptedUserIds = state.acceptedUserIds.filter((viewerId) => viewerId !== event.viewerId);
+        state.acceptedUserIds.delete(event.viewerId);
         // Roll back the counter increment from line ~302 so a later viewer
         // isn't blocked by this failed write.
         state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - 1);
@@ -519,7 +545,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               const viewerId = comment.from_id;
-              if (reservationState.acceptedUserIds.includes(viewerId)) {
+              if (reservationState.acceptedUserIds.has(viewerId)) {
                 logger.info("vk", "reservation_duplicate_ignored", {
                   connectionId,
                   lotSessionId: currentLot.lotSessionId,
@@ -529,8 +555,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 continue;
               }
 
-              reservationState.acceptedUserIds.push(viewerId);
-              reservationState.acceptedUserIds = reservationState.acceptedUserIds.slice(-200);
+              addBoundedId(reservationState.acceptedUserIds, viewerId);
 
               const profile = profileMap.get(viewerId);
               const event = {
@@ -814,8 +839,8 @@ export function attachWsServer(httpServer, config, services = {}) {
         vkPublication: null,
         reservations: {
           lastCommentId: 0,
-          seenCommentIds: [],
-          acceptedUserIds: [],
+          seenCommentIds: createBoundedIdSet(),
+          acceptedUserIds: createBoundedIdSet(),
           events: [],
         },
       };
@@ -1050,6 +1075,13 @@ export function attachWsServer(httpServer, config, services = {}) {
                     && detection.status === "no_match"
                   ) {
                     detection = candidateDetection;
+                  }
+
+                  // YandexGPT is broken or rate-limited — running the rest of
+                  // the input variants would just rack up more failed LLM calls
+                  // with the same outcome. Bail out of the loop here.
+                  if (candidateDetection.status === "llm_error") {
+                    break;
                   }
                 }
 

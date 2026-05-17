@@ -60,7 +60,8 @@
       "Bash(git update-index *)",
       "Bash(unzip -o -q logs/v-amber-logs-2026-05-16T17-45-47-053Z.zip -d logs/worklogs-3)",
       "Bash(python3 -m json.tool)",
-      "Bash(node --check server/article-extractor.js)"
+      "Bash(node --check server/article-extractor.js)",
+      "Bash(npm test *)"
     ]
   }
 }
