@@ -73,6 +73,10 @@ function parseMonetaryWords(words) {
   return value > 0 ? value : null;
 }
 
+// Matches "процент", "процентов", "%". Used to decide whether a captured
+// number is a percent (scale by salePrice) or a ruble amount.
+const PERCENT_RE = /(?:%|процент)/i;
+
 export function detectDiscount(text, triggers) {
   const normalized = text.toLowerCase().replace(/ё/g, "е");
 
@@ -85,17 +89,38 @@ export function detectDiscount(text, triggers) {
     return null;
   }
 
+  // 1) Digits with explicit percent — "скидка 30 процентов" / "скидка 30%".
+  const digitPercentMatch = /скидк[ауеюи]?\s+(?:в\s+)?(\d+)\s*(?:%|процент\w*)/.exec(normalized);
+  if (digitPercentMatch) {
+    const percent = parseInt(digitPercentMatch[1], 10);
+    if (percent > 0 && percent < 100) {
+      return { kind: "percent", value: percent };
+    }
+  }
+
+  // 2) Digits as rubles — "скидка 30", "скидка 30 рублей".
   const digitMatch = /скидк[ауеюи]?\s+(?:в\s+)?(\d+)(?:\s+руб(?:лей|ля)?)?/.exec(normalized);
   if (digitMatch) {
     const amount = parseInt(digitMatch[1], 10);
-    if (amount > 0) return { discountAmount: amount };
+    if (amount > 0) return { kind: "absolute", value: amount };
   }
 
+  // 3) Word numerals, possibly followed by "процент" → percent. Examples:
+  //    "скидка пятьдесят процентов", "скидка тридцать процентов",
+  //    "скидка сто рублей", "скидка пять".
   const wordMatch = /скидк[ауеюи]?\s+(?:в\s+)?(.+?)(?:\s+руб(?:лей|ля)?)?\s*$/.exec(normalized);
   if (wordMatch) {
-    const words = wordMatch[1].trim().split(/\s+/);
+    const tail = wordMatch[1].trim();
+    const isPercent = PERCENT_RE.test(tail);
+    const words = tail.replace(/\s+процент\w*$/i, "").trim().split(/\s+/);
     const amount = parseMonetaryWords(words);
-    if (amount) return { discountAmount: amount };
+    if (amount) {
+      if (isPercent) {
+        if (amount > 0 && amount < 100) return { kind: "percent", value: amount };
+      } else {
+        return { kind: "absolute", value: amount };
+      }
+    }
   }
 
   return null;

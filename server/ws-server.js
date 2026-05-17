@@ -159,6 +159,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           seenCommentIds: [],
           acceptedUserIds: [],
           events: [],
+          // Persistent counter, separate from the trimmed events buffer above.
+          // Without this, lots with more than 20 reservations under-report and
+          // the stock guard lets extra orders through.
+          committedReservationCount: 0,
         };
       }
 
@@ -205,16 +209,19 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     function getCommittedReservationCount(state) {
-      return state.events.filter((event) => ["creating_order", "reserved", "reserved_appended"].includes(event.status)).length;
+      return Math.max(0, state?.committedReservationCount || 0);
     }
 
     function getRemainingAvailableStock(lot, state) {
       const availableStock = lot?.product?.availableStock;
-      if (typeof availableStock !== "number" || !Number.isFinite(availableStock)) {
-        return null;
-      }
-
-      return Math.max(0, Math.floor(availableStock) - getCommittedReservationCount(state));
+      // Operator naming an article on air means at least one unit is in hand:
+      // treat unknown / zero stock as a floor of 1, so the first reservation
+      // is always allowed. Subsequent reservations on the same lot then bump
+      // committedReservationCount and the guard tightens.
+      const effectiveStock = (typeof availableStock === "number" && Number.isFinite(availableStock))
+        ? Math.max(1, Math.floor(availableStock))
+        : 1;
+      return Math.max(0, effectiveStock - getCommittedReservationCount(state));
     }
 
     function notifyReservationStatus(lot, event) {
@@ -300,6 +307,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         viewerId: event.viewerId,
       };
       event.status = "creating_order";
+      state.committedReservationCount = (state.committedReservationCount || 0) + 1;
       emitState();
 
       let nextWaitlistEvent = null;
@@ -334,6 +342,8 @@ export function attachWsServer(httpServer, config, services = {}) {
         // instead of falling through to the success path.
         if (order && order.skipped === true && order.safeMode === true) {
           event.status = "safe_mode_logged";
+          // No MoySklad write happened — release the slot in the counter.
+          state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - 1);
           logger.warn("safe-mode", "reservation_blocked_mid_flight", {
             connectionId,
             lotSessionId: lot.lotSessionId,
@@ -385,6 +395,9 @@ export function attachWsServer(httpServer, config, services = {}) {
         notifyReservationStatus(lot, event);
       } catch (error) {
         state.acceptedUserIds = state.acceptedUserIds.filter((viewerId) => viewerId !== event.viewerId);
+        // Roll back the counter increment from line ~302 so a later viewer
+        // isn't blocked by this failed write.
+        state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - 1);
         event.status = "order_failed";
         event.error = error instanceof Error ? error.message : String(error);
         logger.error("moysklad", "reservation_order_failed", {
@@ -609,22 +622,50 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
-    async function applyDiscount(amount) {
+    async function applyDiscount(input) {
       if (!activeLot?.vkPublication?.commentId || !activeLot.product) {
         return;
       }
 
-      if (amount <= 0 || amount >= activeLot.product.salePrice) {
+      const salePrice = activeLot.product.salePrice;
+      if (typeof salePrice !== "number" || !Number.isFinite(salePrice) || salePrice <= 0) {
         logger.warn("discount", "invalid_discount", {
           connectionId,
-          amount,
-          salePrice: activeLot.product.salePrice,
+          reason: "no_sale_price",
+          salePrice,
           lotSessionId: activeLot.lotSessionId,
         });
         return;
       }
 
-      const originalPrice = activeLot.product.salePrice;
+      // Back-compat: callers may pass a bare number (rubles) or a structured
+      // descriptor { kind, value }.
+      const descriptor = typeof input === "number" ? { kind: "absolute", value: input } : input;
+      let amount;
+      if (descriptor?.kind === "percent") {
+        const percent = Number(descriptor.value);
+        if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
+          logger.warn("discount", "invalid_discount", { connectionId, kind: "percent", value: descriptor.value });
+          return;
+        }
+        amount = Math.floor((salePrice * percent) / 100);
+      } else {
+        amount = Number(descriptor?.value);
+      }
+
+      if (!Number.isFinite(amount) || amount <= 0 || amount >= salePrice) {
+        logger.warn("discount", "invalid_discount", {
+          connectionId,
+          amount,
+          salePrice,
+          kind: descriptor?.kind,
+          rawValue: descriptor?.value,
+          lotSessionId: activeLot.lotSessionId,
+        });
+        return;
+      }
+
+      const originalPrice = salePrice;
       activeLot.discountAmount = amount;
       const newPrice = originalPrice - amount;
 
@@ -958,7 +999,10 @@ export function attachWsServer(httpServer, config, services = {}) {
 
               const discountResult = detectDiscount(text, config.discount.triggers);
               if (discountResult) {
-                void applyDiscount(discountResult.discountAmount).catch((error) => {
+                // detectDiscount now returns { kind, value }. Pass the full
+                // descriptor so percent discounts are scaled by current
+                // salePrice — fixes the "скидка 30 процентов → 30₽" bug.
+                void applyDiscount(discountResult).catch((error) => {
                   logger.error("discount", "apply_failed", { connectionId, text, error });
                 });
               }
