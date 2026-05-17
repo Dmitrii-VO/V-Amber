@@ -218,6 +218,28 @@ export function createMoySkladClient(config) {
         .map((item) => item.name),
     });
 
+    // Резолвим UUID статуса «Новый» один раз: нужен для поиска ранее
+    // созданного заказа клиента, в который можно дописать позицию вместо
+    // создания нового customer order на каждую бронь.
+    if (!defaults.customerOrderStateId) {
+      try {
+        const metadata = await requestJson("entity/customerorder/metadata", {});
+        const states = Array.isArray(metadata.states) ? metadata.states : [];
+        const newState = states.find((item) => /^нов/i.test(String(item?.name || "").trim()))
+          || states[0];
+        defaults.customerOrderStateId = newState?.id || "";
+        defaults.customerOrderStateHref = newState?.meta?.href || "";
+        logger.info("moysklad", "customer_order_state_resolved", {
+          stateId: defaults.customerOrderStateId,
+          stateName: newState?.name || null,
+        });
+      } catch (error) {
+        logger.warn("moysklad", "customer_order_state_resolve_failed", { error });
+      }
+    } else {
+      defaults.customerOrderStateHref = `${config.baseUrl.replace(/\/$/, "")}/entity/customerorder/metadata/states/${defaults.customerOrderStateId}`;
+    }
+
     cachedDefaults = defaults;
     return defaults;
   }
@@ -332,6 +354,44 @@ export function createMoySkladClient(config) {
   }
 
   const counterpartyLocks = new Map();
+
+  async function findLatestOpenCustomerOrder(counterpartyId) {
+    if (!counterpartyId) {
+      return null;
+    }
+
+    const defaults = await resolveDefaults();
+    if (!defaults.customerOrderStateHref) {
+      // Без href статуса «Новый» нельзя надёжно отличить открытые заказы
+      // от завершённых; лучше вернуть null и создать новый заказ, чем
+      // дописать позицию в уже отгружённый.
+      logger.warn("moysklad", "open_order_lookup_skipped_no_state", { counterpartyId });
+      return null;
+    }
+
+    const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
+    const filter = [
+      `agent=${agentHref}`,
+      `state=${defaults.customerOrderStateHref}`,
+    ].join(";");
+
+    const payload = await requestJson("entity/customerorder", {
+      filter,
+      order: "moment,desc",
+      limit: 1,
+    });
+
+    const row = payload.rows?.[0] || null;
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      name: row.name,
+      counterpartyId,
+    };
+  }
 
   async function ensureOrderHasBroadcastDescription(orderId) {
     const order = await requestJson(`entity/customerorder/${orderId}`);
@@ -457,6 +517,12 @@ export function createMoySkladClient(config) {
 
       return productCard;
     },
+    async findOpenCustomerOrderForCounterparty(counterpartyId) {
+      if (!isEnabled) {
+        return null;
+      }
+      return findLatestOpenCustomerOrder(counterpartyId);
+    },
     async ensureCounterparty({ viewerId, viewerName }) {
       if (!isEnabled) {
         return null;
@@ -559,7 +625,7 @@ export function createMoySkladClient(config) {
       counterpartyLocks.set(lockKey, promise);
       return promise;
     },
-    async createCustomerOrderReservation({ activeLot, productCard, reservation }) {
+    async createCustomerOrderReservation({ activeLot, productCard, reservation, counterparty: preResolvedCounterparty }) {
       if (!isEnabled || !activeLot?.product?.id || !reservation?.viewerId) {
         return null;
       }
@@ -569,10 +635,12 @@ export function createMoySkladClient(config) {
         throw new Error("MoySklad defaults are incomplete: organization/store is required");
       }
 
-      const counterparty = await this.ensureCounterparty({
-        viewerId: reservation.viewerId,
-        viewerName: reservation.viewerName,
-      });
+      const counterparty = preResolvedCounterparty?.id
+        ? preResolvedCounterparty
+        : await this.ensureCounterparty({
+          viewerId: reservation.viewerId,
+          viewerName: reservation.viewerName,
+        });
 
       const payload = {
         description: `#Эфир\nVK reservation. lot=${activeLot.code}; lotSessionId=${activeLot.lotSessionId}; commentId=${reservation.commentId}; viewerId=${reservation.viewerId}`,

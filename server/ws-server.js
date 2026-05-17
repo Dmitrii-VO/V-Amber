@@ -354,7 +354,44 @@ export function attachWsServer(httpServer, config, services = {}) {
       let nextWaitlistEvent = null;
 
       try {
-        const existingOrder = customerOrdersByViewerId.get(event.viewerId) || null;
+        let existingOrder = customerOrdersByViewerId.get(event.viewerId) || null;
+        let resolvedCounterparty = null;
+
+        // Cross-session merge: in-memory map is wiped when the WebSocket
+        // closes or the operator restarts the stream, so the same viewer's
+        // next reservation looks "fresh" even when MoySklad already has an
+        // open «Новый» order for them. Ask MoySklad as source of truth.
+        if (!existingOrder?.id) {
+          try {
+            resolvedCounterparty = await moysklad.ensureCounterparty({
+              viewerId: event.viewerId,
+              viewerName: event.viewerName,
+            });
+            if (resolvedCounterparty?.id) {
+              const found = await moysklad.findOpenCustomerOrderForCounterparty(resolvedCounterparty.id);
+              if (found?.id) {
+                existingOrder = found;
+                logger.info("moysklad", "open_customer_order_reused", {
+                  connectionId,
+                  lotSessionId: lot.lotSessionId,
+                  viewerId: event.viewerId,
+                  orderId: found.id,
+                  source: "cross_session_lookup",
+                });
+              }
+            }
+          } catch (lookupError) {
+            // Do not block the reservation on a lookup failure — falling
+            // through to createCustomerOrderReservation is the safe default
+            // (worst case: an extra order, same as before this feature).
+            logger.warn("moysklad", "open_order_lookup_failed", {
+              connectionId,
+              viewerId: event.viewerId,
+              error: lookupError,
+            });
+          }
+        }
+
         let order = null;
 
         if (existingOrder?.id) {
@@ -374,6 +411,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               salePrice: lot.product?.salePrice,
             },
             reservation: event,
+            counterparty: resolvedCounterparty,
           });
         }
 
