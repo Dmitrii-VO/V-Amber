@@ -261,13 +261,28 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       if (isSafeMode()) {
         event.status = "safe_mode_logged";
+        // Carry enough info that a later replay can reconstruct the order
+        // without re-deriving it from MoySklad: product UUID, original
+        // sale price, applied discount, comment text. This is the
+        // contract behind safe mode = "audit-only" runs.
+        const product = lot.product || {};
+        const discountAmount = Number(lot.discountAmount || 0);
+        const salePrice = Number(product.salePrice || 0);
+        const effectivePrice = Math.max(0, salePrice - discountAmount);
         logger.warn("safe-mode", "reservation_logged_only", {
           connectionId,
           lotSessionId: lot.lotSessionId,
           code: lot.code,
           commentId: event.commentId,
+          commentText: typeof event.text === "string" ? event.text.slice(0, 200) : "",
+          createdAt: event.createdAt || new Date().toISOString(),
           viewerId: event.viewerId,
           viewerName: event.viewerName,
+          productId: product.id || null,
+          productName: product.name || null,
+          salePrice: Number.isFinite(salePrice) ? salePrice : null,
+          discountAmount,
+          effectivePrice: Number.isFinite(effectivePrice) ? effectivePrice : null,
         });
         emitState();
         return;
