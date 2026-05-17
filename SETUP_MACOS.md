@@ -50,6 +50,50 @@ Docker-контейнере, подключает локальную папку 
 
 > **При повторных запусках** мастер не появляется — сервер запускается сразу.
 
+Если `start.command` не открывается двойным кликом после ручной передачи
+папки, выполните из Терминала:
+
+```bash
+cd ~/Desktop/V-Amber-main && chmod +x start.command && xattr -d com.apple.quarantine start.command 2>/dev/null
+```
+
+Если файл нужно создать заново на Mac, выполните из папки, где лежит проект:
+
+```bash
+cd ~/Desktop/V-Amber-main && printf '#!/bin/bash\ncd "$(dirname "$0")"\n/usr/local/bin/npm start\n\necho\nread -n 1 -p "Press any key to close..."\n' > start.command && chmod +x start.command && xattr -d com.apple.quarantine start.command 2>/dev/null
+```
+
+Если `npm` установлен не в `/usr/local/bin/npm`, проверьте путь командой
+`which npm` и замените путь в скрипте.
+
+---
+
+## Обновление через `update.command`
+
+В папке проекта есть файл `update.command`. Он скачивает последний GitHub
+Release, накатывает его поверх текущей папки, сохраняет `.env`, `logs/` и
+`node_modules/`, затем запускает `npm install`.
+
+1. Остановите V-Amber, если он сейчас запущен.
+2. Дважды кликните `update.command` в Finder.
+3. Дождитесь сообщения `Готово. Версия: ...`.
+4. Запустите V-Amber снова через `start.command` или `start-docker.command`.
+
+Если `update.command` не открывается двойным кликом, выполните:
+
+```bash
+cd ~/Desktop/V-Amber-main && chmod +x update.command && xattr -d com.apple.quarantine update.command 2>/dev/null
+```
+
+Если файл нужно создать заново, выполните:
+
+```bash
+cd ~/Desktop/V-Amber-main && printf '#!/bin/bash\ncd "$(dirname "$0")"\n/usr/bin/git pull --ff-only\n/usr/local/bin/npm install\n\necho\nread -n 1 -p "Press any key to close..."\n' > update.command && chmod +x update.command && xattr -d com.apple.quarantine update.command 2>/dev/null
+```
+
+Эта короткая версия подходит для папки, полученной через `git clone`. Для
+папки, скачанной ZIP-архивом, используйте штатный `update.command` из релиза.
+
 ---
 
 ## Ручной Docker-запуск
@@ -153,6 +197,12 @@ npm start
 
 **`start.command` не запускается двойным кликом**
 → В Терминале выполните: `chmod +x ~/путь/до/start.command`
+
+**`update.command` не запускается двойным кликом**
+→ В Терминале выполните: `chmod +x ~/путь/до/update.command`
+
+**`update.command` пишет, что порт 8080 занят**
+→ Остановите запущенный V-Amber и запустите `update.command` снова.
 
 **`start-docker.command` не запускается двойным кликом**
 → В Терминале выполните: `chmod +x ~/путь/до/start-docker.command`

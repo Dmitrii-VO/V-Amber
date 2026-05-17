@@ -16,13 +16,13 @@ Open `http://localhost:8080` in a browser after starting. Select a microphone an
 
 Mandatory at startup: `YANDEX_SPEECHKIT_API_KEY` in `.env`. Missing it crashes on launch. All other integrations (VK, MoySklad, Telegram) degrade gracefully when not configured.
 
-For macOS one-click Docker startup, use `start-docker.command`. It checks Docker
-Desktop, creates a minimal `.env` on first run, builds the image, starts
-Compose, and opens the browser.
+For macOS one-click startup, use `start.command` for local Node.js or
+`start-docker.command` for Docker Desktop. Use `update.command` to install the
+latest GitHub Release while preserving `.env`, `logs/`, and `node_modules/`.
 
 ## Architecture in one paragraph
 
-Most business orchestration lives in `server/ws-server.js`. It owns the active-lot state machine, VK comment polling, reservation queue, safe mode broadcasts, discount application, and per-session logging. The browser (`web-ui/app.js`) streams raw PCM audio over WebSocket; the server forwards it to Yandex SpeechKit via gRPC (`speechkit-stream.js`), extracts product article codes from final transcripts (`article-extractor.js`), detects spoken discounts (`discount-detector.js`), looks up inventory in MoySklad, publishes lot cards to VK, and notifies the operator via Telegram. Runtime state is in-memory and is lost on restart; durable output is limited to `logs/server.log` and `logs/sessions/*.md`.
+Most business orchestration lives in `server/ws-server.js`. It owns the active-lot state machine, VK comment polling, reservation queue, active-lot stock guard, safe mode broadcasts, discount application, and per-session logging. The browser (`web-ui/app.js`) streams raw PCM audio over WebSocket; the server forwards it to Yandex SpeechKit via gRPC (`speechkit-stream.js`), extracts product article codes from final transcripts (`article-extractor.js`), detects spoken discounts (`discount-detector.js`), looks up inventory in MoySklad, publishes lot cards to VK, and notifies the operator via Telegram. Runtime state is in-memory and is lost on restart; durable output is limited to `logs/server.log` and `logs/sessions/*.md`.
 
 ## Key flows
 
@@ -33,6 +33,11 @@ Most business orchestration lives in `server/ws-server.js`. It owns the active-l
 | Discount command (voice or Telegram) | `discount-detector.js` / `telegram.js` → `ws-server.js` → `vk.js` / `telegram.js` |
 | Ambiguous article code | `ws-server.js` → `telegram.js` (await operator confirm before publishing) |
 | Safe mode toggle | `web-ui/app.js` or `/api/safe-mode` → `safe-mode.js` write guards |
+
+Reservation writes must not exceed the active lot's `product.availableStock`.
+Count statuses `creating_order`, `reserved`, and `reserved_appended` before any
+MoySklad write. If stock is exhausted, mark the event `out_of_stock` and reply
+in VK without creating or appending a customer order.
 
 ## HTTP surface
 
@@ -66,6 +71,8 @@ Preserve these exactly in code, logs, and comments:
 
 - No test suite exists. Verify changes by running `npm start` and exercising the flow manually.
 - Before changing lot lifecycle logic in `ws-server.js`, trace `activeLot`, `primaryReservation`, waitlist event status, `customerOrderSessionVersion`, and safe mode behavior through the full reservation flow. Race conditions have caused bugs here before.
+- Before changing reservation capacity logic, verify that waitlist processing
+  still subtracts already creating/confirmed events from `product.availableStock`.
 - `article-extractor.js` has a regex path and a YandexGPT fallback; changes to number parsing must handle both.
 - `safe-mode.js` wraps external write methods for Telegram, MoySklad, and VK. Keep write-blocking behavior explicit when adding new side effects.
 - `todo.md` tracks open bugs and planned features (Russian); check it before implementing adjacent features.

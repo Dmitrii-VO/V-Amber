@@ -6,6 +6,8 @@ Repo no longer spec-only. Current tree contains runnable MVP prototype:
 - `package.json` with local Node.js runtime command: `npm start`.
 - `Dockerfile`, `docker-compose.yml`, and `start-docker.command` for Docker
   Desktop based macOS startup.
+- `start.command` for local macOS Node.js startup and `update.command` for
+  one-click GitHub Release updates.
 - `.env` for secrets, `logs/` for runtime logs, `todo.md` for product notes.
 
 Do not treat `node_modules/`, `logs/`, or `.env` as source files.
@@ -39,6 +41,9 @@ Current stack in repo:
 - MoySklad integration for product lookup and customer order reservation.
 - VK integration for live comment polling, lot-card publishing, and reservation
   handling.
+- Reservation flow checks the active lot's `product.availableStock` against
+  already creating/confirmed reservation events before writing to MoySklad, so
+  later `бронь` comments do not oversell the current lot.
 - Safe mode that blocks external write actions while still logging detected
   events.
 - JSON server logging plus per-session Markdown logs under `logs/sessions/`.
@@ -70,6 +75,10 @@ Main entrypoints and modules:
   `logs/install-id` for deduplicating bug reports.
 - `server/zip-writer.js`: dependency-free ZIP archive builder (deflate +
   CRC32) used by the log bundle.
+- `scripts/backfill-vk-id-dry-run.js`: dry-run diagnostic script for MoySklad
+  counterparties. It finds the `VK ID` attribute, counts populated values,
+  detects `viewerId=` candidates in descriptions, and reports duplicate groups
+  without writing changes.
 - `.github/workflows/release.yml`: on push to `main`, auto-bumps patch version
   (or honors a manual bump in `package.json`) and publishes the matching
   `vX.Y.Z` GitHub Release. Skips itself on commits containing `[skip ci]`.
@@ -78,6 +87,11 @@ Main entrypoints and modules:
   mapping, and `logs/` bind mount.
 - `start-docker.command`: macOS double-click Docker launcher with first-run
   minimal `.env` setup.
+- `start.command`: macOS double-click Node.js launcher with first-run `.env`
+  setup.
+- `update.command`: macOS double-click updater that downloads the latest GitHub
+  Release, preserves `.env`, `logs/`, and `node_modules/`, and runs
+  `npm install`.
 
 # Verified commands
 
