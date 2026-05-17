@@ -72,6 +72,38 @@ const HUNDREDS_WORDS = new Map([
 
 const THOUSAND_WORDS = new Set(["тысяча", "тысячи", "тысяч"]);
 
+// «Цифра как существительное» — формы, которые в речи появляются ТОЛЬКО после
+// множителя ("два нуля" = 2×"0" = "00", "пять девяток" = 5×"9" = "99999").
+// Падеж зависит от множителя: 2-4 — родительный единственного, 5+ — родительный
+// множественного. Все ё уже заменены на е через normalizeText.
+const DIGIT_NOUNS = new Map([
+  ["нуля", "0"], ["ноля", "0"], ["нулей", "0"], ["нолей", "0"],
+  ["единицы", "1"], ["единиц", "1"],
+  ["двойки", "2"], ["двоек", "2"],
+  ["тройки", "3"], ["троек", "3"],
+  ["четверки", "4"], ["четверок", "4"],
+  ["пятерки", "5"], ["пятерок", "5"],
+  ["шестерки", "6"], ["шестерок", "6"],
+  ["семерки", "7"], ["семерок", "7"],
+  ["восьмерки", "8"], ["восьмерок", "8"],
+  ["девятки", "9"], ["девяток", "9"],
+]);
+
+function tryParseDigitMultiplier(words, startIdx) {
+  if (startIdx + 1 >= words.length) {
+    return null;
+  }
+  const multiplier = UNIT_WORDS.get(words[startIdx]) ?? TEEN_WORDS.get(words[startIdx]);
+  if (typeof multiplier !== "number" || multiplier < 2 || multiplier > 19) {
+    return null;
+  }
+  const digit = DIGIT_NOUNS.get(words[startIdx + 1]);
+  if (!digit) {
+    return null;
+  }
+  return { value: digit.repeat(multiplier), consumed: 2 };
+}
+
 const FILLER_WORDS = new Set([
   "это",
   "вот",
@@ -236,25 +268,35 @@ function isCodeLengthAllowed(code, config) {
 
 function parseDigitSequenceWords(words) {
   let consumed = 0;
-  const digits = [];
+  const chunks = [];
 
-  for (const word of words) {
-    if (!DIGIT_WORDS.has(word)) {
-      break;
+  while (consumed < words.length) {
+    // Множитель + существительное-цифра ("два нуля" = "00", "пять девяток"
+    // = "99999"). Проверяем РАНЬШЕ DIGIT_WORDS, иначе "два нуля" сначала
+    // совпало бы как одиночная цифра "2" и схлопнулось в "20".
+    const multiplied = tryParseDigitMultiplier(words, consumed);
+    if (multiplied) {
+      chunks.push(multiplied.value);
+      consumed += multiplied.consumed;
+      continue;
     }
 
-    digits.push(DIGIT_WORDS.get(word));
-    consumed += 1;
+    const word = words[consumed];
+    if (DIGIT_WORDS.has(word)) {
+      chunks.push(DIGIT_WORDS.get(word));
+      consumed += 1;
+      continue;
+    }
+
+    break;
   }
 
-  if (digits.length < 2) {
+  const value = chunks.join("");
+  if (value.length < 2) {
     return null;
   }
 
-  return {
-    value: digits.join(""),
-    consumed,
-  };
+  return { value, consumed };
 }
 
 function parseSubThousand(words) {
@@ -382,6 +424,14 @@ function extendWithMixedDigits(initialCode, words, startIdx) {
     if (/^\d{1,10}$/.test(word)) {
       code += word;
       idx += 1;
+      continue;
+    }
+
+    // Множитель раньше DIGIT_WORDS — те же причины, что в parseDigitSequenceWords.
+    const multiplied = tryParseDigitMultiplier(words, idx);
+    if (multiplied) {
+      code += multiplied.value;
+      idx += multiplied.consumed;
       continue;
     }
 

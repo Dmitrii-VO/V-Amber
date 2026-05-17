@@ -61,6 +61,10 @@ export const config = {
     vkIdAttributeName: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_NAME?.trim() || "VK ID",
     imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
     requestTimeoutMs: parseIntEnv(process.env.MOYSKLAD_REQUEST_TIMEOUT_MS, 8000),
+    // Отдельный потолок для bulk-операций (загрузка каталога продуктов).
+    // 60с обычно хватает на ~3-5 тысяч позиций; если каталог больше или
+    // сеть медленная — поднимите вручную через MOYSKLAD_BULK_REQUEST_TIMEOUT_MS.
+    bulkRequestTimeoutMs: parseIntEnv(process.env.MOYSKLAD_BULK_REQUEST_TIMEOUT_MS, 60000),
   },
   articleExtraction: {
     triggers: parseArticleTriggers(process.env.VOICE_ARTICLE_TRIGGERS),

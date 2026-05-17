@@ -73,15 +73,19 @@ export function createMoySkladClient(config) {
   // createCustomerOrderReservation) is especially sensitive — a stalled
   // request blocks the whole бронь queue while customers wait.
   const requestTimeoutMs = Math.max(1000, Number(config?.requestTimeoutMs || 8000));
+  // Bulk-операции (загрузка каталога продуктов на сотни/тысячи позиций)
+  // выходят за горячий budget — у них отдельный потолок.
+  const bulkRequestTimeoutMs = Math.max(requestTimeoutMs, Number(config?.bulkRequestTimeoutMs || 60000));
 
-  async function fetchWithTimeout(url, init, label) {
+  async function fetchWithTimeout(url, init, label, timeoutMs) {
+    const effectiveTimeoutMs = Math.max(1000, Number(timeoutMs || requestTimeoutMs));
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
     try {
       return await fetch(url, { ...(init || {}), signal: controller.signal });
     } catch (error) {
       if (error?.name === "AbortError") {
-        const timeoutError = new Error(`MoySklad ${label} timed out after ${requestTimeoutMs}ms`);
+        const timeoutError = new Error(`MoySklad ${label} timed out after ${effectiveTimeoutMs}ms`);
         timeoutError.code = "MOYSKLAD_TIMEOUT";
         throw timeoutError;
       }
@@ -91,7 +95,7 @@ export function createMoySkladClient(config) {
     }
   }
 
-  async function requestJson(path, searchParams) {
+  async function requestJson(path, searchParams, options = {}) {
     const response = await fetchWithTimeout(
       buildApiUrl(config.baseUrl, path, searchParams),
       {
@@ -101,6 +105,7 @@ export function createMoySkladClient(config) {
         },
       },
       `GET ${path}`,
+      options.timeoutMs,
     );
 
     if (!response.ok) {
@@ -512,6 +517,12 @@ export function createMoySkladClient(config) {
       logger.info("moysklad", "product_card_loaded", {
         code,
         productId: product.id,
+        productName: productCard.name,
+        pathName: productCard.pathName,
+        salePrice: productCard.salePrice,
+        stock: productCard.stock,
+        reserve: productCard.reserve,
+        availableStock: productCard.availableStock,
         hasPhoto: Boolean(productCard.photo),
       });
 
@@ -524,11 +535,18 @@ export function createMoySkladClient(config) {
       }
 
       const codes = [];
-      const limit = 1000;
+      // Меньше rows на страницу = быстрее одиночный ответ = меньше шанс
+      // упереться в bulk-таймаут на медленной сети. 500 — компромисс между
+      // числом запросов и устойчивостью.
+      const limit = 500;
       let offset = 0;
 
       while (true) {
-        const payload = await requestJson("entity/product", { limit, offset });
+        const payload = await requestJson(
+          "entity/product",
+          { limit, offset },
+          { timeoutMs: bulkRequestTimeoutMs },
+        );
         const rows = Array.isArray(payload?.rows) ? payload.rows : [];
         for (const product of rows) {
           if (product?.archived === true) {

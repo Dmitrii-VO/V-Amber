@@ -7,6 +7,7 @@ import { detectDiscount } from "./discount-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange, wrapWithSafeMode } from "./safe-mode.js";
+import { saveActiveState, clearActiveState } from "./state-store.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -146,6 +147,16 @@ export function attachWsServer(httpServer, config, services = {}) {
         lastDetection,
         safeMode: isSafeMode(),
       });
+      // Снимок состояния на диск (logs/active-state.json), чтобы рестарт во
+      // время эфира не «терял» очередь брони. Запись атомарна (tmp+rename)
+      // и дебаунсится внутри state-store. На graceful shutdown файл удаляется.
+      if (activeLot?.lotSessionId) {
+        saveActiveState({
+          activeLot,
+          sessionFilePath: sessionLog.getFilePath(),
+          connectionId,
+        });
+      }
     }
 
     const unsubscribeSafeMode = onSafeModeChange(() => {
@@ -165,6 +176,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     function resetCustomerOrders() {
       customerOrdersByViewerId = new Map();
       customerOrderSessionVersion += 1;
+      // Граcеful shutdown — стирать persisted state, чтобы следующий старт
+      // не подхватил его как «брошенный после краша». Fire-and-forget:
+      // ошибка disk-IO не должна блокировать остановку сессии.
+      clearActiveState().catch(() => {});
     }
 
     function normalizeReservationText(text) {
@@ -348,11 +363,19 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       if (state.primaryReservation) {
         event.status = "waitlist_pending";
+        const waitlistPosition = state.events.filter((candidate) => candidate.status === "waitlist_pending").length;
         logger.info("vk", "reservation_waitlist_pending", {
           connectionId,
           lotSessionId: lot.lotSessionId,
           commentId: event.commentId,
           viewerId: event.viewerId,
+          position: waitlistPosition,
+        });
+        sessionLog.logReservationWaitlist({
+          viewerName: event.viewerName,
+          viewerId: event.viewerId,
+          lotCode: lot.code,
+          position: waitlistPosition,
         });
         emitState();
         notifyReservationStatus(lot, event);
@@ -383,6 +406,11 @@ export function attachWsServer(httpServer, config, services = {}) {
           commentId: event.commentId,
           viewerId: event.viewerId,
           availableStock: lot.product?.availableStock ?? null,
+        });
+        sessionLog.logReservationOutOfStock({
+          viewerName: event.viewerName,
+          viewerId: event.viewerId,
+          lotCode: lot.code,
         });
         emitState();
         notifyReservationStatus(lot, event);
@@ -502,13 +530,24 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         event.status = existingOrder?.id ? "reserved_appended" : "reserved";
         event.customerOrder = order;
+        const orderSalePrice = Number(lot.product?.salePrice || 0);
+        const orderDiscountAmount = Number(lot.discountAmount || 0);
         logger.info("vk", "reservation_order_created", {
           connectionId,
           lotSessionId: lot.lotSessionId,
           commentId: event.commentId,
           viewerId: event.viewerId,
+          viewerName: event.viewerName,
           orderId: order?.id || null,
           appended: Boolean(existingOrder?.id),
+          code: lot.code,
+          productId: lot.product?.id || null,
+          productName: lot.product?.name || null,
+          salePrice: Number.isFinite(orderSalePrice) ? orderSalePrice : null,
+          discountAmount: orderDiscountAmount,
+          effectivePrice: Number.isFinite(orderSalePrice)
+            ? Math.max(0, orderSalePrice - orderDiscountAmount)
+            : null,
         });
         sessionLog.logOrderCreated({
           viewerName: event.viewerName,
@@ -560,6 +599,25 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       if (nextWaitlistEvent && activeLot?.lotSessionId === lot.lotSessionId) {
         nextWaitlistEvent.status = "pending_reservation";
+        // Forensic: фиксируем переход «второй в очереди → первый», чтобы
+        // в логе была видна полная судьба брони. Раньше можно было
+        // увидеть waitlist_pending без объяснения, чем кончилось.
+        logger.info("vk", "reservation_promoted_to_primary", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          commentId: nextWaitlistEvent.commentId,
+          viewerId: nextWaitlistEvent.viewerId,
+          viewerName: nextWaitlistEvent.viewerName,
+          previousPrimaryCommentId: event.commentId,
+          previousPrimaryStatus: event.status,
+        });
+        sessionLog.logWaitlistPromoted({
+          viewerName: nextWaitlistEvent.viewerName,
+          viewerId: nextWaitlistEvent.viewerId,
+          lotCode: lot.code,
+          previousPrimaryStatus: event.status,
+        });
         void processReservationEvent(lot, nextWaitlistEvent);
       }
     }
@@ -624,7 +682,26 @@ export function attachWsServer(httpServer, config, services = {}) {
               reservationState.lastCommentId = Math.max(reservationState.lastCommentId, comment.id);
               rememberSeenComment(reservationState, comment.id);
 
-              if (normalizeReservationText(comment.text) !== reservationKeyword) {
+              // Forensic: каждый новый комментарий в окне лота попадает в лог,
+              // даже если не «бронь». Это позволяет позже увидеть пропущенные
+              // брони (опечатки, «забронируй», эмодзи) и общий шум вокруг лота.
+              const matchedReservation = normalizeReservationText(comment.text) === reservationKeyword;
+              const profileForLog = profileMap.get(comment.from_id);
+              logger.info("vk", "comment_seen", {
+                connectionId,
+                lotSessionId: currentLot.lotSessionId,
+                code: currentLot.code,
+                commentId: comment.id,
+                viewerId: comment.from_id,
+                viewerName: profileForLog
+                  ? [profileForLog.first_name, profileForLog.last_name].filter(Boolean).join(" ")
+                  : "",
+                text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+                createdAt: new Date(comment.date * 1000).toISOString(),
+                matchedReservation,
+              });
+
+              if (!matchedReservation) {
                 continue;
               }
 
@@ -654,13 +731,31 @@ export function attachWsServer(httpServer, config, services = {}) {
               };
 
               addReservationEvent(currentLot, event);
+              // Полный снимок данных, необходимых для воспроизведения заказа
+              // в МойСкладе из одной этой строки лога: продукт, цена в момент
+              // эфира, действующая скидка, оригинальный текст комментария.
+              // Цена salePrice фиксируется здесь специально — её последующее
+              // изменение в каталоге не должно искажать replay.
+              const reservationSalePrice = Number(currentLot.product?.salePrice || 0);
+              const reservationDiscountAmount = Number(currentLot.discountAmount || 0);
               logger.info("vk", "reservation_detected", {
                 connectionId,
                 lotSessionId: currentLot.lotSessionId,
                 code: currentLot.code,
                 commentId: comment.id,
+                commentText: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+                commentCreatedAt: event.createdAt,
                 viewerId,
                 viewerName: event.viewerName,
+                productId: currentLot.product?.id || null,
+                productName: currentLot.product?.name || null,
+                pathName: currentLot.product?.pathName || null,
+                salePrice: Number.isFinite(reservationSalePrice) ? reservationSalePrice : null,
+                discountAmount: reservationDiscountAmount,
+                effectivePrice: Number.isFinite(reservationSalePrice)
+                  ? Math.max(0, reservationSalePrice - reservationDiscountAmount)
+                  : null,
+                availableStock: currentLot.product?.availableStock ?? null,
               });
               sessionLog.logReservation({
                 viewerName: event.viewerName,
@@ -730,10 +825,51 @@ export function attachWsServer(httpServer, config, services = {}) {
       })();
     }
 
+    function flushOrphanWaitlist(lot, reason) {
+      if (!lot?.reservations?.events) {
+        return;
+      }
+      // Брошенные брони — те, что не достигли терминального состояния
+      // (creating_order/reserved/reserved_appended/out_of_stock/order_failed/
+      //  safe_mode_logged). Без этого лога потерянные продажи буквально
+      // невидимы: оператор закрыл вкладку — и про waitlist никто не знает.
+      const ORPHAN_STATUSES = new Set(["waitlist_pending", "pending_reservation"]);
+      const orphans = lot.reservations.events.filter((entry) => ORPHAN_STATUSES.has(entry?.status));
+      if (orphans.length === 0) {
+        return;
+      }
+      logger.warn("vk", "orphan_waitlist_at_close", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        code: lot.code,
+        reason,
+        count: orphans.length,
+        entries: orphans.map((entry) => ({
+          commentId: entry.commentId,
+          viewerId: entry.viewerId,
+          viewerName: entry.viewerName,
+          status: entry.status,
+          createdAt: entry.createdAt,
+        })),
+      });
+      sessionLog.logOrphanWaitlist({
+        lotCode: lot.code,
+        lotSessionId: lot.lotSessionId,
+        reason,
+        entries: orphans,
+      });
+    }
+
     function publishLotClosed(lot, reason) {
       if (!lot?.lotSessionId) {
         return;
       }
+
+      // Сначала зафиксировать «брошенные» брони в логе и в .md-сессии,
+      // ПОТОМ закрывать VK-публикацию. Иначе при `socket_close` orphan-флаш
+      // может не успеть проскочить — websocket уже разорван и состояние
+      // сбрасывается.
+      flushOrphanWaitlist(lot, reason);
 
       if (isLotPoisoned(lot.lotSessionId)) {
         return;
@@ -752,7 +888,13 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     async function applyDiscount(input) {
-      if (!activeLot?.vkPublication?.commentId || !activeLot.product) {
+      // Раньше здесь требовался vkPublication.commentId — это блокировало
+      // применение скидки в safe mode и при любых сбоях публикации в VK
+      // (например, видео недоступно). Скидку считаем по внутреннему лоту
+      // независимо от VK: дашборд должен показать новую цену, а в МойСклад
+      // последующая бронь уже уйдёт с правильной ценой. Публикацию апдейта
+      // в VK выполняем ниже, только если карточка туда вообще опубликована.
+      if (!activeLot?.product) {
         return;
       }
 
@@ -808,18 +950,22 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
       sessionLog.logDiscount({ amount, originalPrice, newPrice, code: activeLot.code });
 
-      if (isLotPoisoned(activeLot?.lotSessionId)) {
-        return;
-      }
-
-      await vk.publishDiscountUpdate(activeLot).catch((error) => {
-        handleVkPublishError(activeLot, error);
-        logger.error("vk", "discount_publish_failed", {
-          connectionId,
-          lotSessionId: activeLot?.lotSessionId,
-          error,
+      // Публикация апдейта в VK имеет смысл только если карточка лота уже
+      // ушла туда и лот не «битый». Иначе пропускаем без шума — скидка во
+      // внутреннем состоянии уже зафиксирована и попадёт в МойСклад при брони.
+      if (
+        activeLot.vkPublication?.commentId
+        && !isLotPoisoned(activeLot.lotSessionId)
+      ) {
+        await vk.publishDiscountUpdate(activeLot).catch((error) => {
+          handleVkPublishError(activeLot, error);
+          logger.error("vk", "discount_publish_failed", {
+            connectionId,
+            lotSessionId: activeLot?.lotSessionId,
+            error,
+          });
         });
-      });
+      }
 
       emitState();
     }
@@ -906,12 +1052,34 @@ export function attachWsServer(httpServer, config, services = {}) {
         },
       };
 
+      // Forensic: сохраняем ВСЕХ кандидатов, не только выбранного, плюс
+      // оригинальный код до обрезки по каталогу. Если выбор окажется
+      // неверным, замечание делается по логу без re-parsing.
+      const allCandidates = Array.isArray(detection?.candidates)
+        ? detection.candidates.map((candidate) => ({
+            code: candidate?.code || null,
+            source: candidate?.source || null,
+            confidence: typeof candidate?.confidence === "number" ? candidate.confidence : null,
+            originalCode: candidate?.originalCode || null,
+            knownCode: candidate?.knownCode === true,
+          }))
+        : [];
+
       logger.info("article", "article_detected", {
         connectionId,
         code: nextLot.code,
         lotSessionId: nextLot.lotSessionId,
         source,
         transcript: detection.transcript,
+        // Self-contained snapshot — позволяет восстановить контекст лота из
+        // одной этой строки, не сшивая её с product_card_loaded по времени.
+        productId: nextLot.product?.id || null,
+        productName: nextLot.product?.name || null,
+        pathName: nextLot.product?.pathName || null,
+        salePrice: nextLot.product?.salePrice ?? null,
+        availableStock: nextLot.product?.availableStock ?? null,
+        discountAmount: Number(nextLot.discountAmount || 0),
+        allCandidates,
       });
 
       triggerActiveUntil = 0;
@@ -945,6 +1113,13 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       const previousLot = activeLot;
+
+      if (previousLot?.lotSessionId) {
+        // Оператор переключился на другой лот голосом — у предыдущего лота
+        // могла остаться очередь, и её надо явно зафиксировать как
+        // потерянную, чтобы оператор увидел в .md и поднял заказы вручную.
+        flushOrphanWaitlist(previousLot, "lot_replaced_by_new_detection");
+      }
 
       if (previousLot?.lotSessionId && !isLotPoisoned(previousLot.lotSessionId)) {
         try {
@@ -1071,6 +1246,25 @@ export function attachWsServer(httpServer, config, services = {}) {
                 void applyDiscount(discountResult).catch((error) => {
                   logger.error("discount", "apply_failed", { connectionId, text, error });
                 });
+              } else {
+                // Forensic: транскрипт содержит триггер скидки, но детектор
+                // не извлёк сумму. Без этого лога мы видели бы тишину и не
+                // понимали, что оператор хотел скидку (как в случае
+                // «скидка процентов тридцать» — порядок слов ломает regex).
+                const normalizedForDiscount = String(text || "").toLowerCase().replace(/ё/g, "е");
+                const matchedDiscountTrigger = config.discount.triggers.some((trigger) => {
+                  const nt = String(trigger || "").toLowerCase().replace(/ё/g, "е");
+                  return nt && new RegExp(`(?:^|\\s)${nt}(?:$|\\s)`).test(normalizedForDiscount);
+                });
+                if (matchedDiscountTrigger) {
+                  logger.warn("discount", "discount_skipped", {
+                    connectionId,
+                    text,
+                    reason: "trigger_matched_but_no_amount_extracted",
+                    lotSessionId: activeLot?.lotSessionId || null,
+                    code: activeLot?.code || null,
+                  });
+                }
               }
 
               void (async () => {
@@ -1146,6 +1340,18 @@ export function attachWsServer(httpServer, config, services = {}) {
                   });
                 } else if (detectionWithId.status === "awaiting_continuation") {
                   logger.info("article", "article_awaiting_continuation", {
+                    connectionId,
+                    transcript: detectionWithId.transcript,
+                  });
+                } else if (
+                  detectionWithId.status === "no_match"
+                  && detectionWithId.matchedTrigger === true
+                ) {
+                  // Forensic: триггер был, но извлечения нет. Это либо мусорный
+                  // транскрипт, либо непокрытая parserом конструкция (например,
+                  // оператор поправился, оборвал фразу, или SpeechKit «съел»
+                  // цифры). Запись помогает находить новые паттерны для парсера.
+                  logger.warn("article", "article_no_match_with_trigger", {
                     connectionId,
                     transcript: detectionWithId.transcript,
                   });

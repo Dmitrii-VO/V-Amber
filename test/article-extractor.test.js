@@ -229,6 +229,63 @@ test("LLM fallback returns llm_error when fetch fails (used by ws-server early-e
   assert.ok(typeof result.error === "string" && result.error.length > 0);
 });
 
+test("detectArticle parses multiplier-noun: 'два нуля 123' = 00123", async () => {
+  // Operator's natural Russian: "two zeros 123" → "00123". Old parser saw
+  // "два" as digit "2" and stopped on "нуля" (gen. sg., not in DIGIT_WORDS),
+  // returning a phantom "2".
+  const result = await detectArticle(
+    "код товара два нуля 123",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "00123");
+});
+
+test("detectArticle parses multiplier-noun: 'пять девяток' = 99999", async () => {
+  // Same family of constructions: "five nines" = "99999". Old parser took
+  // "пять" as cardinal 5 and stopped.
+  const result = await detectArticle(
+    "код товара пять девяток",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "99999");
+});
+
+test("detectArticle parses 'два нуля' followed by digit-words", async () => {
+  // Mixed: zeros declared via multiplier, then digit-words tail.
+  // "два нуля три четыре четыре пять" → "003445".
+  const result = await detectArticle(
+    "код товара два нуля три четыре четыре пять",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "003445");
+});
+
+test("detectArticle preserves 'два три' as digit-words '23' (not multiplier)", async () => {
+  // Regression: "три" is NOT a digit-noun, so multiplier-noun check must
+  // fall through and let DIGIT_WORDS treat "два" → "2", "три" → "3".
+  const result = await detectArticle(
+    "код товара два три",
+    { ...baseConfig, triggers: ["код товара"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "23");
+});
+
+test("detectArticle: multiplier-noun extension after numeric prefix", async () => {
+  // "артикул 01 два нуля 5" — mixed form. numericTokens picks "01", then
+  // extendWithMixedDigits sees "два нуля" (multiplier) → "00", then "5".
+  // Combined: "01005".
+  const result = await detectArticle(
+    "артикул 01 два нуля 5",
+    { ...baseConfig, triggers: ["артикул"] },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "01005");
+});
+
 test("trigger cache stays consistent across calls with the same array", async () => {
   // WeakMap is keyed on the triggers array identity. Sequential calls must
   // reuse the cached regexes; a regression that re-creates regexes per call

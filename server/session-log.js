@@ -38,6 +38,9 @@ export function createSessionLog() {
   }
 
   return {
+    getFilePath() {
+      return filePath;
+    },
     logSessionStart({ connectionId, vkLiveVideoUrl } = {}) {
       filePath = join(sessionsDir, `${dateSlug()}.md`);
 
@@ -81,6 +84,41 @@ export function createSessionLog() {
 
     logReservation({ viewerName, viewerId, lotCode } = {}) {
       append(`- ${nowTime()} **Бронь** от ${viewerName || `id${viewerId}`} (лот ${lotCode})`);
+    },
+
+    logReservationWaitlist({ viewerName, viewerId, lotCode, position } = {}) {
+      const positionStr = position ? ` №${position}` : "";
+      append(`- ${nowTime()} **В очереди${positionStr}** ${viewerName || `id${viewerId}`} (лот ${lotCode}) — ждёт исхода предыдущей брони`);
+    },
+
+    logReservationOutOfStock({ viewerName, viewerId, lotCode } = {}) {
+      append(`- ${nowTime()} **Товар закончился** для ${viewerName || `id${viewerId}`} (лот ${lotCode}) — бронь отклонена`);
+    },
+
+    logWaitlistPromoted({ viewerName, viewerId, lotCode, previousPrimaryStatus } = {}) {
+      append(`- ${nowTime()} **Очередь продвинулась** → ${viewerName || `id${viewerId}`} стал первым на лот ${lotCode} (предыдущая бронь: ${previousPrimaryStatus || "—"})`);
+    },
+
+    logOrphanWaitlist({ lotCode, lotSessionId, reason, entries } = {}) {
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return;
+      }
+      const list = entries
+        .map((entry, index) => {
+          const label = entry.viewerName || `id${entry.viewerId}`;
+          const commentId = entry.commentId ? ` (comment ${entry.commentId})` : "";
+          return `  ${index + 1}. ${label}${commentId}`;
+        })
+        .join("\n");
+      append([
+        ``,
+        `> **⚠ Брошенная очередь** на лоте ${lotCode || lotSessionId || "—"} (${reason || "?"}):`,
+        `>`,
+        `> Ниже перечислены зрители, чьи брони не успели обработаться. Обработайте их вручную в МойСкладе или ответьте им в VK.`,
+        ``,
+        list,
+        ``,
+      ].join("\n"));
     },
 
     logOrderCreated({ viewerName, viewerId, orderId, lotCode, appended } = {}) {
