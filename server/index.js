@@ -97,6 +97,11 @@ const PRODUCT_CODE_CACHE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 async function main() {
   await checkForUpdates();
 
+  // Восстановление после краша делаем ДО того, как принимаем новые
+  // WebSocket-соединения. Иначе оператор откроет дашборд раньше, чем мы
+  // успеем сообщить про брошенные брони, и может не заметить уведомления.
+  await recoverOrphansFromCrash();
+
   const vk = createVkPublisher(config.vk);
   const moysklad = createMoySkladClient(config.moysklad);
   const productCodeCache = createProductCodeCache();

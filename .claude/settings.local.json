@@ -67,7 +67,9 @@
       "Bash(grep -E '\"code\":\"[0-9]{7,}\"|final_transcript.*тысяч|final_transcript.*размер' logs/worklogs-5/server.log)",
       "Bash(grep -E '\"article_detected\".*\"code\":\"[0-9]{7,}\"' logs/worklogs-5/server.log)",
       "Bash(git log *)",
-      "Bash(awk -F= '{print $1}')"
+      "Bash(awk -F= '{print $1}')",
+      "Bash(node --check server/state-store.js)",
+      "Bash(node --check server/session-log.js)"
     ]
   }
 }
