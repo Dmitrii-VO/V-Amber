@@ -469,7 +469,11 @@ export function attachWsServer(httpServer, config, services = {}) {
         let order = null;
 
         if (existingOrder?.id) {
-          await moysklad.appendPositionToCustomerOrder({
+          // ВАЖНО: сохраняем результат append'а отдельно. В safe mode wrapper
+          // возвращает {skipped:true, safeMode:true} — раньше мы тут затирали
+          // его на existingOrder, и safe-mode check ниже пропускал; покупатель
+          // получал ложное «бронь подтверждена», а в МойСкладе — ничего.
+          const appendResult = await moysklad.appendPositionToCustomerOrder({
             orderId: existingOrder.id,
             activeLot: lot,
             productCard: {
@@ -477,7 +481,9 @@ export function attachWsServer(httpServer, config, services = {}) {
             },
             reservation: event,
           });
-          order = existingOrder;
+          order = (appendResult && appendResult.skipped === true && appendResult.safeMode === true)
+            ? appendResult
+            : existingOrder;
         } else {
           order = await moysklad.createCustomerOrderReservation({
             activeLot: lot,
@@ -1035,6 +1041,12 @@ export function attachWsServer(httpServer, config, services = {}) {
           seenCommentIds: createBoundedIdSet(),
           acceptedUserIds: createBoundedIdSet(),
           events: [],
+          // Эти поля гонятся через всю логику бронирования; раньше создавались
+          // лениво (`|| 0`, `?.` сахар). Явно инициализируем здесь, чтобы
+          // снимок лота соответствовал тому, что выдаёт state-store после
+          // recovery — без поверхностных undefined.
+          primaryReservation: null,
+          committedReservationCount: 0,
         },
       };
     }
@@ -1396,6 +1408,15 @@ export function attachWsServer(httpServer, config, services = {}) {
               activeRunId = null;
               session?.close();
               session = null;
+              // Раньше после stream_error состояние оставалось «висеть»:
+              // activeLot не nullified, active-state.json не стирался. Если
+              // потом сокет закрывался, второй publishLotClosed дублировал
+              // orphan-флаш, а при перезапуске сервера срабатывало фейковое
+              // crash-recovery (state-файл с этой сессии). Чистим всё, как
+              // в обычных путях stop/socket_close.
+              resetCustomerOrders();
+              resetDetectionState();
+              emitState();
               sendJson(websocket, { type: "error", message: error.message });
             },
             onEnd: () => {

@@ -41,6 +41,11 @@ function serializeLot(lot) {
 let writeChain = Promise.resolve();
 let pendingPayload = null;
 let writeInFlight = false;
+// Защёлкивается во время clearActiveState. Пока true — saveActiveState
+// игнорирует входящие snapshot'ы, а уже запущенный flushPending в финале
+// удаляет файл, если он только что был успешно записан. Это закрывает гонку:
+// rename → unlink → файл остаётся со стейлой записью.
+let discardSaves = false;
 
 async function flushPending() {
   if (writeInFlight || !pendingPayload) {
@@ -56,11 +61,16 @@ async function flushPending() {
     // ЛИБО новая. Не «полусломанная» промежуточная.
     await writeFile(tmpFilePath, JSON.stringify(payload, null, 2), "utf8");
     await rename(tmpFilePath, stateFilePath);
+    // Race recovery: если clearActiveState проскочил между нашим write и
+    // rename, у нас на диске только что появился stale-снимок. Удаляем.
+    if (discardSaves) {
+      try { await unlink(stateFilePath); } catch { /* ignore */ }
+    }
   } catch (error) {
     logger.warn("state-store", "save_failed", { error });
   } finally {
     writeInFlight = false;
-    if (pendingPayload) {
+    if (pendingPayload && !discardSaves) {
       // Пока писали — пришёл новый snapshot. Сбрасываем его следом.
       void flushPending();
     }
@@ -70,6 +80,10 @@ async function flushPending() {
 export function saveActiveState({ activeLot, sessionFilePath, connectionId } = {}) {
   if (!activeLot) {
     // Нечего сохранять — но и не очищаем здесь. Очистка только через clearActiveState.
+    return;
+  }
+  if (discardSaves) {
+    // Сессия завершена / очищена — игнорируем хвостовые save'ы из эмиттера.
     return;
   }
   pendingPayload = {
@@ -95,7 +109,17 @@ export async function loadActiveState() {
 }
 
 export async function clearActiveState() {
+  // 1) Прервать поток save'ов и сбросить буфер: новые saveActiveState
+  //    короткозамкнут на discardSaves, in-flight flushPending в конце сам
+  //    удалит файл, если успел его создать после нашего unlink.
+  discardSaves = true;
   pendingPayload = null;
+  // 2) Дождаться текущего write'а, иначе unlink/rename могут перекрестно
+  //    оставить stale-файл. writeChain накапливает все flushPending'и.
+  try {
+    await writeChain;
+  } catch { /* ignore */ }
+  // 3) Удалить state-файл и временный, если есть.
   try {
     await unlink(stateFilePath);
   } catch (error) {
@@ -103,17 +127,26 @@ export async function clearActiveState() {
       logger.warn("state-store", "clear_failed", { error });
     }
   }
-  // На всякий случай чистим .tmp, если осталась от падения.
   try {
     await unlink(tmpFilePath);
   } catch {
     /* ignore */
   }
+  // 4) Снимаем защёлку — следующая сессия может писать заново.
+  discardSaves = false;
 }
 
-// Извлекает «брошенные» брони из загруженного state — те же статусы, что
-// flushOrphanWaitlist в ws-server.js. Дублирование намеренное: state-store
-// не должен знать о ws-server internals, но статусы должны совпадать.
+// Извлекает «брошенные» брони из загруженного state. Набор статусов ШИРЕ,
+// чем у flushOrphanWaitlist в ws-server.js — намеренно.
+//
+//   flushOrphanWaitlist (in-process) фильтрует только waitlist_pending +
+//   pending_reservation. Статус creating_order не включается, потому что в
+//   обычном close-flow эти события ещё разрешаются внутри try/finally
+//   processReservationEvent (станут reserved или order_failed).
+//
+//   extractOrphans (crash recovery) дополнительно включает creating_order:
+//   процесс умер прямо во время записи в МойСклад — неизвестно, успел ли
+//   заказ создаться. Оператор обязан проверить вручную.
 export function extractOrphans(state) {
   const events = state?.activeLot?.reservations?.events;
   if (!Array.isArray(events) || events.length === 0) {
