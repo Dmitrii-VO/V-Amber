@@ -3,11 +3,15 @@ import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID, createHash } from "node:crypto";
 import { logger } from "./logger.js";
 import { isSafeMode, setSafeMode } from "./safe-mode.js";
 import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
+const WISHLIST_MAX_BODY = 256 * 1024;
+const SUPPLIERS_CACHE_TTL_MS = 5 * 60 * 1000;
+const CHECK_ORDERS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = normalize(join(__dirname, "..", "web-ui"));
@@ -57,8 +61,118 @@ function jsonResponse(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-export function createStaticServer({ vk, moysklad, productCodeCache, config } = {}) {
+function methodNotAllowed(response, allow) {
+  response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow });
+  response.end(JSON.stringify({ error: "method_not_allowed" }));
+}
+
+// Канонический объект группы → детерминированный sha256. Поля стабильные:
+// supplierId, storeId, positions (отсортированы по productId, entryIds лекс).
+// description НЕ включается — правка комментария оператором не должна ломать
+// retry partial-fail.
+function computeGroupHash(group) {
+  const canonical = {
+    supplierId: group.supplierId || null,
+    storeId: group.storeId || null,
+    positions: (group.positions || [])
+      .map((p) => ({
+        productId: p.productId || null,
+        quantity: Number(p.quantity) || 0,
+        price: Number(p.price) || 0,
+        entryIds: [...(p.entryIds || [])].sort(),
+      }))
+      .sort((a, b) => String(a.productId || "").localeCompare(String(b.productId || ""))),
+  };
+  return "sha256:" + createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function serializeWishlistEntry(entry) {
+  if (!entry) return null;
+  return {
+    id: entry.id,
+    viewerId: entry.viewerId,
+    viewerName: entry.viewerName,
+    productCode: entry.productCode,
+    productId: entry.productId,
+    productName: entry.productName,
+    supplierId: entry.supplierId,
+    supplierName: entry.supplierName,
+    buyPrice: entry.buyPrice,
+    quantity: entry.quantity,
+    lotCode: entry.lotCode,
+    lotSessionId: entry.lotSessionId,
+    trigger: entry.trigger,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    seenEvents: entry.seenEvents || [],
+    status: entry.status,
+    consumed: entry.consumed || null,
+    removedReason: entry.removedReason || null,
+  };
+}
+
+export function createStaticServer({
+  vk, moysklad, productCodeCache, config,
+  wishlistStore, wishlistSubmissions, settingsStore, diagnosticRouter, packageVersion,
+} = {}) {
+  function diag(kind, payload) {
+    if (diagnosticRouter?.emitGeneric) diagnosticRouter.emitGeneric(kind, payload);
+  }
   let logsInFlight = false;
+
+  // Кэш списков из МС, чтобы операторские открытия модалки не били в МС каждый раз.
+  let suppliersCache = null;
+  let storesCache = null;
+
+  // Кэш «уже-в-заказе»-проверок. Ключ = `${counterpartyId}:${productId}`,
+  // значение = { result, expiresAt }. Кэш переживает несколько последовательных
+  // нажатий «🔍 Проверить пересечения» в течение 10 минут.
+  const checkOrdersCache = new Map();
+  function getCachedCheck(key) {
+    const entry = checkOrdersCache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt < Date.now()) {
+      checkOrdersCache.delete(key);
+      return null;
+    }
+    return entry.result;
+  }
+  function setCachedCheck(key, result) {
+    checkOrdersCache.set(key, { result, expiresAt: Date.now() + CHECK_ORDERS_CACHE_TTL_MS });
+  }
+
+  async function loadSuppliersCached() {
+    if (suppliersCache && Date.now() - suppliersCache.loadedAt < SUPPLIERS_CACHE_TTL_MS) {
+      return suppliersCache.rows;
+    }
+    const rows = await moysklad.listSuppliers({ source: "http" });
+    suppliersCache = { rows, loadedAt: Date.now() };
+    return rows;
+  }
+  async function loadStoresCached() {
+    if (storesCache && Date.now() - storesCache.loadedAt < SUPPLIERS_CACHE_TTL_MS) {
+      return storesCache.rows;
+    }
+    const rows = await moysklad.listStores({ source: "http" });
+    storesCache = { rows, loadedAt: Date.now() };
+    return rows;
+  }
+
+  function buildGroupedWishlist() {
+    const groups = wishlistStore.listByGroupedSupplier();
+    const wishlistSettings = settingsStore.getWishlist();
+    const oldThresholdMs = (wishlistSettings.oldDaysThreshold || 7) * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    return groups.map((g) => ({
+      supplierId: g.supplierId,
+      supplierName: g.supplierName,
+      entries: g.entries.map((e) => ({
+        ...serializeWishlistEntry(e),
+        isOld: now - new Date(e.createdAt).getTime() > oldThresholdMs,
+      })),
+    }));
+  }
 
   return createServer(async (request, response) => {
     if (!request.url) {
@@ -67,9 +181,10 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
     }
 
     let pathname;
-
+    let urlObject;
     try {
-      ({ pathname } = new URL(request.url, "http://localhost"));
+      urlObject = new URL(request.url, "http://localhost");
+      ({ pathname } = urlObject);
     } catch {
       logger.warn("http", "bad_request_url", { url: request.url });
       response.writeHead(400).end("Bad request");
@@ -78,18 +193,13 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
 
     if (pathname === "/health") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true }));
+      response.end(JSON.stringify({ ok: true, version: packageVersion || null }));
       return;
     }
 
     if (pathname === "/api/vk/validate-url") {
-      if (request.method !== "GET") {
-        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET" });
-        response.end(JSON.stringify({ error: "method_not_allowed" }));
-        return;
-      }
-      const { searchParams } = new URL(request.url, "http://localhost");
-      const url = searchParams.get("url") || "";
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      const url = urlObject.searchParams.get("url") || "";
       try {
         const result = vk?.validateLiveVideoUrl
           ? await vk.validateLiveVideoUrl(url)
@@ -103,24 +213,16 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
     }
 
     if (pathname === "/api/product-codes/status") {
-      if (request.method !== "GET") {
-        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET" });
-        response.end(JSON.stringify({ error: "method_not_allowed" }));
-        return;
-      }
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
       jsonResponse(response, 200, productCodeCache?.getSnapshot?.() || { count: 0, loadedAt: null, refreshing: false });
       return;
     }
 
     if (pathname === "/api/product-codes/refresh") {
-      if (request.method !== "POST") {
-        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
-        response.end(JSON.stringify({ error: "method_not_allowed" }));
-        return;
-      }
+      if (request.method !== "POST") return methodNotAllowed(response, "POST");
       try {
         const result = productCodeCache?.refresh
-          ? await productCodeCache.refresh(moysklad)
+          ? await productCodeCache.refresh(moysklad, { source: "http" })
           : { count: 0, loadedAt: null, refreshing: false, lastError: "product_code_cache_unavailable" };
         jsonResponse(response, 200, { ok: true, ...result });
       } catch (error) {
@@ -129,20 +231,435 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
       return;
     }
 
-    if (pathname === "/api/send-logs/preview") {
-      if (request.method !== "GET") {
-        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET" });
-        response.end(JSON.stringify({ error: "method_not_allowed" }));
+    // -------------------- Wish list --------------------
+
+    if (pathname === "/api/wishlist/count") {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      jsonResponse(response, 200, { count: wishlistStore?.getActiveCount?.() || 0 });
+      return;
+    }
+
+    if (pathname === "/api/wishlist" && request.method === "GET") {
+      const groups = buildGroupedWishlist();
+      const count = wishlistStore.getActiveCount();
+      jsonResponse(response, 200, { count, groups });
+      return;
+    }
+
+    if (pathname === "/api/wishlist/archive" && request.method === "GET") {
+      const archive = wishlistStore.listArchive().map(serializeWishlistEntry);
+      jsonResponse(response, 200, { count: archive.length, entries: archive });
+      return;
+    }
+
+    if (pathname === "/api/wishlist/draft" && request.method === "POST") {
+      const draftId = randomUUID();
+      const snapshot = {
+        draftId,
+        groups: buildGroupedWishlist(),
+        suppliersCached: Boolean(suppliersCache),
+      };
+      await wishlistSubmissions.ensureDraft(draftId);
+      jsonResponse(response, 200, snapshot);
+      return;
+    }
+
+    if (pathname === "/api/wishlist/entries" && request.method === "POST") {
+      let body;
+      try { body = await readJsonBody(request, WISHLIST_MAX_BODY); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const productCode = String(body.productCode || "").trim();
+      if (!productCode) return jsonResponse(response, 400, { error: "productCode_required" });
+
+      const cacheEntry = productCodeCache?.getProductByCode?.(productCode) || null;
+      const entry = await wishlistStore.addManual({
+        viewerName: body.viewerName,
+        viewerId: body.viewerId,
+        productCode,
+        productId: body.productId || cacheEntry?.id || null,
+        productName: body.productName || cacheEntry?.name || "",
+        supplierId: body.supplierId || cacheEntry?.supplierId || null,
+        supplierName: body.supplierName || cacheEntry?.supplierName || "",
+        buyPrice: typeof body.buyPrice === "number" ? body.buyPrice : (cacheEntry?.buyPrice ?? null),
+        quantity: body.quantity,
+        lotCode: body.lotCode,
+      });
+      jsonResponse(response, 200, { ok: true, entry: serializeWishlistEntry(entry) });
+      return;
+    }
+
+    // /api/wishlist/:entryId  (PATCH / DELETE)
+    const entryMatch = /^\/api\/wishlist\/([0-9a-fA-F-]{8,})$/.exec(pathname);
+    if (entryMatch) {
+      const entryId = entryMatch[1];
+      if (request.method === "PATCH") {
+        let body;
+        try { body = await readJsonBody(request, WISHLIST_MAX_BODY); }
+        catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+        const entry = await wishlistStore.edit(entryId, body, "operator");
+        if (!entry) return jsonResponse(response, 404, { error: "entry_not_found" });
+        return jsonResponse(response, 200, { ok: true, entry: serializeWishlistEntry(entry) });
+      }
+      if (request.method === "DELETE") {
+        const removed = await wishlistStore.remove(entryId, "manual_delete");
+        if (!removed) return jsonResponse(response, 404, { error: "entry_not_found_or_not_active" });
+        return jsonResponse(response, 200, { ok: true });
+      }
+      return methodNotAllowed(response, "PATCH, DELETE");
+    }
+
+    if (pathname === "/api/wishlist/check-customerorders" && request.method === "POST") {
+      let body;
+      try { body = await readJsonBody(request, WISHLIST_MAX_BODY); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+      const entryIds = Array.isArray(body.entryIds) ? body.entryIds : [];
+
+      // Резолвим entries в (viewerId, productId), пропускаем без productId
+      // (для них в МС всё равно нечего искать) и без viewerId (manual entries
+      // с productId:null).
+      const entriesWithKeys = [];
+      for (const id of entryIds) {
+        const entry = wishlistStore.getById(id);
+        if (!entry || !entry.productId || entry.viewerId == null) continue;
+        // Ручные entries имеют viewerId вида "manual-<uuid8>" — не настоящий VK ID,
+        // ensureCounterparty создал бы под этот ID фейкового контрагента в МС. Скип.
+        if (typeof entry.viewerId === "string" && entry.viewerId.startsWith("manual-")) continue;
+        entriesWithKeys.push({ id, viewerId: entry.viewerId, viewerName: entry.viewerName, productId: entry.productId });
+      }
+
+      // Группируем по viewerId — для одного зрителя resolve counterparty один раз.
+      const byViewer = new Map();
+      for (const e of entriesWithKeys) {
+        if (!byViewer.has(e.viewerId)) {
+          byViewer.set(e.viewerId, { viewerName: e.viewerName, entries: [] });
+        }
+        byViewer.get(e.viewerId).entries.push(e);
+      }
+
+      const result = {};
+      for (const id of entryIds) result[id] = { inOpenOrder: false };
+
+      for (const [viewerId, group] of byViewer) {
+        let counterpartyId = null;
+        try {
+          // ВАЖНО: createIfMissing:false — это read-only check, не должна
+          // создавать нового контрагента в МС только потому что оператор нажал
+          // «🔍 Проверить пересечения». Если контрагента нет — ничего не было
+          // и в открытых заказах, возвращаем inOpenOrder:false для всех entries.
+          const cp = await moysklad.ensureCounterparty({
+            viewerId,
+            viewerName: group.viewerName,
+            createIfMissing: false,
+          });
+          counterpartyId = cp?.id || null;
+        } catch (error) {
+          logger.warn("wishlist", "check_counterparty_resolve_failed", {
+            viewerId, error: error?.message || String(error),
+          });
+          // По контракту: ошибка lookup должна быть видна оператору per-entry,
+          // а не молча оставлять { inOpenOrder:false }. Иначе ZIP покажет
+          // «пересечений нет», хотя проверка просто не выполнилась.
+          for (const e of group.entries) {
+            result[e.id] = { inOpenOrder: false, error: "lookup_failed" };
+          }
+          continue;
+        }
+        if (!counterpartyId) continue; // нет контрагента в МС → точно нет открытых заказов
+
+        for (const e of group.entries) {
+          const cacheKey = `${counterpartyId}:${e.productId}`;
+          const cached = getCachedCheck(cacheKey);
+          if (cached) {
+            result[e.id] = cached;
+            continue;
+          }
+          try {
+            const probe = await moysklad.hasPositionForProduct(counterpartyId, e.productId, { source: "http" });
+            setCachedCheck(cacheKey, probe);
+            result[e.id] = probe;
+          } catch (error) {
+            logger.warn("wishlist", "check_position_failed", {
+              counterpartyId, productId: e.productId, error: error?.message || String(error),
+            });
+            // Не кэшируем ошибку — позволяем retry следующим запросом.
+            result[e.id] = { inOpenOrder: false, error: "lookup_failed" };
+          }
+        }
+      }
+
+      jsonResponse(response, 200, result);
+      return;
+    }
+
+    if (pathname === "/api/wishlist/purchase-order" && request.method === "POST") {
+      let body;
+      try { body = await readJsonBody(request, WISHLIST_MAX_BODY); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const draftId = String(body.draftId || "").trim();
+      const groups = Array.isArray(body.groups) ? body.groups : [];
+      if (!draftId) return jsonResponse(response, 400, { error: "draftId_required" });
+      if (groups.length === 0) return jsonResponse(response, 400, { error: "groups_empty" });
+
+      // Валидация: каждая группа должна иметь supplierId и storeId.
+      const missingIndices = [];
+      groups.forEach((g, idx) => {
+        if (!g.supplierId || !g.storeId) missingIndices.push(idx);
+      });
+      if (missingIndices.length > 0) {
+        return jsonResponse(response, 400, {
+          error: "missing_supplier_or_store",
+          groupIndices: missingIndices,
+        });
+      }
+
+      const wishlistSettings = settingsStore.getWishlist();
+      const today = new Date().toISOString().slice(0, 10);
+
+      // Существующая submission для идемпотентности.
+      await wishlistSubmissions.ensureDraft(draftId);
+      const existing = wishlistSubmissions.getSubmission(draftId);
+      if (existing?.status === "complete") {
+        // Полный закэшированный ответ.
+        const purchaseOrders = Object.values(existing.groups || {})
+          .filter((g) => g.status === "ok")
+          .map((g) => ({
+            id: g.purchaseOrderId, name: g.purchaseOrderName, supplierId: g.supplierId,
+          }));
+        return jsonResponse(response, 200, {
+          ok: true, status: "complete", purchaseOrders, failedGroups: [], blockedGroupHashes: [], replayed: true,
+        });
+      }
+
+      // Резолвим organizationId один раз для всех групп. config может быть
+      // не заполнен — тогда тянем через moysklad.getDefaults() (он подберёт
+      // preferredOrganizationName или первую организацию).
+      let organizationId = config.moysklad?.organizationId || null;
+      if (!organizationId && typeof moysklad.getDefaults === "function") {
+        try {
+          const defaults = await moysklad.getDefaults();
+          organizationId = defaults?.organizationId || null;
+        } catch (error) {
+          logger.error("http", "wishlist_org_resolve_failed", { error: error?.message || String(error) });
+        }
+      }
+      if (!organizationId) {
+        return jsonResponse(response, 500, { error: "organization_unresolved" });
+      }
+
+      const purchaseOrders = [];
+      const failedGroups = [];
+      const blockedGroupHashes = [];
+
+      for (let i = 0; i < groups.length; i++) {
+        const group = groups[i];
+        const groupHash = computeGroupHash(group);
+        const existingResult = wishlistSubmissions.getGroupResult(draftId, groupHash);
+        if (existingResult?.status === "ok") {
+          // Уже создан — добавляем в ответ как успешный, не дублируем.
+          purchaseOrders.push({
+            id: existingResult.purchaseOrderId,
+            name: existingResult.purchaseOrderName,
+            supplierId: existingResult.supplierId,
+          });
+          continue;
+        }
+
+        const description = (group.description || wishlistSettings.descriptionTemplate || "")
+          .replaceAll("{date}", today)
+          .replaceAll("{codes}", group.positions.map((p) => p.productCode).filter(Boolean).join(", "));
+
+        const positionsPayload = (group.positions || []).map((p) => ({
+          productId: p.productId,
+          quantity: Number(p.quantity) || 1,
+          price: Number.isFinite(Number(p.price)) ? Number(p.price) : 0,
+        }));
+        const allEntryIds = (group.positions || []).flatMap((p) => Array.isArray(p.entryIds) ? p.entryIds : []);
+
+        // Sanitized — без полного description (только preview) и без auth/refs.
+        // requestHash идентифицирует уникальный submit-attempt; groupHash —
+        // детерминированный отпечаток группы (для retry-логики). Имя поставщика
+        // и productCode/Name берём из draft-snapshot wishlistStore для удобства
+        // чтения INDEX.md без перекрёстных lookup'ов.
+        const supplierName = suppliersCache?.rows?.find((s) => s.id === group.supplierId)?.name || null;
+        const sanitizedPositions = (group.positions || []).map((p) => {
+          const sample = wishlistStore.getById?.((p.entryIds || [])[0]);
+          return {
+            productId: p.productId,
+            productCode: p.productCode || sample?.productCode || null,
+            productName: sample?.productName || null,
+            quantity: p.quantity,
+            price: p.price,
+          };
+        });
+        const requestHash = "sha256:" + createHash("sha256")
+          .update(JSON.stringify({ draftId, groupHash, attemptedAt: new Date().toISOString() }))
+          .digest("hex");
+        const sanitizedSubmit = {
+          draftId,
+          groupHash,
+          requestHash,
+          supplierId: group.supplierId,
+          supplierName,
+          storeId: group.storeId,
+          positions: sanitizedPositions,
+          descriptionPreview: description ? String(description).slice(0, 80) : "",
+        };
+        diag("purchase_order_submitted", sanitizedSubmit);
+
+        try {
+          const result = await moysklad.createPurchaseOrder({
+            organizationId,
+            storeId: group.storeId,
+            agentId: group.supplierId,
+            positions: positionsPayload,
+            description,
+          });
+
+          if (result && result.skipped === true && result.safeMode === true) {
+            // Safe mode wrapper заблокировал. НЕ consume, отмечаем как блокированную.
+            await wishlistSubmissions.recordGroupResult(draftId, groupHash, {
+              status: "safe_mode_blocked",
+              supplierId: group.supplierId,
+            });
+            blockedGroupHashes.push(groupHash);
+            diag("safemode_blocked_purchase_order", { draftId, groupHash, supplierId: group.supplierId });
+            continue;
+          }
+
+          if (!result?.id) {
+            // Контракт: при любом другом skipped/disabled createPurchaseOrder
+            // должен бросать. Защита на случай нового непредвиденного skipped:
+            // отмечаем failed, не consume, не дублируем PO в МС позже.
+            throw new Error("createPurchaseOrder returned no id (unexpected skip)");
+          }
+          diag("purchase_order_response", {
+            draftId, groupHash, ok: true,
+            httpStatus: 200,
+            purchaseOrderId: result.id, purchaseOrderName: result.name,
+          });
+
+          // Успех — СНАЧАЛА recordGroupResult, ПОТОМ consume.
+          // При падении между ними reconcile на старте подберёт missing consume.
+          await wishlistSubmissions.recordGroupResult(draftId, groupHash, {
+            status: "ok",
+            purchaseOrderId: result.id,
+            purchaseOrderName: result.name,
+            supplierId: group.supplierId,
+            consumedEntryIds: allEntryIds,
+            createdAt: new Date().toISOString(),
+          });
+          await wishlistStore.consume({
+            entryIds: allEntryIds,
+            purchaseOrderId: result.id,
+            purchaseOrderName: result.name,
+            draftId,
+            groupHash,
+          });
+          purchaseOrders.push({ id: result.id, name: result.name, supplierId: group.supplierId });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.error("wishlist", "purchase_order_failed", { draftId, groupHash, error: message });
+          await wishlistSubmissions.recordGroupResult(draftId, groupHash, {
+            status: "failed",
+            supplierId: group.supplierId,
+            error: message,
+            attemptCount: (existingResult?.attemptCount || 0) + 1,
+            lastAttemptAt: new Date().toISOString(),
+          });
+          failedGroups.push({ groupHash, supplierId: group.supplierId, error: message });
+          // Парсим HTTP-статус из текста ошибки если МС вернул "MoySklad HTTP NNN".
+          const httpMatch = /MoySklad HTTP (\d+)/.exec(message);
+          diag("purchase_order_response", {
+            draftId, groupHash, ok: false,
+            httpStatus: httpMatch ? Number(httpMatch[1]) : null,
+            errorMessage: message,
+          });
+        }
+      }
+
+      if (failedGroups.length > 0 || blockedGroupHashes.length > 0) {
+        diag("purchase_order_partial", {
+          draftId,
+          successCount: purchaseOrders.length,
+          failedCount: failedGroups.length,
+          blockedCount: blockedGroupHashes.length,
+          failedGroupHashes: failedGroups.map((g) => g.groupHash),
+          blockedGroupHashes,
+        });
+      }
+
+      // Корпус ответа.
+      const allBlocked = groups.length > 0 && blockedGroupHashes.length === groups.length;
+      if (allBlocked) {
+        return jsonResponse(response, 409, {
+          error: "safe_mode_enabled",
+          blockedGroupHashes,
+        });
+      }
+
+      const status = failedGroups.length === 0 && blockedGroupHashes.length === 0
+        ? "complete"
+        : (purchaseOrders.length === 0 ? "failed" : "partial");
+
+      jsonResponse(response, 200, {
+        ok: true,
+        status,
+        purchaseOrders,
+        failedGroups,
+        blockedGroupHashes,
+      });
+      return;
+    }
+
+    // -------------------- MoySklad lookups --------------------
+
+    if (pathname === "/api/moysklad/suppliers" && request.method === "GET") {
+      try {
+        const rows = await loadSuppliersCached();
+        jsonResponse(response, 200, { rows });
+      } catch (error) {
+        jsonResponse(response, 500, { error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/moysklad/stores" && request.method === "GET") {
+      try {
+        const rows = await loadStoresCached();
+        jsonResponse(response, 200, { rows });
+      } catch (error) {
+        jsonResponse(response, 500, { error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    // -------------------- Settings --------------------
+
+    if (pathname === "/api/settings") {
+      if (request.method === "GET") {
+        jsonResponse(response, 200, settingsStore.get());
         return;
       }
+      if (request.method === "PATCH") {
+        let body;
+        try { body = await readJsonBody(request, WISHLIST_MAX_BODY); }
+        catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+        const updated = await settingsStore.patch(body);
+        return jsonResponse(response, 200, updated);
+      }
+      return methodNotAllowed(response, "GET, PATCH");
+    }
+
+    // -------------------- Existing endpoints --------------------
+
+    if (pathname === "/api/send-logs/preview") {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
       try {
         const files = await listBundleFiles();
         const totalBytes = files.reduce((acc, f) => acc + f.bytes, 0);
-        jsonResponse(response, 200, {
-          files,
-          totalBytes,
-          cooldownMs: 0,
-        });
+        jsonResponse(response, 200, { files, totalBytes, cooldownMs: 0 });
       } catch (error) {
         logger.error("http", "logs_preview_failed", { error: error?.message || String(error) });
         jsonResponse(response, 500, { error: "preview_failed" });
@@ -151,11 +668,7 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
     }
 
     if (pathname === "/api/send-logs") {
-      if (request.method !== "POST") {
-        response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
-        response.end(JSON.stringify({ error: "method_not_allowed" }));
-        return;
-      }
+      if (request.method !== "POST") return methodNotAllowed(response, "POST");
 
       let body;
       try {
@@ -180,7 +693,10 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
 
       logsInFlight = true;
       try {
-        const bundle = await buildLogBundle({ userNote, config });
+        const bundle = await buildLogBundle({
+          userNote, config,
+          wishlistStore, wishlistSubmissions, settingsStore,
+        });
 
         const buffer = bundle.parts.length === 1
           ? bundle.parts[0].buffer
@@ -234,9 +750,7 @@ export function createStaticServer({ vk, moysklad, productCodeCache, config } = 
         return;
       }
 
-      response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET, POST" });
-      response.end(JSON.stringify({ error: "method_not_allowed" }));
-      return;
+      return methodNotAllowed(response, "GET, POST");
     }
 
     const assetPath = resolveAssetPath(pathname);

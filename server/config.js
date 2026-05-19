@@ -86,6 +86,17 @@ export const config = {
   discount: {
     triggers: parseCsvEnv(process.env.VOICE_DISCOUNT_TRIGGERS, ["скидка", "скидку", "скидки"]),
   },
+  // Wish list / лист предзаказов. Эти значения — fallback по умолчанию,
+  // settings.json в logs/ перекрывает их. Не клади сюда секреты — файл попадает
+  // в диагностический ZIP.
+  wishlist: {
+    notifyVkOnAdd: process.env.WISHLIST_NOTIFY_VK === "1",
+    oldDaysThreshold: parseIntEnv(process.env.WISHLIST_OLD_DAYS_THRESHOLD, 7),
+    defaultSupplierId: process.env.MOYSKLAD_DEFAULT_SUPPLIER_ID?.trim() || "",
+    defaultStoreId: process.env.MOYSKLAD_DEFAULT_PURCHASE_STORE_ID?.trim() || "",
+    descriptionTemplate: process.env.WISHLIST_DESCRIPTION_TEMPLATE?.trim()
+      || "Предзаказ из эфира {date}. Артикулы: {codes}",
+  },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),
     folderId: process.env.YANDEX_SPEECHKIT_FOLDER_ID?.trim() || "",

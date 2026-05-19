@@ -152,6 +152,14 @@ export function extractOrphans(state) {
   if (!Array.isArray(events) || events.length === 0) {
     return [];
   }
-  const ORPHAN_STATUSES = new Set(["waitlist_pending", "pending_reservation", "creating_order"]);
+  // order_failed добавлен для согласованности с close-flow: зритель товар
+  // не получил, спрос есть, нужно мигрировать в wish list (с trigger:"order_failed").
+  // creating_order остаётся — крэш мог произойти прямо во время записи в МС.
+  const ORPHAN_STATUSES = new Set([
+    "waitlist_pending",
+    "pending_reservation",
+    "creating_order",
+    "order_failed",
+  ]);
   return events.filter((entry) => ORPHAN_STATUSES.has(entry?.status));
 }

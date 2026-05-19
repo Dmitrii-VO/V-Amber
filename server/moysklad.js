@@ -65,9 +65,26 @@ function buildProductSnapshot(product, stockRow) {
   };
 }
 
-export function createMoySkladClient(config) {
+export function createMoySkladClient(config, options = {}) {
   const authHeader = getAuthHeader(config || {});
   const isEnabled = Boolean(config?.baseUrl && authHeader);
+  // Diagnostic sink: optional callback that receives a sanitized event per
+  // MoySklad call (no payload, no auth headers). Used by the server to route
+  // moysklad_call events into the active session jsonl. If the sink throws
+  // we never let it affect the actual API path.
+  const onCall = typeof options.onCall === "function" ? options.onCall : null;
+  function emitCall(event) {
+    if (!onCall) return;
+    try { onCall(event); } catch { /* swallowed: diagnostics must never fail the request */ }
+  }
+  function extractIdsFromResponse(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    if (payload.id) return { id: payload.id };
+    if (Array.isArray(payload.rows)) {
+      return { rowCount: payload.rows.length };
+    }
+    return null;
+  }
   // Cap every API call. Without this, Node fetch can hang minutes on a TCP
   // half-open socket; the reservation hot path (findCounterpartyByVkId,
   // createCustomerOrderReservation) is especially sensitive — a stalled
@@ -96,82 +113,163 @@ export function createMoySkladClient(config) {
   }
 
   async function requestJson(path, searchParams, options = {}) {
-    const response = await fetchWithTimeout(
-      buildApiUrl(config.baseUrl, path, searchParams),
-      {
-        headers: {
-          Authorization: authHeader,
-          Accept: "application/json;charset=utf-8",
+    const startedAt = Date.now();
+    let httpStatus = 0;
+    let ok = false;
+    let errorMessage = null;
+    let payload = null;
+    const callSource = options.source || undefined;
+    try {
+      const response = await fetchWithTimeout(
+        buildApiUrl(config.baseUrl, path, searchParams),
+        {
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json;charset=utf-8",
+          },
         },
-      },
-      `GET ${path}`,
-      options.timeoutMs,
-    );
+        `GET ${path}`,
+        options.timeoutMs,
+      );
+      httpStatus = response.status;
 
-    if (!response.ok) {
-      throw new Error(`MoySklad HTTP ${response.status}`);
+      if (!response.ok) {
+        errorMessage = `MoySklad HTTP ${response.status}`;
+        throw new Error(errorMessage);
+      }
+
+      payload = await response.json();
+      if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+        errorMessage = payload.errors.map((item) => item.error).join("; ");
+        throw new Error(errorMessage);
+      }
+
+      ok = true;
+      return payload;
+    } catch (error) {
+      errorMessage = errorMessage || (error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      emitCall({
+        op: "GET",
+        method: "GET",
+        path,
+        durationMs: Date.now() - startedAt,
+        ok,
+        httpStatus,
+        idsExtracted: extractIdsFromResponse(payload),
+        errorMessage: ok ? null : errorMessage,
+        source: callSource,
+      });
     }
-
-    const payload = await response.json();
-    if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
-      throw new Error(payload.errors.map((item) => item.error).join("; "));
-    }
-
-    return payload;
   }
 
-  async function patchJson(path, payload) {
-    const response = await fetchWithTimeout(
-      buildApiUrl(config.baseUrl, path),
-      {
+  async function patchJson(path, payload, options = {}) {
+    const startedAt = Date.now();
+    const callSource = options.source || undefined;
+    let httpStatus = 0;
+    let ok = false;
+    let errorMessage = null;
+    let responsePayload = null;
+    try {
+      const response = await fetchWithTimeout(
+        buildApiUrl(config.baseUrl, path),
+        {
+          method: "PUT",
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json;charset=utf-8",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        },
+        `PUT ${path}`,
+      );
+      httpStatus = response.status;
+
+      if (!response.ok) {
+        errorMessage = `MoySklad HTTP ${response.status}`;
+        throw new Error(errorMessage);
+      }
+
+      responsePayload = await response.json();
+      if (Array.isArray(responsePayload?.errors) && responsePayload.errors.length > 0) {
+        errorMessage = responsePayload.errors.map((item) => item.error).join("; ");
+        throw new Error(errorMessage);
+      }
+
+      ok = true;
+      return responsePayload;
+    } catch (error) {
+      errorMessage = errorMessage || (error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      emitCall({
+        op: "PUT",
         method: "PUT",
-        headers: {
-          Authorization: authHeader,
-          Accept: "application/json;charset=utf-8",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      },
-      `PUT ${path}`,
-    );
-
-    if (!response.ok) {
-      throw new Error(`MoySklad HTTP ${response.status}`);
+        path,
+        durationMs: Date.now() - startedAt,
+        ok,
+        httpStatus,
+        idsExtracted: extractIdsFromResponse(responsePayload),
+        errorMessage: ok ? null : errorMessage,
+        source: callSource,
+      });
     }
-
-    const responsePayload = await response.json();
-    if (Array.isArray(responsePayload?.errors) && responsePayload.errors.length > 0) {
-      throw new Error(responsePayload.errors.map((item) => item.error).join("; "));
-    }
-
-    return responsePayload;
   }
 
-  async function postJson(path, payload) {
-    const response = await fetchWithTimeout(
-      buildApiUrl(config.baseUrl, path),
-      {
-        method: "POST",
-        headers: {
-          Authorization: authHeader,
-          Accept: "application/json;charset=utf-8",
-          "Content-Type": "application/json",
+  async function postJson(path, payload, options = {}) {
+    const startedAt = Date.now();
+    const callSource = options.source || undefined;
+    let httpStatus = 0;
+    let ok = false;
+    let errorMessage = null;
+    let responsePayload = null;
+    try {
+      const response = await fetchWithTimeout(
+        buildApiUrl(config.baseUrl, path),
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json;charset=utf-8",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
         },
-        body: JSON.stringify(payload),
-      },
-      `POST ${path}`,
-    );
+        `POST ${path}`,
+      );
+      httpStatus = response.status;
 
-    if (!response.ok) {
-      throw new Error(`MoySklad HTTP ${response.status}`);
+      if (!response.ok) {
+        errorMessage = `MoySklad HTTP ${response.status}`;
+        throw new Error(errorMessage);
+      }
+
+      responsePayload = await response.json();
+      if (Array.isArray(responsePayload?.errors) && responsePayload.errors.length > 0) {
+        errorMessage = responsePayload.errors.map((item) => item.error).join("; ");
+        throw new Error(errorMessage);
+      }
+
+      ok = true;
+      return responsePayload;
+    } catch (error) {
+      errorMessage = errorMessage || (error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      emitCall({
+        op: "POST",
+        method: "POST",
+        path,
+        durationMs: Date.now() - startedAt,
+        ok,
+        httpStatus,
+        idsExtracted: extractIdsFromResponse(responsePayload),
+        errorMessage: ok ? null : errorMessage,
+        source: callSource,
+      });
     }
-
-    const responsePayload = await response.json();
-    if (Array.isArray(responsePayload?.errors) && responsePayload.errors.length > 0) {
-      throw new Error(responsePayload.errors.map((item) => item.error).join("; "));
-    }
-
-    return responsePayload;
   }
 
   let cachedDefaults = null;
@@ -360,7 +458,7 @@ export function createMoySkladClient(config) {
 
   const counterpartyLocks = new Map();
 
-  async function findLatestOpenCustomerOrder(counterpartyId) {
+  async function findLatestOpenCustomerOrder(counterpartyId, { source } = {}) {
     if (!counterpartyId) {
       return null;
     }
@@ -384,7 +482,7 @@ export function createMoySkladClient(config) {
       filter,
       order: "moment,desc",
       limit: 1,
-    });
+    }, { source });
 
     const row = payload.rows?.[0] || null;
     if (!row) {
@@ -573,12 +671,47 @@ export function createMoySkladClient(config) {
       }
       return findLatestOpenCustomerOrder(counterpartyId);
     },
-    async ensureCounterparty({ viewerId, viewerName }) {
+    // Проверяет: есть ли у контрагента открытый customerorder, в который УЖЕ
+    // добавлена позиция с productId. Используется для UI-пометки «✔ уже в
+    // открытом заказе» в Wish list — чтобы оператор не создавал дубль PO.
+    // Если открытого заказа нет → inOpenOrder:false. Если есть, но позиции
+    // не пересекаются → тоже false. inOpenOrder:true только когда обнаружено
+    // совпадение по assortment.id.
+    async hasPositionForProduct(counterpartyId, productId, { source } = {}) {
+      if (!isEnabled || !counterpartyId || !productId) {
+        return { inOpenOrder: false };
+      }
+      const open = await findLatestOpenCustomerOrder(counterpartyId, { source });
+      if (!open?.id) return { inOpenOrder: false };
+
+      // Тянем позиции открытого заказа. limit 1000 покрывает все реалистичные
+      // объёмы — клиент с заказом из 1000+ позиций уже сам по себе аномалия.
+      const positionsPayload = await requestJson(
+        `entity/customerorder/${open.id}/positions`,
+        { limit: 1000 },
+        { source },
+      );
+      const rows = Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [];
+      const productHrefSuffix = `/entity/product/${productId}`;
+      const found = rows.some((row) => {
+        const href = row?.assortment?.meta?.href || "";
+        return href.endsWith(productHrefSuffix);
+      });
+      return found
+        ? { inOpenOrder: true, orderId: open.id, orderName: open.name || null }
+        : { inOpenOrder: false };
+    },
+    async ensureCounterparty({ viewerId, viewerName, createIfMissing = true }) {
       if (!isEnabled) {
         return null;
       }
 
-      const lockKey = String(viewerId);
+      // Lock key включает режим: read-only check не должен подхватывать
+      // write-promise (это сделало бы проверку «пересечений» косвенно пишущей)
+      // и write-flow не должен подхватывать read-promise (тогда контрагент не
+      // создастся и реальная бронь упадёт). До этого ключевалось только по
+      // viewerId, и при гонке двух flow один из них получал не свой результат.
+      const lockKey = `${viewerId}:${createIfMissing ? "write" : "read"}`;
       const inflight = counterpartyLocks.get(lockKey);
       if (inflight) {
         return inflight;
@@ -592,6 +725,9 @@ export function createMoySkladClient(config) {
         async function backfillIfMissing(found, source) {
           if (!attributeId) return found;
           if (findVkIdAttributeValue(found, attributeId)) return found;
+          // В read-only режиме (check-customerorders) не пишем backfill, чтобы
+          // «проверка пересечений» оставалась полностью read-only.
+          if (!createIfMissing) return found;
           try {
             const updated = await stampVkIdOnCounterparty(found, viewerId, attributeId);
             logger.info("moysklad", "counterparty_backfilled_vk_id", {
@@ -648,6 +784,11 @@ export function createMoySkladClient(config) {
             source: "description",
           });
           return backfillIfMissing(byDescription, "description");
+        }
+
+        // Read-only режим: не нашли → возвращаем null, в МС ничего не пишем.
+        if (!createIfMissing) {
+          return null;
         }
 
         // 4. Создаём нового — сразу с VK ID в атрибуте, если он известен.
@@ -748,6 +889,150 @@ export function createMoySkladClient(config) {
       return {
         orderId,
         positionsAdded: Array.isArray(positions.rows) ? positions.rows.length : 1,
+      };
+    },
+
+    // Bulk-выгрузка обогащённой информации по товарам: id, имя, поставщик
+    // (id+name), закупочная цена (buyPrice.value уже в копейках по схеме МС —
+    // НЕ прогонять через toMinorUnits!). Используется product-code-cache для
+    // подсветки supplier/buyPrice в wish-list без запроса в горячем пути.
+    async getProductsBulk({ source } = {}) {
+      if (!isEnabled) {
+        logger.info("moysklad", "products_bulk_skipped_not_configured");
+        return new Map();
+      }
+
+      const result = new Map();
+      const limit = 500;
+      let offset = 0;
+
+      while (true) {
+        const payload = await requestJson(
+          "entity/product",
+          { limit, offset, expand: "supplier" },
+          { timeoutMs: bulkRequestTimeoutMs, source },
+        );
+        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+        for (const product of rows) {
+          if (product?.archived === true) continue;
+          const code = String(product?.code || "").trim();
+          if (!/^\d{1,10}$/.test(code)) continue;
+          const buyPrice = typeof product?.buyPrice?.value === "number" ? product.buyPrice.value : null;
+          const supplier = product?.supplier || null;
+          // supplier.meta.href выглядит как .../entity/counterparty/<uuid>.
+          // Достаём uuid руками — отдельного id поля у meta-объекта нет.
+          let supplierId = null;
+          let supplierName = "";
+          if (supplier?.meta?.href) {
+            const match = /\/counterparty\/([0-9a-f-]+)/i.exec(supplier.meta.href);
+            if (match) supplierId = match[1];
+            supplierName = supplier?.name || "";
+          }
+          result.set(code, {
+            id: product.id,
+            name: product.name || "",
+            supplierId,
+            supplierName,
+            buyPrice,
+          });
+        }
+
+        offset += rows.length;
+        const total = Number(payload?.meta?.size || 0);
+        if (rows.length === 0 || offset >= total) break;
+      }
+
+      return result;
+    },
+
+    async listSuppliers({ source } = {}) {
+      if (!isEnabled) return [];
+      const all = [];
+      const limit = 100;
+      let offset = 0;
+      while (true) {
+        const payload = await requestJson(
+          "entity/counterparty",
+          { limit, offset },
+          { timeoutMs: bulkRequestTimeoutMs, source },
+        );
+        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+        for (const row of rows) {
+          if (!row?.id) continue;
+          all.push({
+            id: row.id,
+            name: row.name || "",
+            companyType: row.companyType || null,
+            tags: Array.isArray(row.tags) ? row.tags : [],
+          });
+        }
+        offset += rows.length;
+        const total = Number(payload?.meta?.size || 0);
+        if (rows.length === 0 || offset >= total) break;
+      }
+      return all;
+    },
+
+    async listStores({ source } = {}) {
+      if (!isEnabled) return [];
+      const payload = await requestJson("entity/store", { limit: 100 }, { source });
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      return rows.map((row) => ({ id: row.id, name: row.name || "" }));
+    },
+
+    // POST entity/purchaseorder. Обязательные поля по схеме МС: organization,
+    // agent (поставщик). store по схеме не обязателен, но на уровне приложения
+    // мы требуем его перед вызовом (проверка в http-handler). positions[].inTransit
+    // = quantity — маркирует, что эти товары «заказаны и ожидаются».
+    // price передаётся уже в копейках от вызывающего (buyPrice.value из МС).
+    // Публичный доступ к резолвленным дефолтам (organizationId, storeId,
+     // customerOrderStateId и т.д.) — нужен для PO handler, который не хочет
+     // знать тонкости MS-discovery (preferredOrganizationName и т.д.).
+    async getDefaults() {
+      if (!isEnabled) return null;
+      return resolveDefaults();
+    },
+    async createPurchaseOrder({ organizationId, storeId, agentId, positions, description, source = "http" }) {
+      if (!isEnabled) {
+        // Раньше возвращали skipped — HTTP handler принимал это за успех и
+        // помечал записи consumed без созданного PO. Теперь бросаем; handler
+        // штатно отметит группу failed и оставит entries активными.
+        throw new Error("createPurchaseOrder: MoySklad client is not configured");
+      }
+      if (!organizationId || !agentId) {
+        throw new Error("createPurchaseOrder: organizationId and agentId are required");
+      }
+      if (!Array.isArray(positions) || positions.length === 0) {
+        throw new Error("createPurchaseOrder: positions must be a non-empty array");
+      }
+
+      const payload = {
+        organization: buildEntityMeta(config.baseUrl, "organization", organizationId),
+        agent: buildEntityMeta(config.baseUrl, "counterparty", agentId),
+        positions: positions.map((p) => ({
+          quantity: p.quantity,
+          inTransit: p.quantity,
+          price: typeof p.price === "number" ? p.price : 0,
+          assortment: buildEntityMeta(config.baseUrl, "product", p.productId),
+        })),
+      };
+      if (storeId) {
+        payload.store = buildEntityMeta(config.baseUrl, "store", storeId);
+      }
+      if (description) {
+        payload.description = String(description).slice(0, 4000);
+      }
+
+      const created = await postJson("entity/purchaseorder", payload, { source });
+      logger.info("moysklad", "purchase_order_created", {
+        orderId: created.id,
+        agentId,
+        positionsCount: positions.length,
+      });
+      return {
+        id: created.id,
+        name: created.name,
+        agentId,
       };
     },
   };

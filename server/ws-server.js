@@ -6,7 +6,7 @@ import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount } from "./discount-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
-import { isSafeMode, setSafeMode, onSafeModeChange, wrapWithSafeMode } from "./safe-mode.js";
+import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 
 let nextConnectionId = 1;
@@ -49,19 +49,28 @@ function getVkApiErrorCode(error) {
 
 export function attachWsServer(httpServer, config, services = {}) {
   const wsServer = new WebSocketServer({ noServer: true });
-  const moysklad = wrapWithSafeMode(
-    services.moysklad || createMoySkladClient(config.moysklad),
-    ["createCustomerOrderReservation", "appendPositionToCustomerOrder"],
-    "moysklad",
-  );
-  const vk = wrapWithSafeMode(
-    services.vk || createVkPublisher(config.vk),
-    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishReservationReply"],
-    "vk",
-  );
+  // moysklad/vk должны быть уже обёрнуты wrapWithSafeMode в server/index.js,
+  // чтобы HTTP-flow (POST /api/wishlist/purchase-order) использовал ту же
+  // защиту, что и WS-flow. Здесь повторно не оборачиваем.
+  const moysklad = services.moysklad || createMoySkladClient(config.moysklad);
+  const vk = services.vk || createVkPublisher(config.vk);
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
+  const wishlistStore = services.wishlistStore || null;
   const reservationKeyword = "бронь";
+
+  function broadcastWishlistCount(count) {
+    const payload = JSON.stringify({ type: "wishlist_count_changed", count });
+    for (const client of wsServer.clients) {
+      if (client.readyState === 1) {
+        try { client.send(payload); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  if (wishlistStore?.subscribe) {
+    wishlistStore.subscribe(({ activeCount }) => broadcastWishlistCount(activeCount));
+  }
 
   httpServer.on("upgrade", (request, socket, head) => {
     let pathname;
@@ -159,9 +168,39 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     }
 
-    const unsubscribeSafeMode = onSafeModeChange(() => {
+    const unsubscribeSafeMode = onSafeModeChange((enabled, meta) => {
+      sessionLog.logSafemodeToggled({ enabled, source: meta?.source });
       emitState();
     });
+
+    // Снимок state раз в 30 секунд (только пока есть активный лот) — даёт
+    // мне «реперные точки» в диагностическом jsonl, чтобы реконструировать
+    // состояние в любой момент эфира без жадного логирования каждой мутации.
+    function emitStateSnapshot() {
+      if (!activeLot?.lotSessionId) return;
+      const reservations = activeLot.reservations || {};
+      const events = Array.isArray(reservations.events) ? reservations.events : [];
+      const byStatus = {};
+      for (const e of events) {
+        const k = e?.status || "unknown";
+        byStatus[k] = (byStatus[k] || 0) + 1;
+      }
+      sessionLog.logStateSnapshot({
+        activeLot: {
+          code: activeLot.code,
+          lotSessionId: activeLot.lotSessionId,
+          productId: activeLot.product?.id || null,
+          availableStock: activeLot.product?.availableStock ?? null,
+        },
+        eventsByStatus: byStatus,
+        committedReservationCount: reservations.committedReservationCount || 0,
+        primaryReservation: reservations.primaryReservation || null,
+        safeMode: isSafeMode(),
+        wishlistActive: services.wishlistStore?.getActiveCount?.() ?? 0,
+      });
+    }
+    const stateSnapshotInterval = setInterval(emitStateSnapshot, 30_000);
+    stateSnapshotInterval.unref();
 
     function resetDetectionState() {
       commentPollingGeneration += 1;
@@ -412,6 +451,31 @@ export function attachWsServer(httpServer, config, services = {}) {
           viewerId: event.viewerId,
           lotCode: lot.code,
         });
+        // Финальный отказ "товара нет" — записываем зрителя в персистентный
+        // wish list ПРЯМО СЕЙЧАС, не дожидаясь закрытия лота. Без этого
+        // slice(-20) в state.events может выкинуть запись до того, как мы
+        // её сохраним. supplierId/buyPrice достаём из обогащённого кэша.
+        if (wishlistStore) {
+          const cacheEntry = productCodeCache?.getProductByCode?.(lot.code) || null;
+          void wishlistStore.addFromOutOfStock({
+            event,
+            lot,
+            productMeta: cacheEntry
+              ? {
+                  productId: cacheEntry.id || lot.product?.id || null,
+                  productName: cacheEntry.name || lot.product?.name || "",
+                  supplierId: cacheEntry.supplierId,
+                  supplierName: cacheEntry.supplierName,
+                  buyPrice: cacheEntry.buyPrice,
+                }
+              : {
+                  productId: lot.product?.id || null,
+                  productName: lot.product?.name || "",
+                },
+          }).catch((error) => {
+            logger.warn("wishlist", "add_from_out_of_stock_failed", { error });
+          });
+        }
         emitState();
         notifyReservationStatus(lot, event);
         return;
@@ -737,6 +801,14 @@ export function attachWsServer(httpServer, config, services = {}) {
               };
 
               addReservationEvent(currentLot, event);
+              sessionLog.logVkComment({
+                commentId: comment.id,
+                viewerId,
+                viewerName: event.viewerName,
+                text: comment.text,
+                createdAt: event.createdAt,
+                lotCode: currentLot.code,
+              });
               // Полный снимок данных, необходимых для воспроизведения заказа
               // в МойСкладе из одной этой строки лога: продукт, цена в момент
               // эфира, действующая скидка, оригинальный текст комментария.
@@ -831,17 +903,27 @@ export function attachWsServer(httpServer, config, services = {}) {
       })();
     }
 
-    function flushOrphanWaitlist(lot, reason) {
+    // Async: возвращаем Promise, чтобы caller мог await миграцию ДО clearActiveState
+    // и потенциального завершения процесса. Раньше void-fire-and-forget мог
+    // потерять запись в wishlist при stop/socket close сразу следом за лотом.
+    async function flushOrphanWaitlist(lot, reason) {
       if (!lot?.reservations?.events) {
         return;
       }
-      // Брошенные брони — те, что не достигли терминального состояния
-      // (creating_order/reserved/reserved_appended/out_of_stock/order_failed/
-      //  safe_mode_logged). Без этого лога потерянные продажи буквально
-      // невидимы: оператор закрыл вкладку — и про waitlist никто не знает.
-      const ORPHAN_STATUSES = new Set(["waitlist_pending", "pending_reservation"]);
-      const orphans = lot.reservations.events.filter((entry) => ORPHAN_STATUSES.has(entry?.status));
-      if (orphans.length === 0) {
+      // Кандидаты в wish list при закрытии лота: ждавшие исхода брони
+      // (waitlist_pending/pending_reservation), либо для которых попытка
+      // создания заказа упала (order_failed — зритель товар не получил,
+      // спрос есть, мигрируем с пометкой "incident").
+      //
+      // НЕ мигрируем reserved/reserved_appended (получили), safe_mode_logged
+      // (записан для replay).
+      const MIGRATE_STATUSES = new Set([
+        "waitlist_pending",
+        "pending_reservation",
+        "order_failed",
+      ]);
+      const candidates = lot.reservations.events.filter((entry) => MIGRATE_STATUSES.has(entry?.status));
+      if (candidates.length === 0) {
         return;
       }
       logger.warn("vk", "orphan_waitlist_at_close", {
@@ -849,8 +931,8 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotSessionId: lot.lotSessionId,
         code: lot.code,
         reason,
-        count: orphans.length,
-        entries: orphans.map((entry) => ({
+        count: candidates.length,
+        entries: candidates.map((entry) => ({
           commentId: entry.commentId,
           viewerId: entry.viewerId,
           viewerName: entry.viewerName,
@@ -862,20 +944,55 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotCode: lot.code,
         lotSessionId: lot.lotSessionId,
         reason,
-        entries: orphans,
+        entries: candidates,
       });
+
+      // Миграция в персистентный wish list. await — чтобы запись точно
+      // успела до clearActiveState() и сброса state.events.
+      if (wishlistStore) {
+        try {
+          await wishlistStore.addFromWaitlistOnClose({
+            events: candidates,
+            lot,
+            reason,
+            productMetaResolver: (code) => {
+              const cacheEntry = productCodeCache?.getProductByCode?.(code) || null;
+              if (cacheEntry) {
+                return {
+                  productId: cacheEntry.id || lot.product?.id || null,
+                  productName: cacheEntry.name || lot.product?.name || "",
+                  supplierId: cacheEntry.supplierId,
+                  supplierName: cacheEntry.supplierName,
+                  buyPrice: cacheEntry.buyPrice,
+                };
+              }
+              return {
+                productId: lot.product?.id || null,
+                productName: lot.product?.name || "",
+              };
+            },
+          });
+          sessionLog.logWaitlistMigratedToWishlist({
+            lotCode: lot.code,
+            lotSessionId: lot.lotSessionId,
+            reason,
+            count: candidates.length,
+          });
+        } catch (error) {
+          logger.warn("wishlist", "migrate_from_waitlist_failed", { error });
+        }
+      }
     }
 
-    function publishLotClosed(lot, reason) {
+    async function publishLotClosed(lot, reason) {
       if (!lot?.lotSessionId) {
         return;
       }
 
-      // Сначала зафиксировать «брошенные» брони в логе и в .md-сессии,
-      // ПОТОМ закрывать VK-публикацию. Иначе при `socket_close` orphan-флаш
-      // может не успеть проскочить — websocket уже разорван и состояние
-      // сбрасывается.
-      flushOrphanWaitlist(lot, reason);
+      // Сначала зафиксировать «брошенные» брони в логе/wishlist, ПОТОМ закрывать
+      // VK-публикацию. Await важен: иначе на stop/socket_close миграция в wishlist
+      // может не успеть до сброса state.
+      await flushOrphanWaitlist(lot, reason);
 
       if (isLotPoisoned(lot.lotSessionId)) {
         return;
@@ -1130,7 +1247,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         // Оператор переключился на другой лот голосом — у предыдущего лота
         // могла остаться очередь, и её надо явно зафиксировать как
         // потерянную, чтобы оператор увидел в .md и поднял заказы вручную.
-        flushOrphanWaitlist(previousLot, "lot_replaced_by_new_detection");
+        await flushOrphanWaitlist(previousLot, "lot_replaced_by_new_detection");
       }
 
       if (previousLot?.lotSessionId && !isLotPoisoned(previousLot.lotSessionId)) {
@@ -1169,7 +1286,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
         if (publicationCommentId !== null) {
-          publishLotClosed(confirmedLot, "stale_detection");
+          await publishLotClosed(confirmedLot, "stale_detection");
         }
         return;
       }
@@ -1200,7 +1317,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     logger.info("ws", "client_connected", { connectionId });
 
-    websocket.on("message", (message, isBinary) => {
+    websocket.on("message", async (message, isBinary) => {
       try {
         if (isBinary) {
           if (!session) {
@@ -1231,7 +1348,23 @@ export function attachWsServer(httpServer, config, services = {}) {
             deviceId: payload.deviceId,
             vkLiveVideoUrl: payload.vkLiveVideoUrl || null,
           });
-          sessionLog.logSessionStart({ connectionId, vkLiveVideoUrl: payload.vkLiveVideoUrl || null });
+          sessionLog.logSessionStart({
+            connectionId,
+            vkLiveVideoUrl: payload.vkLiveVideoUrl || null,
+            context: {
+              version: services.packageVersion || null,
+              safeMode: isSafeMode(),
+              productCache: productCodeCache?.getSnapshot?.() || null,
+              featureFlags: {
+                moyskladEnabled: Boolean(moysklad?.isEnabled ?? true),
+                vkEnabled: Boolean(vk?.isEnabled ?? true),
+                wishlistActive: wishlistStore?.getActiveCount?.() ?? 0,
+              },
+            },
+          });
+          // Связываем diagnostic sink с этим writer'ом: каждый moysklad_call
+          // теперь падает в .jsonl этой сессии (а не в server.log как unrouted).
+          services.diagnosticRouter?.setActiveWriter?.(sessionLog.getJsonl());
           activeRunId = runId;
           const speechKitHandlers = {
             onPartial: ({ text, latencyMs }) => {
@@ -1247,6 +1380,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs });
+              sessionLog.logTranscriptFinal({ text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
               rememberFinal(text);
 
@@ -1397,14 +1531,17 @@ export function attachWsServer(httpServer, config, services = {}) {
                 message: `SpeechKit status ${codeType}: ${statusMessage}`,
               });
             },
-            onError: (error) => {
+            onError: async (error) => {
               if (runId !== activeRunId) {
                 return;
               }
 
-              publishLotClosed(activeLot, "stream_error");
+              await publishLotClosed(activeLot, "stream_error");
+              await wishlistStore?.flush?.();
               logger.error("speechkit", "stream_error", { connectionId, error });
               sessionLog.logSessionEnd({ reason: "stream_error" });
+              await sessionLog.flush();
+              services.diagnosticRouter?.setActiveWriter?.(null);
               activeRunId = null;
               session?.close();
               session = null;
@@ -1419,7 +1556,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               emitState();
               sendJson(websocket, { type: "error", message: error.message });
             },
-            onEnd: () => {
+            onEnd: async () => {
               // On manual stop the handler clears activeRunId before close(),
               // so guard below skips reconnect for operator-initiated stops.
               if (runId !== activeRunId) {
@@ -1436,8 +1573,11 @@ export function attachWsServer(httpServer, config, services = {}) {
                 sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
               } catch (error) {
                 logger.error("speechkit", "stream_auto_reconnect_failed", { connectionId, error });
-                publishLotClosed(activeLot, "stream_end");
+                await publishLotClosed(activeLot, "stream_end");
+                await wishlistStore?.flush?.();
                 sessionLog.logSessionEnd({ reason: "stream_end" });
+                await sessionLog.flush();
+                services.diagnosticRouter?.setActiveWriter?.(null);
                 activeRunId = null;
                 session = null;
                 resetCustomerOrders();
@@ -1469,8 +1609,11 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         if (payload.type === "stop") {
           logger.info("ws", "stream_stop_requested", { connectionId });
-          publishLotClosed(activeLot, "stream_stop");
+          await publishLotClosed(activeLot, "stream_stop");
+          await wishlistStore?.flush?.();
           sessionLog.logSessionEnd({ reason: "stream_stop" });
+          await sessionLog.flush();
+          services.diagnosticRouter?.setActiveWriter?.(null);
           activeRunId = null;
           session?.close();
           session = null;
@@ -1487,16 +1630,20 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     });
 
-    websocket.on("close", () => {
+    websocket.on("close", async () => {
       logger.info("ws", "client_disconnected", { connectionId });
-      publishLotClosed(activeLot, "socket_close");
+      await publishLotClosed(activeLot, "socket_close");
+      await wishlistStore?.flush?.();
       sessionLog.logSessionEnd({ reason: "socket_close" });
+      await sessionLog.flush();
+      services.diagnosticRouter?.setActiveWriter?.(null);
       activeRunId = null;
       session?.close();
       session = null;
       resetCustomerOrders();
       resetDetectionState();
       unsubscribeSafeMode();
+      clearInterval(stateSnapshotInterval);
     });
   });
 

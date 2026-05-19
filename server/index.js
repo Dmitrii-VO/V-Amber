@@ -1,6 +1,7 @@
 import { appendFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
 import { config } from "./config.js";
 import { createStaticServer } from "./http-server.js";
@@ -11,11 +12,21 @@ import { createVkPublisher } from "./vk.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createProductCodeCache } from "./product-code-cache.js";
 import { loadActiveState, clearActiveState, extractOrphans } from "./state-store.js";
+import { createWishlistStore } from "./wishlist-store.js";
+import { createWishlistSubmissions } from "./wishlist-submissions.js";
+import { createSettingsStore } from "./settings-store.js";
+import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sessionsDir = join(__dirname, "..", "logs", "sessions");
 
-async function recoverOrphansFromCrash() {
+let packageVersion = "";
+try {
+  const pkgRaw = readFileSync(join(__dirname, "..", "package.json"), "utf8");
+  packageVersion = JSON.parse(pkgRaw)?.version || "";
+} catch { /* ignore */ }
+
+async function recoverOrphansFromCrash({ wishlistStore } = {}) {
   const state = await loadActiveState();
   if (!state) {
     return;
@@ -24,9 +35,6 @@ async function recoverOrphansFromCrash() {
   const orphans = extractOrphans(state);
   const lot = state.activeLot || {};
 
-  // Сам факт наличия файла означает, что предыдущий процесс не успел
-  // выполнить clearActiveState — то есть умер не от Stop/close, а от
-  // exception/SIGKILL/перезапуска машины. Фиксируем это в server.log.
   logger.warn("recovery", "active_state_found_on_startup", {
     savedAt: state.savedAt,
     connectionId: state.connectionId,
@@ -36,9 +44,6 @@ async function recoverOrphansFromCrash() {
   });
 
   if (orphans.length > 0) {
-    // Дозаписываем в .md прошлой сессии, если можем. Это сохраняет
-    // хронологию: оператор открывает тот же файл и видит, чем «всё кончилось».
-    // Иначе создаём отдельный recovery-файл.
     const lines = [
       ``,
       `---`,
@@ -55,6 +60,8 @@ async function recoverOrphansFromCrash() {
       }),
       ``,
       `**Что делать:** проверить вручную в МойСкладе, что для этих зрителей созданы заказы. Если нет — создать; если есть, но без позиции на лот ${lot.code || "—"}, добавить позицию. Ответьте им в VK.`,
+      ``,
+      `_Эти зрители также добавлены в Wish list для последующего предзаказа поставщику._`,
       ``,
     ].join("\n");
 
@@ -81,32 +88,152 @@ async function recoverOrphansFromCrash() {
     } catch (error) {
       logger.error("recovery", "orphan_writeout_failed", { error });
     }
+
+    // Миграция orphans в wish list — оператор увидит «накопленный спрос»
+    // даже от упавшей сессии, и сможет одним кликом создать предзаказ.
+    if (wishlistStore) {
+      try {
+        await wishlistStore.addFromWaitlistOnClose({
+          events: orphans,
+          lot,
+          reason: "crash_recovery",
+          productMetaResolver: () => ({
+            productId: lot?.product?.id || null,
+            productName: lot?.product?.name || "",
+          }),
+        });
+      } catch (error) {
+        logger.error("recovery", "wishlist_migrate_failed", { error });
+      }
+    }
   }
 
   // В любом случае стираем state-файл — это «обработанный» инцидент.
   await clearActiveState();
 }
 
-// Каталог продуктов нужен и для обрезки «грязных» кодов до известных
-// префиксов, и для валидации YandexGPT-кандидатов. Без него детектор
-// работает в старом «нефильтрованном» режиме. Раз в час обновляем кэш,
-// чтобы новые SKU из МойСклад подхватывались без ручного нажатия
-// «Обновить каталог» в UI.
 const PRODUCT_CODE_CACHE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+
+// Diagnostic sink для moysklad-клиента. Sink не знает текущую сессию напрямую
+// (singleton-клиент, но WS-сессий может быть несколько). MVP: один writer на
+// активную сессию. http-flow без открытой WS-сессии падает в server.log как
+// kind:"moysklad_call_unrouted". Это ограничение явно зафиксировано в плане.
+const diagnosticRouter = {
+  writer: null,
+  setActiveWriter(writer) { this.writer = writer; },
+  emit(event) {
+    // source приходит от moysklad-клиента (он знает свой контекст через
+    // requestContext, см. вызов postJson/requestJson). Если не задан —
+    // считаем "unknown", чтобы post-factum было видно: вызов не из
+    // активной WS-сессии и не из HTTP submit, а откуда-то ещё (например,
+    // setInterval из server/index.js на refresh product cache).
+    // Порядок важен: source выставляем ПОСЛЕ spread, иначе передача source:undefined
+    // из moysklad.js перезатрёт fallback "unknown".
+    const enriched = { ...event, source: event?.source || "unknown" };
+    if (this.writer) {
+      this.writer.writeEvent("moysklad_call", enriched);
+      return;
+    }
+    // Нет активного session writer'а. Разделяем «явный фон» (cache_refresh,
+    // http без сессии) от настоящего «непонятно откуда»: первый — штатное
+    // поведение, второй — реально требует внимания при post-factum-анализе.
+    const messageName = enriched.source === "unknown"
+      ? "moysklad_call_unrouted"
+      : "moysklad_call_background";
+    logger.info("moysklad", messageName, enriched);
+  },
+  // Универсальный emit для произвольных kind'ов: wishlist_*, purchase_order_*,
+  // safemode_blocked_purchase_order и т.д. При отсутствии активного writer'а
+  // событие падает в server.log как unrouted — оно не теряется.
+  emitGeneric(kind, payload) {
+    if (this.writer) {
+      this.writer.writeEvent(kind, payload || {});
+    } else {
+      logger.info("diagnostic", `${kind}_unrouted`, payload || {});
+    }
+  },
+};
 
 async function main() {
   await checkForUpdates();
 
-  // Восстановление после краша делаем ДО того, как принимаем новые
-  // WebSocket-соединения. Иначе оператор откроет дашборд раньше, чем мы
-  // успеем сообщить про брошенные брони, и может не заметить уведомления.
-  await recoverOrphansFromCrash();
+  // Загружаем persisted-хранилища ДО старта HTTP/WS, чтобы счётчик wish list
+  // и идемпотентность PO были корректны с первого запроса.
+  const wishlistSubmissions = createWishlistSubmissions();
+  const wishlistStore = createWishlistStore();
+  const settingsStore = createSettingsStore({ fallbacks: config.wishlist });
 
-  const vk = createVkPublisher(config.vk);
-  const moysklad = createMoySkladClient(config.moysklad);
+  await Promise.all([
+    wishlistSubmissions.load(),
+    wishlistStore.load(),
+    settingsStore.load(),
+  ]);
+
+  // Reconcile: если процесс упал между recordGroupResult(ok) и consume(),
+  // в submissions.json есть запись об успешном PO, но в wishlist.jsonl
+  // нет соответствующего consumed — дописываем тут, не дожидаясь следующего
+  // submit, чтобы счётчик и группировка были корректны.
+  await wishlistStore.reconcileConsumedFromSubmissions(wishlistSubmissions);
+
+  // Recovery после краша делаем ПОСЛЕ загрузки wish list, чтобы orphans
+  // могли мигрировать в него.
+  await recoverOrphansFromCrash({ wishlistStore });
+
+  // Создаём клиенты МойСклад / VK и оборачиваем write-методы wrapWithSafeMode
+  // ОДИН РАЗ на shared service — чтобы и HTTP-flow (POST wishlist/purchase-order),
+  // и WS-flow (бронь → customerorder) уходили через один и тот же safe-mode guard.
+  const rawMoysklad = createMoySkladClient(config.moysklad, {
+    onCall: (event) => diagnosticRouter.emit(event),
+  });
+  const moysklad = wrapWithSafeMode(
+    rawMoysklad,
+    [
+      "createCustomerOrderReservation",
+      "appendPositionToCustomerOrder",
+      "createPurchaseOrder",
+    ],
+    "moysklad",
+  );
+
+  const rawVk = createVkPublisher(config.vk);
+  const vk = wrapWithSafeMode(
+    rawVk,
+    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishReservationReply"],
+    "vk",
+  );
+
   const productCodeCache = createProductCodeCache();
-  const httpServer = createStaticServer({ vk, moysklad, productCodeCache, config });
-  attachWsServer(httpServer, config, { vk, moysklad, productCodeCache });
+
+  // wishlist-store события → diagnostic router → активный session JSONL.
+  // Mapping kind: kind записи (added/seen_again/edited/removed/consumed)
+  // → wishlist_<kind> в JSONL.
+  if (typeof wishlistStore.subscribeEvents === "function") {
+    wishlistStore.subscribeEvents((record) => {
+      if (!record?.kind) return;
+      diagnosticRouter.emitGeneric(`wishlist_${record.kind}`, record);
+    });
+  }
+
+  const httpServer = createStaticServer({
+    vk,
+    moysklad,
+    productCodeCache,
+    config,
+    wishlistStore,
+    wishlistSubmissions,
+    settingsStore,
+    diagnosticRouter,
+    packageVersion,
+  });
+
+  attachWsServer(httpServer, config, {
+    vk,
+    moysklad,
+    productCodeCache,
+    wishlistStore,
+    diagnosticRouter,
+    packageVersion,
+  });
 
   httpServer.on("error", (error) => {
     logger.error("http", "server_listen_failed", {
@@ -120,10 +247,11 @@ async function main() {
       port: config.port,
       url: `http://localhost:${config.port}`,
       logFile: logger.filePath,
+      version: packageVersion,
+      safeMode: isSafeMode(),
+      wishlistActive: wishlistStore.getActiveCount(),
     });
 
-    // Fire-and-forget — не блокируем готовность HTTP. Ошибка уже логгируется
-    // внутри cache.refresh(), здесь только глушим unhandledRejection.
     productCodeCache.refresh(moysklad).catch(() => {});
 
     setInterval(() => {

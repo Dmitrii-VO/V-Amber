@@ -36,6 +36,11 @@
         </div>
 
         <div class="topbar-actions">
+          <button id="wishlistButton" class="btn btn--ghost" title="Лист предзаказов (накопленный спрос из эфиров)">
+            📋 Wish list
+            <span id="wishlistCount" class="wishlist-badge">0</span>
+          </button>
+
           <button id="sendLogsButton" class="btn btn--ghost" title="Скачать диагностический ZIP">
             Скачать логи
           </button>
@@ -193,6 +198,113 @@
     </div>
 
     <input id="wsUrlInput" type="hidden" value="ws://localhost:8080/ws/stt" />
+
+    <div id="wishlistModal" class="modal" hidden>
+      <div class="modal-card modal-card--wide">
+        <div class="modal-head">
+          <h3>📋 Wish list — лист предзаказов</h3>
+          <button id="wishlistClose" class="btn btn--ghost" aria-label="Закрыть">×</button>
+        </div>
+
+        <div class="wishlist-tabs" role="tablist">
+          <button class="wishlist-tab is-active" data-tab="active" role="tab">Активный <span id="wishlistTabActiveCount">0</span></button>
+          <button class="wishlist-tab" data-tab="archive" role="tab">Архив</button>
+          <button class="wishlist-tab" data-tab="settings" role="tab">Настройки</button>
+        </div>
+
+        <div class="modal-body wishlist-body">
+          <div id="wishlistDraftBanner" class="wishlist-banner" hidden>
+            <span>У вас есть несохранённый черновик от <span id="wishlistDraftBannerTime">—</span></span>
+            <button id="wishlistDraftRestore" class="btn btn--ghost">Восстановить</button>
+            <button id="wishlistDraftDiscard" class="btn btn--ghost">Отбросить</button>
+          </div>
+
+          <!-- Active tab -->
+          <section class="wishlist-pane is-active" data-pane="active">
+            <div class="wishlist-actions-row">
+              <button id="wishlistManualAdd" class="btn btn--ghost">+ Добавить вручную</button>
+              <button id="wishlistCheckOrders" class="btn btn--ghost" title="Проверить, кто уже в открытом заказе клиента">🔍 Проверить пересечения</button>
+              <span class="wishlist-summary" id="wishlistSummary">—</span>
+            </div>
+
+            <div id="wishlistManualForm" class="wishlist-manual-form" hidden>
+              <input id="wishlistManualCode" class="input" placeholder="Артикул (например, 1234)" />
+              <input id="wishlistManualName" class="input" placeholder="Имя зрителя" />
+              <input id="wishlistManualQty" class="input" type="number" min="1" value="1" style="max-width:80px;" />
+              <button id="wishlistManualConfirm" class="btn btn--primary">Добавить</button>
+              <button id="wishlistManualCancel" class="btn btn--ghost">Отмена</button>
+            </div>
+
+            <div id="wishlistActiveBody" class="wishlist-groups">
+              <div class="wishlist-empty">Wish list пуст. Открыть, чтобы создать заказ поставщику вручную, или дождаться накопления.</div>
+            </div>
+          </section>
+
+          <!-- Archive tab -->
+          <section class="wishlist-pane" data-pane="archive">
+            <div class="wishlist-actions-row">
+              <input id="wishlistArchiveFilter" class="input" placeholder="Фильтр (артикул, зритель, дата...)" />
+            </div>
+            <div id="wishlistArchiveBody" class="wishlist-archive">
+              <div class="wishlist-empty">Архив пуст.</div>
+            </div>
+          </section>
+
+          <!-- Settings tab -->
+          <section class="wishlist-pane" data-pane="settings">
+            <div class="wishlist-settings">
+              <label class="wishlist-field">
+                <span>Склад поступления по умолчанию</span>
+                <select id="wishlistSettingsStore" class="select"></select>
+              </label>
+              <label class="wishlist-field">
+                <span>Поставщик по умолчанию (если не задан в товаре)</span>
+                <select id="wishlistSettingsSupplier" class="select"></select>
+              </label>
+              <label class="wishlist-field">
+                <span>Порог «старая запись» (дней)</span>
+                <input id="wishlistSettingsOldDays" class="input" type="number" min="1" max="365" />
+              </label>
+              <label class="wishlist-field wishlist-field--inline">
+                <input id="wishlistSettingsNotifyVk" type="checkbox" />
+                <span>Уведомлять зрителей в VK при попадании в Wish list</span>
+              </label>
+              <label class="wishlist-field">
+                <span>Шаблон комментария к заказу поставщику</span>
+                <textarea id="wishlistSettingsTemplate" class="input modal-textarea" rows="2" placeholder="Используйте {date}, {codes}"></textarea>
+              </label>
+              <div class="wishlist-settings-actions">
+                <button id="wishlistSettingsSave" class="btn btn--primary">Сохранить</button>
+                <span id="wishlistSettingsStatus" class="wishlist-settings-status"></span>
+              </div>
+            </div>
+          </section>
+
+          <div id="wishlistStatus" class="modal-status" hidden></div>
+        </div>
+
+        <div class="modal-actions wishlist-actions">
+          <button id="wishlistCancel" class="btn btn--ghost">Закрыть</button>
+          <button id="wishlistSubmit" class="btn btn--primary" disabled>Отправить в МойСклад</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="wishlistConfirmModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Подтверждение</h3>
+        </div>
+        <div class="modal-body">
+          <div id="wishlistConfirmText">—</div>
+          <div class="modal-meta">Отменить заказ в МойСкладе после отправки нельзя.</div>
+        </div>
+        <div class="modal-actions">
+          <button id="wishlistConfirmCancel" class="btn btn--ghost">Назад</button>
+          <button id="wishlistConfirmOk" class="btn btn--primary">Отправить</button>
+        </div>
+      </div>
+    </div>
 
     <div id="sendLogsModal" class="modal" hidden>
       <div class="modal-card">

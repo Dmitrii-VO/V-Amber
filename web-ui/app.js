@@ -63,6 +63,45 @@ const elements = {
   sendLogsFileCount: $("sendLogsFileCount"),
   sendLogsFileList: $("sendLogsFileList"),
   sendLogsStatus: $("sendLogsStatus"),
+
+  // Wish list
+  wishlistButton: $("wishlistButton"),
+  wishlistCount: $("wishlistCount"),
+  wishlistModal: $("wishlistModal"),
+  wishlistClose: $("wishlistClose"),
+  wishlistCancel: $("wishlistCancel"),
+  wishlistSubmit: $("wishlistSubmit"),
+  wishlistStatus: $("wishlistStatus"),
+  wishlistTabActiveCount: $("wishlistTabActiveCount"),
+  wishlistActiveBody: $("wishlistActiveBody"),
+  wishlistArchiveBody: $("wishlistArchiveBody"),
+  wishlistArchiveFilter: $("wishlistArchiveFilter"),
+  wishlistSummary: $("wishlistSummary"),
+  wishlistManualAdd: $("wishlistManualAdd"),
+  wishlistManualForm: $("wishlistManualForm"),
+  wishlistManualCode: $("wishlistManualCode"),
+  wishlistManualName: $("wishlistManualName"),
+  wishlistManualQty: $("wishlistManualQty"),
+  wishlistManualConfirm: $("wishlistManualConfirm"),
+  wishlistManualCancel: $("wishlistManualCancel"),
+  wishlistCheckOrders: $("wishlistCheckOrders"),
+  wishlistDraftBanner: $("wishlistDraftBanner"),
+  wishlistDraftBannerTime: $("wishlistDraftBannerTime"),
+  wishlistDraftRestore: $("wishlistDraftRestore"),
+  wishlistDraftDiscard: $("wishlistDraftDiscard"),
+
+  wishlistSettingsStore: $("wishlistSettingsStore"),
+  wishlistSettingsSupplier: $("wishlistSettingsSupplier"),
+  wishlistSettingsOldDays: $("wishlistSettingsOldDays"),
+  wishlistSettingsNotifyVk: $("wishlistSettingsNotifyVk"),
+  wishlistSettingsTemplate: $("wishlistSettingsTemplate"),
+  wishlistSettingsSave: $("wishlistSettingsSave"),
+  wishlistSettingsStatus: $("wishlistSettingsStatus"),
+
+  wishlistConfirmModal: $("wishlistConfirmModal"),
+  wishlistConfirmText: $("wishlistConfirmText"),
+  wishlistConfirmCancel: $("wishlistConfirmCancel"),
+  wishlistConfirmOk: $("wishlistConfirmOk"),
 };
 
 const state = {
@@ -525,6 +564,11 @@ function handleServerMessage(payload) {
     return;
   }
 
+  if (payload.type === "wishlist_count_changed") {
+    updateWishlistBadge(payload.count);
+    return;
+  }
+
   logEvent(`Неизвестное сообщение: ${JSON.stringify(payload)}`, "warn");
 }
 
@@ -916,3 +960,838 @@ fetchSafeModeInitial();
 
 navigator.mediaDevices.addEventListener("devicechange", loadInputDevices);
 loadInputDevices();
+
+// ===== Wish list =====
+const wishlistState = {
+  draftId: null,
+  groups: [],       // [{supplierId, supplierName, entries:[{id,...,selected:bool}]}]
+  archiveCache: [],
+  settings: null,
+  suppliers: [],
+  stores: [],
+  pendingSubmit: false,
+  saveTimers: new Map(), // entryId -> timeout id (debounce)
+  oldEntries: 0,
+};
+
+const WISHLIST_DRAFT_KEY_PREFIX = "wishlist_draft_";
+
+function updateWishlistBadge(count) {
+  if (typeof count !== "number") return;
+  elements.wishlistCount.textContent = String(count);
+  elements.wishlistCount.classList.toggle("has-items", count > 0);
+  elements.wishlistCount.classList.toggle("has-old", wishlistState.oldEntries > 0);
+  if (elements.wishlistTabActiveCount) elements.wishlistTabActiveCount.textContent = String(count);
+}
+
+async function fetchWishlistCount() {
+  try {
+    const res = await fetch("/api/wishlist/count");
+    const data = await res.json();
+    updateWishlistBadge(data.count || 0);
+  } catch { /* ignore */ }
+}
+
+function setWishlistStatus(text, level) {
+  const el = elements.wishlistStatus;
+  if (!text) { el.hidden = true; el.textContent = ""; el.className = "modal-status"; return; }
+  el.hidden = false;
+  el.textContent = text;
+  el.className = "modal-status" + (level ? ` ${level}` : "");
+}
+
+function switchWishlistTab(tabName) {
+  document.querySelectorAll(".wishlist-tab").forEach((b) => {
+    b.classList.toggle("is-active", b.dataset.tab === tabName);
+  });
+  document.querySelectorAll(".wishlist-pane").forEach((p) => {
+    p.classList.toggle("is-active", p.dataset.pane === tabName);
+  });
+  if (tabName === "archive") void loadWishlistArchive();
+  if (tabName === "settings") void loadWishlistSettings();
+}
+
+async function openWishlistModal() {
+  elements.wishlistModal.hidden = false;
+  setWishlistStatus("", null);
+  switchWishlistTab("active");
+  await loadWishlistActive();
+}
+
+function closeWishlistModal() {
+  elements.wishlistModal.hidden = true;
+  setWishlistStatus("", null);
+}
+
+async function loadWishlistActive() {
+  try {
+    const draftRes = await fetch("/api/wishlist/draft", { method: "POST" });
+    const draftData = await draftRes.json();
+    wishlistState.draftId = draftData.draftId;
+    wishlistState.groups = (draftData.groups || []).map((g) => ({
+      ...g,
+      entries: g.entries.map((e) => ({ ...e, selected: true })),
+    }));
+    // Восстановление черновика из localStorage, если есть.
+    const stored = loadStoredDraft();
+    if (stored && stored.draftId === wishlistState.draftId) {
+      // на свежий draftId сохранённое не относится (draftId меняется каждый раз);
+      // показываем баннер только если есть «совместимый» draft с теми же entryIds.
+    }
+    const savedDraft = loadCompatibleStoredDraft(wishlistState.groups);
+    if (savedDraft) {
+      const time = new Date(savedDraft.savedAt).toLocaleTimeString();
+      elements.wishlistDraftBannerTime.textContent = time;
+      elements.wishlistDraftBanner.hidden = false;
+      elements.wishlistDraftRestore.onclick = () => {
+        applyStoredDraft(savedDraft);
+        renderWishlistActive();
+        elements.wishlistDraftBanner.hidden = true;
+      };
+      elements.wishlistDraftDiscard.onclick = () => {
+        clearStoredDraft();
+        elements.wishlistDraftBanner.hidden = true;
+      };
+    } else {
+      elements.wishlistDraftBanner.hidden = true;
+    }
+    renderWishlistActive();
+  } catch (error) {
+    setWishlistStatus(`Не удалось загрузить wish list: ${error.message}`, "error");
+  }
+}
+
+function renderWishlistActive() {
+  const body = elements.wishlistActiveBody;
+  const groups = wishlistState.groups;
+  // Записи без productId не могут уйти в PO — сразу гасим selected, чтобы submit и
+  // суммы не учитывали их. (Пользователь увидит дизейбленный чекбокс и подсказку.)
+  for (const g of groups) {
+    for (const e of g.entries) {
+      if (!e.productId) e.selected = false;
+    }
+  }
+  let totalActive = 0;
+  let oldCount = 0;
+  for (const g of groups) {
+    totalActive += g.entries.length;
+    oldCount += g.entries.filter((e) => e.isOld).length;
+  }
+  wishlistState.oldEntries = oldCount;
+  updateWishlistBadge(totalActive);
+
+  if (groups.length === 0) {
+    body.innerHTML = `<div class="wishlist-empty">Wish list пуст. Используйте «+ Добавить вручную», чтобы создать предзаказ.</div>`;
+    elements.wishlistSubmit.disabled = true;
+    elements.wishlistSummary.textContent = "—";
+    return;
+  }
+
+  body.innerHTML = groups.map((g, gIdx) => {
+    const noSupplier = !g.supplierId;
+    const allSelected = g.entries.every((e) => e.selected);
+    const someSelected = g.entries.some((e) => e.selected);
+    const sumAmount = g.entries
+      .filter((e) => e.selected)
+      .reduce((acc, e) => acc + (Number(e.buyPrice || 0) * Number(e.quantity || 0)), 0);
+    return `
+      <div class="wishlist-group ${noSupplier ? "wishlist-group--no-supplier" : ""}">
+        <div class="wishlist-group-head">
+          <input type="checkbox" data-group-toggle="${gIdx}" ${allSelected ? "checked" : ""}
+                 ${!allSelected && someSelected ? "data-indeterminate=true" : ""} />
+          <span class="wishlist-group-name">${escapeHtml(g.supplierName || "Без поставщика")}${noSupplier ? " ⚠" : ""}</span>
+          <span class="wishlist-group-stats">${g.entries.filter((e) => e.selected).length}/${g.entries.length} · ${formatKopecks(sumAmount)}</span>
+        </div>
+        <table class="wishlist-table">
+          <thead><tr>
+            <th></th><th>Артикул</th><th>Товар</th><th>Кол-во</th>
+            <th>Закуп. цена</th><th>Зрители</th><th>Возраст</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${g.entries.map((e) => renderWishlistRow(g, e)).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }).join("");
+
+  // Indeterminate checkboxes (no HTML attribute)
+  body.querySelectorAll("input[data-indeterminate]").forEach((cb) => { cb.indeterminate = true; });
+  // Bind events
+  body.querySelectorAll("[data-group-toggle]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const gIdx = Number(cb.dataset.groupToggle);
+      const checked = cb.checked;
+      wishlistState.groups[gIdx].entries.forEach((e) => {
+        // Missing-product и «уже в открытом заказе» записи не отправляемы —
+        // оставляем unchecked даже если оператор нажал «выделить группу».
+        e.selected = checked && Boolean(e.productId) && !e.alreadyInOrder?.inOpenOrder;
+      });
+      renderWishlistActive();
+      persistDraftDebounced();
+    });
+  });
+  body.querySelectorAll("[data-entry-toggle]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const entry = findEntry(cb.dataset.entryToggle);
+      if (entry) entry.selected = cb.checked;
+      renderWishlistActive();
+      persistDraftDebounced();
+    });
+  });
+  body.querySelectorAll("[data-inline-edit]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const entry = findEntry(input.dataset.inlineEdit);
+      if (!entry) return;
+      const field = input.dataset.field;
+      // КРИТИЧНО: entry.buyPrice ВСЕГДА хранится в копейках (как МС отдаёт).
+      // Поле в input — рубли (для удобства оператора), при чтении умножаем.
+      // Раньше тут хранили рубли → submit отправлял ×100 меньшую цену в PO.
+      let value;
+      if (field === "quantity") {
+        value = Math.max(1, Number(input.value) || 1);
+      } else if (field === "buyPrice") {
+        value = Math.round((Number(input.value) || 0) * 100);
+      } else {
+        value = Number(input.value) || 0;
+      }
+      entry[field] = value;
+      schedulePatchEntry(entry.id, input, { [field]: value });
+      persistDraftDebounced();
+      // Update group total without full re-render to keep focus.
+      renderGroupTotals();
+    });
+  });
+  body.querySelectorAll("[data-supplier-pick]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const entry = findEntry(sel.dataset.supplierPick);
+      if (!entry) return;
+      const supplierId = sel.value;
+      const supplier = wishlistState.suppliers.find((s) => s.id === supplierId);
+      entry.supplierId = supplierId || null;
+      entry.supplierName = supplier?.name || "";
+      schedulePatchEntry(entry.id, sel, { supplierId, supplierName: supplier?.name || "" });
+      // После смены supplier нужна пере-группировка — перерисуем целиком.
+      regroupAndRender();
+    });
+  });
+  body.querySelectorAll("[data-remove]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const entryId = btn.dataset.remove;
+      if (!confirm("Удалить запись из wish list?")) return;
+      try {
+        const res = await fetch(`/api/wishlist/${entryId}`, { method: "DELETE" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await loadWishlistActive();
+      } catch (error) {
+        setWishlistStatus(`Не удалось удалить: ${error.message}`, "error");
+      }
+    });
+  });
+  body.querySelectorAll("[data-archive]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const entryId = btn.dataset.archive;
+      try {
+        const res = await fetch(`/api/wishlist/${entryId}`, { method: "DELETE" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await loadWishlistActive();
+        setWishlistStatus("Запись архивирована.", "ok");
+      } catch (error) {
+        setWishlistStatus(`Не удалось архивировать: ${error.message}`, "error");
+      }
+    });
+  });
+
+  updateSubmitButtonState();
+}
+
+function renderWishlistRow(group, entry) {
+  const supplierCell = !group.supplierId
+    ? `<select class="wishlist-supplier-picker" data-supplier-pick="${entry.id}">
+         <option value="">Выберите поставщика…</option>
+         ${wishlistState.suppliers.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("")}
+       </select>`
+    : "";
+  const viewers = (entry.seenEvents || []).length > 1
+    ? `${entry.viewerName} +${(entry.seenEvents.length - 1)}`
+    : (entry.viewerName || "—");
+  const ageDays = Math.floor((Date.now() - new Date(entry.createdAt).getTime()) / 86400000);
+  const ageStr = ageDays === 0 ? "сегодня" : `${ageDays} дн.`;
+  const failedBadge = entry.trigger === "order_failed"
+    ? `<span class="wishlist-trigger-failed">order_failed</span>` : "";
+
+  // productId:null — товар не найден в кэше МойСклад. PO в МС упадёт без assortment.
+  // Запрещаем чекбокс и подсвечиваем строку.
+  const missingProduct = !entry.productId;
+  const inOpenOrder = entry.alreadyInOrder?.inOpenOrder === true;
+  const productCell = missingProduct
+    ? `<span class="wishlist-product-missing" title="Товар с этим артикулом не найден в МойСклад. Невозможно создать PO. Удалите запись или обновите каталог.">⚠ ${escapeHtml(entry.productName || entry.productCode || "—")}</span>`
+    : escapeHtml(entry.productName || "—");
+  const rowClasses = [
+    entry.isOld ? "wishlist-row--old" : "",
+    missingProduct ? "wishlist-row--missing-product" : "",
+    inOpenOrder ? "wishlist-row--in-order" : "",
+  ].filter(Boolean).join(" ");
+
+  // Бейдж «уже в открытом заказе» — оператор не должен создавать дубль PO.
+  // Кнопка-чекбокс заменяется на «Архивировать» (вызывает обычный DELETE
+  // /api/wishlist/:id с reason=already_in_customerorder).
+  const inOrderBadge = inOpenOrder
+    ? `<span class="wishlist-trigger-in-order" title="Этот зритель уже имеет открытый customerorder с этим товаром (${escapeHtml(entry.alreadyInOrder?.orderName || entry.alreadyInOrder?.orderId || "?")}). Создавать PO не нужно.">✔ в заказе</span>`
+    : "";
+
+  const checkboxCell = inOpenOrder
+    ? `<button class="wishlist-row-archive" data-archive="${entry.id}" title="Архивировать: товар уже в открытом customerorder">📥</button>`
+    : `<input type="checkbox" data-entry-toggle="${entry.id}" ${entry.selected && !missingProduct ? "checked" : ""} ${missingProduct ? "disabled title='Невозможно отправить: товар не найден в МойСклад'" : ""} />`;
+
+  return `
+    <tr class="${rowClasses}">
+      <td>${checkboxCell}</td>
+      <td class="mono">${escapeHtml(entry.productCode)}</td>
+      <td>${productCell} ${failedBadge} ${inOrderBadge} ${supplierCell}</td>
+      <td>
+        <input type="number" class="wishlist-inline-input" min="1" max="999"
+               data-inline-edit="${entry.id}" data-field="quantity" value="${entry.quantity}" />
+      </td>
+      <td>
+        <input type="number" class="wishlist-inline-input" min="0" step="0.01"
+               data-inline-edit="${entry.id}" data-field="buyPrice"
+               value="${entry.buyPrice != null ? (entry.buyPrice / 100) : ""}"
+               placeholder="—"
+               title="В рублях. На сервер уходит ×100 как копейки." />
+      </td>
+      <td><span class="wishlist-viewers" title="${escapeHtml((entry.seenEvents || []).map((s) => s.ts).join("\n"))}">${escapeHtml(viewers)}</span></td>
+      <td class="mono dim">${ageStr}</td>
+      <td><button class="wishlist-row-remove" data-remove="${entry.id}" title="Удалить из wish list">×</button></td>
+    </tr>
+  `;
+}
+
+function renderGroupTotals() {
+  document.querySelectorAll(".wishlist-group").forEach((groupEl, gIdx) => {
+    const g = wishlistState.groups[gIdx];
+    if (!g) return;
+    const sum = g.entries
+      .filter((e) => e.selected)
+      .reduce((acc, e) => acc + (Number(e.buyPrice || 0) * Number(e.quantity || 0)), 0);
+    const selCount = g.entries.filter((e) => e.selected).length;
+    const stats = groupEl.querySelector(".wishlist-group-stats");
+    if (stats) stats.textContent = `${selCount}/${g.entries.length} · ${formatKopecks(sum)}`;
+  });
+  updateSubmitButtonState();
+}
+
+function updateSubmitButtonState() {
+  let total = 0;
+  let supplierGroups = 0;
+  let sumAmount = 0;
+  let missing = 0;
+  for (const g of wishlistState.groups) {
+    for (const e of g.entries) if (!e.productId) missing += 1;
+    const selected = g.entries.filter((e) => e.selected);
+    if (selected.length === 0) continue;
+    total += selected.length;
+    if (g.supplierId) supplierGroups += 1;
+    sumAmount += selected.reduce((acc, e) => acc + Number(e.buyPrice || 0) * Number(e.quantity || 0), 0);
+  }
+  elements.wishlistSubmit.disabled = total === 0;
+  const missingNote = missing > 0 ? ` · ⚠ ${missing} без productId (не отправляемы)` : "";
+  elements.wishlistSummary.textContent = total === 0
+    ? `Выберите позиции${missingNote}`
+    : `Выбрано: ${total} позиций · ${supplierGroups} заказов поставщикам · ${formatKopecks(sumAmount)}${missingNote}`;
+}
+
+function findEntry(entryId) {
+  for (const g of wishlistState.groups) {
+    const e = g.entries.find((x) => x.id === entryId);
+    if (e) return e;
+  }
+  return null;
+}
+
+function regroupAndRender() {
+  const flat = wishlistState.groups.flatMap((g) => g.entries);
+  const byKey = new Map();
+  for (const e of flat) {
+    const key = e.supplierId || "__no_supplier__";
+    if (!byKey.has(key)) byKey.set(key, {
+      supplierId: e.supplierId || null,
+      supplierName: e.supplierName || (e.supplierId ? "" : "Без поставщика"),
+      entries: [],
+    });
+    byKey.get(key).entries.push(e);
+  }
+  wishlistState.groups = [...byKey.values()];
+  renderWishlistActive();
+}
+
+function schedulePatchEntry(entryId, inputEl, changes) {
+  const prev = wishlistState.saveTimers.get(entryId);
+  if (prev) clearTimeout(prev);
+  const t = setTimeout(async () => {
+    try {
+      // changes уже в правильных единицах (buyPrice — копейки, quantity — целое).
+      const res = await fetch(`/api/wishlist/${entryId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      if (inputEl) {
+        inputEl.classList.remove("is-dirty");
+        inputEl.removeAttribute("title");
+      }
+      setWishlistStatus("", null);
+    } catch (error) {
+      if (inputEl) {
+        inputEl.classList.add("is-dirty");
+        inputEl.title = `Не сохранено: ${error.message}. Изменения только локально.`;
+      }
+      setWishlistStatus(`Не удалось сохранить изменение: ${error.message}. Попробуйте ещё раз.`, "error");
+    }
+  }, 600);
+  wishlistState.saveTimers.set(entryId, t);
+}
+
+function persistDraftDebounced() {
+  if (!wishlistState.draftId) return;
+  try {
+    const payload = {
+      draftId: wishlistState.draftId,
+      savedAt: new Date().toISOString(),
+      groups: wishlistState.groups,
+    };
+    localStorage.setItem(WISHLIST_DRAFT_KEY_PREFIX + wishlistState.draftId, JSON.stringify(payload));
+  } catch { /* ignore quota */ }
+}
+
+function loadStoredDraft() {
+  try {
+    // Берём самый свежий
+    let best = null;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(WISHLIST_DRAFT_KEY_PREFIX)) continue;
+      const raw = JSON.parse(localStorage.getItem(key) || "null");
+      if (raw && (!best || raw.savedAt > best.savedAt)) best = raw;
+    }
+    return best;
+  } catch { return null; }
+}
+
+function loadCompatibleStoredDraft(serverGroups) {
+  const stored = loadStoredDraft();
+  if (!stored) return null;
+  const serverIds = new Set(serverGroups.flatMap((g) => g.entries.map((e) => e.id)));
+  const storedIds = stored.groups?.flatMap((g) => g.entries.map((e) => e.id)) || [];
+  // Совместимым считаем, если хотя бы половина entry ID совпадает.
+  const overlap = storedIds.filter((id) => serverIds.has(id)).length;
+  if (overlap === 0) return null;
+  return stored;
+}
+
+function applyStoredDraft(stored) {
+  // Накладываем quantity / buyPrice / selected из storage на серверные группы.
+  const map = new Map();
+  for (const g of stored.groups || []) {
+    for (const e of g.entries || []) map.set(e.id, e);
+  }
+  for (const g of wishlistState.groups) {
+    for (const e of g.entries) {
+      const saved = map.get(e.id);
+      if (saved) {
+        if ("quantity" in saved) e.quantity = saved.quantity;
+        if ("buyPrice" in saved) e.buyPrice = saved.buyPrice;
+        if ("selected" in saved) e.selected = saved.selected;
+      }
+    }
+  }
+}
+
+function clearStoredDraft() {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(WISHLIST_DRAFT_KEY_PREFIX)) localStorage.removeItem(key);
+    }
+  } catch { /* ignore */ }
+}
+
+async function loadWishlistArchive() {
+  try {
+    const res = await fetch("/api/wishlist/archive");
+    const data = await res.json();
+    wishlistState.archiveCache = data.entries || [];
+    renderWishlistArchive();
+  } catch (error) {
+    elements.wishlistArchiveBody.innerHTML = `<div class="wishlist-empty">Ошибка: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderWishlistArchive() {
+  const filter = (elements.wishlistArchiveFilter.value || "").toLowerCase().trim();
+  const rows = wishlistState.archiveCache.filter((e) => {
+    if (!filter) return true;
+    return [e.productCode, e.viewerName, e.productName, e.createdAt].some((v) => String(v || "").toLowerCase().includes(filter));
+  });
+  if (rows.length === 0) {
+    elements.wishlistArchiveBody.innerHTML = `<div class="wishlist-empty">Архив пуст.</div>`;
+    return;
+  }
+  elements.wishlistArchiveBody.innerHTML = rows.map((e) => {
+    const status = e.status === "consumed" ? "→ ПЗ" : "✕ удалена";
+    const detail = e.consumed
+      ? `<a href="https://online.moysklad.ru/app/#purchaseorder/edit?id=${e.consumed.purchaseOrderId}" target="_blank" rel="noreferrer">${escapeHtml(e.consumed.purchaseOrderName || "PO")}</a>`
+      : escapeHtml(e.removedReason || "");
+    return `
+      <div class="wishlist-archive-row">
+        <span class="mono">${escapeHtml(e.productCode || "")}</span>
+        <span>${escapeHtml(e.productName || "—")} · ${escapeHtml(e.viewerName || "—")}</span>
+        <span class="a-status">${status}</span>
+        <span>${detail}</span>
+      </div>
+    `;
+  }).join("");
+}
+
+async function loadWishlistSettings() {
+  // ВАЖНО: настройки грузим первым обязательным шагом. Suppliers/stores —
+  // необязательны: если МойСклад временно недоступен, оператор всё равно должен
+  // видеть и сохранять свои настройки. Раньше Promise.all блокировал всё.
+  try {
+    const res = await fetch("/api/settings");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    wishlistState.settings = await res.json();
+  } catch (error) {
+    setWishlistSettingsStatus(`Не удалось загрузить настройки: ${error.message}`, "error");
+    return;
+  }
+
+  // Списки из МС — best-effort. Каждый сам по себе.
+  try {
+    const r = await fetch("/api/moysklad/suppliers");
+    if (r.ok) wishlistState.suppliers = (await r.json()).rows || [];
+  } catch { /* leave previous list */ }
+  try {
+    const r = await fetch("/api/moysklad/stores");
+    if (r.ok) wishlistState.stores = (await r.json()).rows || [];
+  } catch { /* leave previous list */ }
+
+  const w = wishlistState.settings.wishlist || {};
+  const stores = wishlistState.stores;
+  const suppliers = wishlistState.suppliers;
+
+  // Если список не загрузился, но в settings уже есть сохранённый id — показываем его
+  // как placeholder-option с пометкой «(сохранено, список недоступен)», чтобы оператор
+  // видел: значение есть, не стёрто. На save мы это поле просто не отправим (см. ниже),
+  // и settings-store.patch сохранит существующее.
+  const storeMissing = stores.length === 0;
+  const supplierMissing = suppliers.length === 0;
+
+  const storeOptions = stores.map((s) =>
+    `<option value="${escapeHtml(s.id)}" ${s.id === w.defaultStoreId ? "selected" : ""}>${escapeHtml(s.name)}</option>`
+  ).join("");
+  const storeSavedPlaceholder = (storeMissing && w.defaultStoreId)
+    ? `<option value="${escapeHtml(w.defaultStoreId)}" selected>${escapeHtml(w.defaultStoreId)} (сохранено, список МС недоступен)</option>`
+    : "";
+  elements.wishlistSettingsStore.innerHTML = `<option value="">— не задан —</option>` + storeSavedPlaceholder + storeOptions;
+
+  const supplierOptions = suppliers.map((s) =>
+    `<option value="${escapeHtml(s.id)}" ${s.id === w.defaultSupplierId ? "selected" : ""}>${escapeHtml(s.name)}</option>`
+  ).join("");
+  const supplierSavedPlaceholder = (supplierMissing && w.defaultSupplierId)
+    ? `<option value="${escapeHtml(w.defaultSupplierId)}" selected>${escapeHtml(w.defaultSupplierId)} (сохранено, список МС недоступен)</option>`
+    : "";
+  elements.wishlistSettingsSupplier.innerHTML = `<option value="">— не задан —</option>` + supplierSavedPlaceholder + supplierOptions;
+
+  elements.wishlistSettingsOldDays.value = w.oldDaysThreshold ?? 7;
+  elements.wishlistSettingsNotifyVk.checked = Boolean(w.notifyVkOnAdd);
+  elements.wishlistSettingsTemplate.value = w.descriptionTemplate || "";
+
+  // Запоминаем флаги для saveWishlistSettings — он пропустит поля, чьи списки не
+  // загрузились, чтобы случайный «— не задан —» не стёр сохранённое значение.
+  wishlistState.storeListLoaded = !storeMissing;
+  wishlistState.supplierListLoaded = !supplierMissing;
+
+  if (storeMissing || supplierMissing) {
+    setWishlistSettingsStatus("Списки МС недоступны — текущие сохранённые id отмечены как placeholder и не будут стёрты при сохранении.", "error");
+  }
+}
+
+function setWishlistSettingsStatus(text, level) {
+  const el = elements.wishlistSettingsStatus;
+  el.textContent = text || "";
+  el.className = "wishlist-settings-status" + (level ? ` ${level}` : "");
+}
+
+async function saveWishlistSettings() {
+  // ВАЖНО: defaultStoreId / defaultSupplierId отправляем ТОЛЬКО если соответствующий
+  // список из МС реально загрузился. Иначе мы рискуем стереть сохранённое значение,
+  // потому что select с одним placeholder-option отдаст value === "" или сам saved id.
+  // settings-store.patch использует deep merge — отсутствующее поле сохраняется как есть.
+  const wishlist = {
+    oldDaysThreshold: Number(elements.wishlistSettingsOldDays.value) || 7,
+    notifyVkOnAdd: elements.wishlistSettingsNotifyVk.checked,
+    descriptionTemplate: elements.wishlistSettingsTemplate.value || "",
+  };
+  if (wishlistState.storeListLoaded) {
+    wishlist.defaultStoreId = elements.wishlistSettingsStore.value || "";
+  }
+  if (wishlistState.supplierListLoaded) {
+    wishlist.defaultSupplierId = elements.wishlistSettingsSupplier.value || "";
+  }
+  const patch = { wishlist };
+  setWishlistSettingsStatus("Сохраняю…", null);
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Записываем ответ обратно — иначе submit использует устаревший
+    // wishlistState.settings (например, пустой defaultStoreId), хотя оператор
+    // только что выбрал склад. Сервер вернул мerged-объект как single source of truth.
+    const updated = await res.json();
+    wishlistState.settings = updated;
+    setWishlistSettingsStatus("Сохранено", "ok");
+  } catch (error) {
+    setWishlistSettingsStatus(`Ошибка: ${error.message}`, "error");
+  }
+}
+
+async function submitWishlist() {
+  if (!wishlistState.draftId) return;
+  // Fallback из настроек — если у группы supplier не выставлен (включая «Без
+  // поставщика»), но в Настройках указан defaultSupplierId, используем его.
+  // Аналогично для склада. Без этого записи без supplier ловили 400, хотя
+  // оператор явно настроил дефолтного поставщика именно для такого случая.
+  const fallbackSupplierId = wishlistState.settings?.wishlist?.defaultSupplierId || "";
+  const fallbackStoreId = wishlistState.settings?.wishlist?.defaultStoreId || "";
+
+  const groups = wishlistState.groups
+    .map((g) => {
+      // Защита: missing-product и «уже в открытом заказе» не должны попасть
+      // в payload, даже если оказались selected через регресс в group-toggle.
+      const selected = g.entries.filter((e) =>
+        e.selected && e.productId && !e.alreadyInOrder?.inOpenOrder
+      );
+      if (selected.length === 0) return null;
+      // Слипаем позиции по productId (одна строка PO на товар).
+      const byProduct = new Map();
+      for (const e of selected) {
+        const key = e.productId;
+        if (!byProduct.has(key)) byProduct.set(key, {
+          productId: e.productId,
+          productCode: e.productCode,
+          quantity: 0, price: e.buyPrice || 0,
+          entryIds: [],
+        });
+        const row = byProduct.get(key);
+        row.quantity += Number(e.quantity || 1);
+        row.entryIds.push(e.id);
+      }
+      return {
+        supplierId: g.supplierId || fallbackSupplierId || "",
+        storeId: fallbackStoreId,
+        description: wishlistState.settings?.wishlist?.descriptionTemplate || "",
+        positions: [...byProduct.values()],
+      };
+    })
+    .filter(Boolean);
+
+  // Подсказка в подтверждении: какие группы используют fallback-поставщика.
+  const fallbackUsed = wishlistState.groups
+    .filter((g) => !g.supplierId && g.entries.some((e) => e.selected && e.productId))
+    .length;
+  if (fallbackUsed > 0 && !fallbackSupplierId) {
+    setWishlistStatus(`Группы без поставщика (${fallbackUsed}): задайте supplier в строке или укажите дефолтного поставщика в Настройках.`, "error");
+    return;
+  }
+
+  if (groups.length === 0) return;
+
+  // Show confirm modal.
+  const totalPositions = groups.reduce((a, g) => a + g.positions.reduce((b, p) => b + p.quantity, 0), 0);
+  const totalAmount = groups.reduce((a, g) => a + g.positions.reduce((b, p) => b + p.quantity * (p.price || 0), 0), 0);
+  const fallbackSupplierName = wishlistState.suppliers.find((s) => s.id === fallbackSupplierId)?.name
+    || (fallbackSupplierId ? fallbackSupplierId : "");
+  const fallbackNote = (fallbackUsed > 0 && fallbackSupplierId)
+    ? ` ${fallbackUsed} ${fallbackUsed === 1 ? "группа без поставщика унаследует" : "групп без поставщика унаследуют"} «${fallbackSupplierName}» из Настроек.`
+    : "";
+  elements.wishlistConfirmText.textContent =
+    `Создать ${groups.length} ${groups.length === 1 ? "заказ поставщику" : "заказов поставщикам"} на ${totalPositions} позиций, сумма ${formatKopecks(totalAmount)}?${fallbackNote}`;
+  elements.wishlistConfirmModal.hidden = false;
+
+  elements.wishlistConfirmCancel.onclick = () => { elements.wishlistConfirmModal.hidden = true; };
+  elements.wishlistConfirmOk.onclick = async () => {
+    elements.wishlistConfirmModal.hidden = true;
+    await sendWishlistPurchaseOrder(groups);
+  };
+}
+
+async function sendWishlistPurchaseOrder(groups) {
+  if (wishlistState.pendingSubmit) return;
+  wishlistState.pendingSubmit = true;
+  elements.wishlistSubmit.disabled = true;
+  setWishlistStatus("Отправляю в МойСклад…", null);
+  try {
+    const res = await fetch("/api/wishlist/purchase-order", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draftId: wishlistState.draftId, groups }),
+    });
+    const data = await res.json();
+    if (res.status === 400 && data.error === "missing_supplier_or_store") {
+      setWishlistStatus(`Не задан поставщик/склад для групп: ${data.groupIndices.join(", ")}.`, "error");
+      return;
+    }
+    if (res.status === 409 && data.error === "safe_mode_enabled") {
+      setWishlistStatus("Safe mode включён — отправка PO заблокирована. Выключите safe mode и повторите.", "error");
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+    const created = data.purchaseOrders || [];
+    const failed = data.failedGroups || [];
+    const blocked = data.blockedGroupHashes || [];
+    let msg = `Создано: ${created.length}.`;
+    if (failed.length) msg += ` Не удалось: ${failed.length}.`;
+    if (blocked.length) msg += ` Блокировано safe mode: ${blocked.length}.`;
+    if (created.length > 0) {
+      msg += " " + created.map((po) => `🔗 ${po.name || po.id}`).join(", ");
+    }
+    setWishlistStatus(msg, data.status === "complete" ? "ok" : "error");
+
+    clearStoredDraft();
+    await loadWishlistActive();
+    await fetchWishlistCount();
+  } catch (error) {
+    setWishlistStatus(`Ошибка: ${error.message}`, "error");
+  } finally {
+    wishlistState.pendingSubmit = false;
+    updateSubmitButtonState();
+  }
+}
+
+async function checkWishlistOrders() {
+  const entryIds = wishlistState.groups.flatMap((g) => g.entries.map((e) => e.id));
+  if (entryIds.length === 0) return;
+  setWishlistStatus("Проверяю пересечения с заказами клиентов…", null);
+  try {
+    const res = await fetch("/api/wishlist/check-customerorders", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ entryIds }),
+    });
+    const data = await res.json();
+    // Применяем результат на каждую entry: { inOpenOrder, orderId?, orderName? }.
+    // Эти строки рендер пометит бейджем «✔ в открытом заказе» и заменит чекбокс
+    // на кнопку «Архивировать», чтобы оператор не создавал дубль PO.
+    let hits = 0;
+    for (const g of wishlistState.groups) {
+      for (const e of g.entries) {
+        const probe = data[e.id];
+        if (probe && probe.inOpenOrder) {
+          e.alreadyInOrder = probe;
+          e.selected = false; // не позволяем включить в submit
+          hits += 1;
+        } else {
+          e.alreadyInOrder = null;
+        }
+      }
+    }
+    renderWishlistActive();
+    setWishlistStatus(
+      hits === 0
+        ? "Пересечений с открытыми заказами нет."
+        : `Найдено пересечений: ${hits}. Эти строки помечены и исключены из отправки.`,
+      hits ? "ok" : null,
+    );
+  } catch (error) {
+    setWishlistStatus(`Ошибка проверки: ${error.message}`, "error");
+  }
+}
+
+async function addManualEntry() {
+  const productCode = elements.wishlistManualCode.value.trim();
+  const viewerName = elements.wishlistManualName.value.trim() || "Ручная позиция";
+  const quantity = Math.max(1, Number(elements.wishlistManualQty.value) || 1);
+  if (!productCode) {
+    setWishlistStatus("Введите артикул.", "error");
+    return;
+  }
+  try {
+    const res = await fetch("/api/wishlist/entries", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ productCode, viewerName, quantity }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    elements.wishlistManualCode.value = "";
+    elements.wishlistManualName.value = "";
+    elements.wishlistManualQty.value = "1";
+    elements.wishlistManualForm.hidden = true;
+    await loadWishlistActive();
+    setWishlistStatus("Позиция добавлена.", "ok");
+  } catch (error) {
+    setWishlistStatus(`Не удалось добавить: ${error.message}`, "error");
+  }
+}
+
+function formatKopecks(kopecks) {
+  const rubles = Number(kopecks || 0) / 100;
+  return `${rubles.toFixed(2)} ₽`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Tab buttons
+document.querySelectorAll(".wishlist-tab").forEach((btn) => {
+  btn.addEventListener("click", () => switchWishlistTab(btn.dataset.tab));
+});
+
+// Modal bindings
+elements.wishlistButton.addEventListener("click", openWishlistModal);
+elements.wishlistClose.addEventListener("click", closeWishlistModal);
+elements.wishlistCancel.addEventListener("click", closeWishlistModal);
+elements.wishlistModal.addEventListener("click", (event) => {
+  if (event.target === elements.wishlistModal) closeWishlistModal();
+});
+
+// Manual add
+elements.wishlistManualAdd.addEventListener("click", () => {
+  elements.wishlistManualForm.hidden = false;
+  elements.wishlistManualCode.focus();
+});
+elements.wishlistManualCancel.addEventListener("click", () => {
+  elements.wishlistManualForm.hidden = true;
+});
+elements.wishlistManualConfirm.addEventListener("click", addManualEntry);
+
+// Check intersections
+elements.wishlistCheckOrders.addEventListener("click", checkWishlistOrders);
+
+// Settings save
+elements.wishlistSettingsSave.addEventListener("click", saveWishlistSettings);
+
+// Archive filter
+elements.wishlistArchiveFilter.addEventListener("input", () => renderWishlistArchive());
+
+// Submit
+elements.wishlistSubmit.addEventListener("click", submitWishlist);
+
+// Initial badge fetch on page load
+void fetchWishlistCount();
+// Preload suppliers/stores (used by manual supplier picker in "Без поставщика" группе).
+void loadWishlistSettings();
