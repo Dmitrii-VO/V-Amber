@@ -107,8 +107,9 @@ export function createSessionLog() {
       });
     },
 
-    logLotOpened({ code, lotSessionId, productName, salePrice, availableStock, transcript, source } = {}) {
-      const priceStr = salePrice != null ? ` — ${salePrice} ₽` : "";
+    logLotOpened({ code, lotSessionId, productName, salePrice, voicePrice, availableStock, transcript, source } = {}) {
+      const effectivePrice = salePrice != null && salePrice > 0 ? salePrice : voicePrice;
+      const priceStr = effectivePrice != null ? ` — ${effectivePrice} ₽` : "";
       const stockStr = availableStock != null ? `, остаток: ${availableStock} шт.` : "";
       const sourceLabel = source === "voice" ? "голос" : source === "manual" ? "ручной" : (source || "—");
 
@@ -123,7 +124,7 @@ export function createSessionLog() {
         ``,
       ].join("\n"));
 
-      jsonlEvent("lot_opened", { code, lotSessionId, productName, salePrice, availableStock, source });
+      jsonlEvent("lot_opened", { code, lotSessionId, productName, salePrice, voicePrice, availableStock, source });
     },
 
     logReservation({ viewerName, viewerId, lotCode } = {}) {

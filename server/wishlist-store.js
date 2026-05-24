@@ -65,6 +65,9 @@ export function createWishlistStore({ onChange } = {}) {
           supplierId: record.supplierId || null,
           supplierName: record.supplierName || "",
           buyPrice: typeof record.buyPrice === "number" ? record.buyPrice : null,
+          salePrice: typeof record.salePrice === "number" ? record.salePrice : null,
+          discountAmount: typeof record.discountAmount === "number" ? record.discountAmount : 0,
+          effectivePrice: typeof record.effectivePrice === "number" ? record.effectivePrice : null,
           quantity: typeof record.quantity === "number" ? record.quantity : 1,
           lotCode: record.lotCode || null,
           lotSessionId: record.lotSessionId || null,
@@ -253,7 +256,7 @@ export function createWishlistStore({ onChange } = {}) {
       return [...groups.values()];
     },
 
-    async addFromOutOfStock({ event, lot, productMeta }) {
+    async addFromOutOfStock({ event, lot, productMeta, trigger = "out_of_stock" }) {
       if (!event || !lot) return null;
       const productCode = lot.code || productMeta?.productCode || "";
       const viewerId = event.viewerId;
@@ -267,6 +270,10 @@ export function createWishlistStore({ onChange } = {}) {
 
       const key = dedupKey(viewerId, productCode);
       const existing = active.get(key);
+      const rawSalePrice = lot?.product?.salePrice ?? lot?.product?.voicePrice ?? null;
+      const salePrice = typeof rawSalePrice === "number" && Number.isFinite(rawSalePrice) ? rawSalePrice : null;
+      const discountAmount = Number(lot?.discountAmount || 0);
+      const effectivePrice = salePrice == null ? null : Math.max(0, salePrice - discountAmount);
 
       if (existing) {
         const record = {
@@ -295,11 +302,14 @@ export function createWishlistStore({ onChange } = {}) {
         supplierId: meta.supplierId,
         supplierName: meta.supplierName,
         buyPrice: meta.buyPrice,
+        salePrice,
+        discountAmount,
+        effectivePrice,
         quantity: 1,
         lotCode: lot.code || null,
         lotSessionId: lot.lotSessionId || null,
         fromCommentId: event.commentId || null,
-        trigger: "out_of_stock",
+        trigger,
       };
       await write([record]);
       return byId.get(record.id) || null;

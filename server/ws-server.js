@@ -4,6 +4,7 @@ import { createSessionLog } from "./session-log.js";
 import { SpeechKitStreamingSession } from "./speechkit-stream.js";
 import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount } from "./discount-detector.js";
+import { detectPrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
@@ -191,6 +192,9 @@ export function attachWsServer(httpServer, config, services = {}) {
           lotSessionId: activeLot.lotSessionId,
           productId: activeLot.product?.id || null,
           availableStock: activeLot.product?.availableStock ?? null,
+          salePrice: activeLot.product?.salePrice ?? null,
+          voicePrice: activeLot.product?.voicePrice ?? null,
+          effectivePrice: getLotEffectivePrice(activeLot) ?? null,
         },
         eventsByStatus: byStatus,
         committedReservationCount: reservations.committedReservationCount || 0,
@@ -223,6 +227,42 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function normalizeReservationText(text) {
       return String(text || "").trim().toLowerCase();
+    }
+
+    function normalizeReservationCode(code) {
+      return String(code || "").trim();
+    }
+
+    function parseReservationComment(text) {
+      const normalized = normalizeReservationText(text);
+      const match = /^бронь[\s:.,;!?-]+(\d+)\s*[.,;!?]*$/.exec(normalized);
+      if (!match) {
+        return {
+          hasReservationKeyword: normalized === reservationKeyword || normalized.startsWith(`${reservationKeyword} `),
+          code: null,
+        };
+      }
+
+      return {
+        hasReservationKeyword: true,
+        code: match[1],
+      };
+    }
+
+    function parseWishlistComment(text) {
+      const normalized = normalizeReservationText(text);
+      const match = /^список[\s:.,;!?-]+(\d+)\s*[.,;!?]*$/.exec(normalized);
+      if (!match) {
+        return {
+          hasWishlistKeyword: normalized === "список" || normalized.startsWith("список "),
+          code: null,
+        };
+      }
+
+      return {
+        hasWishlistKeyword: true,
+        code: match[1],
+      };
     }
 
     const RESERVATION_HISTORY_LIMIT = 200;
@@ -287,9 +327,69 @@ export function attachWsServer(httpServer, config, services = {}) {
       state.events = state.events.slice(-20);
     }
 
+    function hasUsableSalePrice(product) {
+      const salePrice = product?.salePrice;
+      return typeof salePrice === "number" && Number.isFinite(salePrice) && salePrice > 0;
+    }
+
+    function getLotEffectivePrice(lot) {
+      if (hasUsableSalePrice(lot?.product)) {
+        return lot.product.salePrice;
+      }
+
+      const voicePrice = lot?.product?.voicePrice;
+      return typeof voicePrice === "number" && Number.isFinite(voicePrice) && voicePrice > 0
+        ? voicePrice
+        : lot?.product?.salePrice;
+    }
+
+    async function applyVoicePrice(priceResult, transcript = null) {
+      if (!activeLot?.product || !priceResult?.value) {
+        return false;
+      }
+
+      if (hasUsableSalePrice(activeLot.product)) {
+        logger.info("price", "voice_price_ignored", {
+          connectionId,
+          reason: "sale_price_exists",
+          salePrice: activeLot.product.salePrice,
+          voicePrice: priceResult.value,
+          code: activeLot.code,
+          lotSessionId: activeLot.lotSessionId,
+        });
+        return false;
+      }
+
+      activeLot.product.voicePrice = priceResult.value;
+      activeLot.product.priceSource = "voice";
+
+      logger.info("price", "voice_price_applied", {
+        connectionId,
+        voicePrice: priceResult.value,
+        trigger: priceResult.trigger || null,
+        code: activeLot.code,
+        lotSessionId: activeLot.lotSessionId,
+        transcript,
+      });
+
+      if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
+        await vk.publishPriceUpdate(activeLot).catch((error) => {
+          handleVkPublishError(activeLot, error);
+          logger.warn("vk", "price_update_publish_failed", {
+            connectionId,
+            lotSessionId: activeLot?.lotSessionId,
+            error,
+          });
+        });
+      }
+
+      emitState();
+      return true;
+    }
+
     function getReservationReplyMessage(event) {
       if (event.status === "out_of_stock") {
-        return "Товар закончился. Бронь не создана.";
+        return `${event.viewerName}, к сожалению, не успели забронировать. Вас добавить в список желающих с сохранением скидки? Напишите "СПИСОК ${event.lotCode || ""}" для подтверждения.`;
       }
 
       if (event.status === "product_not_found") {
@@ -301,15 +401,15 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       if (event.status === "reserved") {
-        return "Бронь подтверждена. Заказ создан.";
+        return `${event.viewerName}, бронь подтверждена.`;
       }
 
       if (event.status === "reserved_appended") {
-        return "Бронь подтверждена. Товар добавлен в ваш заказ.";
+        return `${event.viewerName}, бронь подтверждена. Товар добавлен в ваш заказ.`;
       }
 
       if (event.status === "order_failed") {
-        return "Не удалось обработать бронь. Напишите \"бронь\" ещё раз.";
+        return "Не удалось обработать бронь. Напишите \"Бронь\" и код товара ещё раз.";
       }
 
       return "";
@@ -362,6 +462,41 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
+    async function addWishlistFromComment(lot, event) {
+      if (!wishlistStore || !lot || !event?.viewerName) {
+        return;
+      }
+
+      const cacheEntry = productCodeCache?.getProductByCode?.(lot.code) || null;
+      const entry = await wishlistStore.addFromOutOfStock({
+        event,
+        lot,
+        trigger: "wishlist_confirmed",
+        productMeta: cacheEntry
+          ? {
+              productId: cacheEntry.id || lot.product?.id || null,
+              productName: cacheEntry.name || lot.product?.name || "",
+              supplierId: cacheEntry.supplierId,
+              supplierName: cacheEntry.supplierName,
+              buyPrice: cacheEntry.buyPrice,
+            }
+          : {
+              productId: lot.product?.id || null,
+              productName: lot.product?.name || "",
+            },
+      });
+
+      logger.info("wishlist", "wishlist_confirmed_from_comment", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        code: lot.code,
+        commentId: event.commentId,
+        viewerId: event.viewerId,
+        viewerName: event.viewerName,
+        entryId: entry?.id || null,
+      });
+    }
+
     function isReservationSessionCurrent(lot, reservationSessionVersion) {
       return reservationSessionVersion === customerOrderSessionVersion
         && activeLot?.lotSessionId === lot?.lotSessionId;
@@ -379,7 +514,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         // contract behind safe mode = "audit-only" runs.
         const product = lot.product || {};
         const discountAmount = Number(lot.discountAmount || 0);
-        const salePrice = Number(product.salePrice || 0);
+        const salePrice = Number(getLotEffectivePrice(lot) || 0);
         const effectivePrice = Math.max(0, salePrice - discountAmount);
         logger.warn("safe-mode", "reservation_logged_only", {
           connectionId,
@@ -451,31 +586,6 @@ export function attachWsServer(httpServer, config, services = {}) {
           viewerId: event.viewerId,
           lotCode: lot.code,
         });
-        // Финальный отказ "товара нет" — записываем зрителя в персистентный
-        // wish list ПРЯМО СЕЙЧАС, не дожидаясь закрытия лота. Без этого
-        // slice(-20) в state.events может выкинуть запись до того, как мы
-        // её сохраним. supplierId/buyPrice достаём из обогащённого кэша.
-        if (wishlistStore) {
-          const cacheEntry = productCodeCache?.getProductByCode?.(lot.code) || null;
-          void wishlistStore.addFromOutOfStock({
-            event,
-            lot,
-            productMeta: cacheEntry
-              ? {
-                  productId: cacheEntry.id || lot.product?.id || null,
-                  productName: cacheEntry.name || lot.product?.name || "",
-                  supplierId: cacheEntry.supplierId,
-                  supplierName: cacheEntry.supplierName,
-                  buyPrice: cacheEntry.buyPrice,
-                }
-              : {
-                  productId: lot.product?.id || null,
-                  productName: lot.product?.name || "",
-                },
-          }).catch((error) => {
-            logger.warn("wishlist", "add_from_out_of_stock_failed", { error });
-          });
-        }
         emitState();
         notifyReservationStatus(lot, event);
         return;
@@ -542,6 +652,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             activeLot: lot,
             productCard: {
               salePrice: lot.product?.salePrice,
+              voicePrice: lot.product?.voicePrice,
             },
             reservation: event,
           });
@@ -553,6 +664,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             activeLot: lot,
             productCard: {
               salePrice: lot.product?.salePrice,
+              voicePrice: lot.product?.voicePrice,
             },
             reservation: event,
             counterparty: resolvedCounterparty,
@@ -600,7 +712,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         event.status = existingOrder?.id ? "reserved_appended" : "reserved";
         event.customerOrder = order;
-        const orderSalePrice = Number(lot.product?.salePrice || 0);
+        const orderSalePrice = Number(getLotEffectivePrice(lot) || 0);
         const orderDiscountAmount = Number(lot.discountAmount || 0);
         logger.info("vk", "reservation_order_created", {
           connectionId,
@@ -755,27 +867,83 @@ export function attachWsServer(httpServer, config, services = {}) {
               // Forensic: каждый новый комментарий в окне лота попадает в лог,
               // даже если не «бронь». Это позволяет позже увидеть пропущенные
               // брони (опечатки, «забронируй», эмодзи) и общий шум вокруг лота.
-              const matchedReservation = normalizeReservationText(comment.text) === reservationKeyword;
+              const reservationComment = parseReservationComment(comment.text);
+              const wishlistComment = parseWishlistComment(comment.text);
+              const expectedReservationCode = normalizeReservationCode(currentLot.code);
+              const matchedReservation = Boolean(
+                reservationComment.code
+                && reservationComment.code === expectedReservationCode,
+              );
+              const matchedWishlist = Boolean(
+                wishlistComment.code
+                && wishlistComment.code === expectedReservationCode,
+              );
               const profileForLog = profileMap.get(comment.from_id);
+              const viewerNameForLog = profileForLog
+                ? [profileForLog.first_name, profileForLog.last_name].filter(Boolean).join(" ")
+                : "";
               logger.info("vk", "comment_seen", {
                 connectionId,
                 lotSessionId: currentLot.lotSessionId,
                 code: currentLot.code,
                 commentId: comment.id,
                 viewerId: comment.from_id,
-                viewerName: profileForLog
-                  ? [profileForLog.first_name, profileForLog.last_name].filter(Boolean).join(" ")
-                  : "",
+                viewerName: viewerNameForLog,
                 text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
                 createdAt: new Date(comment.date * 1000).toISOString(),
+                reservationCommentCode: reservationComment.code,
+                hasReservationKeyword: reservationComment.hasReservationKeyword,
+                wishlistCommentCode: wishlistComment.code,
+                hasWishlistKeyword: wishlistComment.hasWishlistKeyword,
                 matchedReservation,
+                matchedWishlist,
               });
 
               if (!matchedReservation) {
+                if (matchedWishlist) {
+                  if (!viewerNameForLog) {
+                    logger.warn("vk", "wishlist_profile_missing", {
+                      connectionId,
+                      lotSessionId: currentLot.lotSessionId,
+                      commentId: comment.id,
+                      viewerId: comment.from_id,
+                    });
+                    continue;
+                  }
+
+                  const wishlistEvent = {
+                    commentId: comment.id,
+                    viewerId: comment.from_id,
+                    viewerName: viewerNameForLog,
+                    text: comment.text,
+                    createdAt: new Date(comment.date * 1000).toISOString(),
+                    status: "wishlist_confirmed",
+                    lotCode: currentLot.code,
+                  };
+                  void addWishlistFromComment(currentLot, wishlistEvent).catch((error) => {
+                    logger.warn("wishlist", "add_from_comment_failed", {
+                      connectionId,
+                      lotSessionId: currentLot.lotSessionId,
+                      commentId: comment.id,
+                      viewerId: comment.from_id,
+                      error,
+                    });
+                  });
+                }
                 continue;
               }
 
               const viewerId = comment.from_id;
+              if (!viewerNameForLog) {
+                logger.warn("vk", "reservation_profile_missing", {
+                  connectionId,
+                  lotSessionId: currentLot.lotSessionId,
+                  commentId: comment.id,
+                  viewerId,
+                });
+                continue;
+              }
+
               if (reservationState.acceptedUserIds.has(viewerId)) {
                 logger.info("vk", "reservation_duplicate_ignored", {
                   connectionId,
@@ -788,16 +956,14 @@ export function attachWsServer(httpServer, config, services = {}) {
 
               addBoundedId(reservationState.acceptedUserIds, viewerId);
 
-              const profile = profileMap.get(viewerId);
               const event = {
                 commentId: comment.id,
                 viewerId,
-                viewerName: profile
-                  ? [profile.first_name, profile.last_name].filter(Boolean).join(" ")
-                  : "",
+                viewerName: viewerNameForLog,
                 text: comment.text,
                 createdAt: new Date(comment.date * 1000).toISOString(),
                 status: "pending_reservation",
+                lotCode: currentLot.code,
               };
 
               addReservationEvent(currentLot, event);
@@ -812,9 +978,9 @@ export function attachWsServer(httpServer, config, services = {}) {
               // Полный снимок данных, необходимых для воспроизведения заказа
               // в МойСкладе из одной этой строки лога: продукт, цена в момент
               // эфира, действующая скидка, оригинальный текст комментария.
-              // Цена salePrice фиксируется здесь специально — её последующее
+              // Цена эфира фиксируется здесь специально — её последующее
               // изменение в каталоге не должно искажать replay.
-              const reservationSalePrice = Number(currentLot.product?.salePrice || 0);
+              const reservationSalePrice = Number(getLotEffectivePrice(currentLot) || 0);
               const reservationDiscountAmount = Number(currentLot.discountAmount || 0);
               logger.info("vk", "reservation_detected", {
                 connectionId,
@@ -903,17 +1069,16 @@ export function attachWsServer(httpServer, config, services = {}) {
       })();
     }
 
-    // Async: возвращаем Promise, чтобы caller мог await миграцию ДО clearActiveState
-    // и потенциального завершения процесса. Раньше void-fire-and-forget мог
-    // потерять запись в wishlist при stop/socket close сразу следом за лотом.
+    // Async: caller ждёт фиксацию «брошенных» броней в логе ДО clearActiveState
+    // и потенциального завершения процесса.
     async function flushOrphanWaitlist(lot, reason) {
       if (!lot?.reservations?.events) {
         return;
       }
-      // Кандидаты в wish list при закрытии лота: ждавшие исхода брони
+      // Кандидаты на ручной разбор при закрытии лота: ждавшие исхода брони
       // (waitlist_pending/pending_reservation), либо для которых попытка
       // создания заказа упала (order_failed — зритель товар не получил,
-      // спрос есть, мигрируем с пометкой "incident").
+      // спрос есть, но wishlist теперь требует комментарий «СПИСОК код»).
       //
       // НЕ мигрируем reserved/reserved_appended (получили), safe_mode_logged
       // (записан для replay).
@@ -947,41 +1112,13 @@ export function attachWsServer(httpServer, config, services = {}) {
         entries: candidates,
       });
 
-      // Миграция в персистентный wish list. await — чтобы запись точно
-      // успела до clearActiveState() и сброса state.events.
-      if (wishlistStore) {
-        try {
-          await wishlistStore.addFromWaitlistOnClose({
-            events: candidates,
-            lot,
-            reason,
-            productMetaResolver: (code) => {
-              const cacheEntry = productCodeCache?.getProductByCode?.(code) || null;
-              if (cacheEntry) {
-                return {
-                  productId: cacheEntry.id || lot.product?.id || null,
-                  productName: cacheEntry.name || lot.product?.name || "",
-                  supplierId: cacheEntry.supplierId,
-                  supplierName: cacheEntry.supplierName,
-                  buyPrice: cacheEntry.buyPrice,
-                };
-              }
-              return {
-                productId: lot.product?.id || null,
-                productName: lot.product?.name || "",
-              };
-            },
-          });
-          sessionLog.logWaitlistMigratedToWishlist({
-            lotCode: lot.code,
-            lotSessionId: lot.lotSessionId,
-            reason,
-            count: candidates.length,
-          });
-        } catch (error) {
-          logger.warn("wishlist", "migrate_from_waitlist_failed", { error });
-        }
-      }
+      logger.info("wishlist", "auto_migrate_skipped_confirmation_required", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        code: lot.code,
+        reason,
+        count: candidates.length,
+      });
     }
 
     async function publishLotClosed(lot, reason) {
@@ -989,9 +1126,8 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
-      // Сначала зафиксировать «брошенные» брони в логе/wishlist, ПОТОМ закрывать
-      // VK-публикацию. Await важен: иначе на stop/socket_close миграция в wishlist
-      // может не успеть до сброса state.
+      // Сначала зафиксировать «брошенные» брони в логе, ПОТОМ закрывать
+      // VK-публикацию.
       await flushOrphanWaitlist(lot, reason);
 
       if (isLotPoisoned(lot.lotSessionId)) {
@@ -1021,7 +1157,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
-      const salePrice = activeLot.product.salePrice;
+      const salePrice = getLotEffectivePrice(activeLot);
       if (typeof salePrice !== "number" || !Number.isFinite(salePrice) || salePrice <= 0) {
         logger.warn("discount", "invalid_discount", {
           connectionId,
@@ -1156,6 +1292,8 @@ export function attachWsServer(httpServer, config, services = {}) {
           code: productCard.code,
           pathName: productCard.pathName,
           salePrice: productCard.salePrice,
+          voicePrice: productCard.voicePrice ?? null,
+          priceSource: productCard.priceSource || (productCard.voicePrice ? "voice" : "moysklad"),
           availableStock: productCard.availableStock,
           hasPhoto: Boolean(productCard.photo),
         } : null,
@@ -1214,6 +1352,8 @@ export function attachWsServer(httpServer, config, services = {}) {
         productName: nextLot.product?.name || null,
         pathName: nextLot.product?.pathName || null,
         salePrice: nextLot.product?.salePrice ?? null,
+        voicePrice: nextLot.product?.voicePrice ?? null,
+        effectivePrice: getLotEffectivePrice(nextLot) ?? null,
         availableStock: nextLot.product?.availableStock ?? null,
         discountAmount: Number(nextLot.discountAmount || 0),
         allCandidates,
@@ -1226,7 +1366,12 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     async function handleConfirmedDetection(detection, selectedCode, source, options = {}) {
-      const { runId = null, enforceActiveRun = false, expectedDetectionId = null } = options;
+      const {
+        runId = null,
+        enforceActiveRun = false,
+        expectedDetectionId = null,
+        voicePrice = null,
+      } = options;
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
         return;
@@ -1243,6 +1388,11 @@ export function attachWsServer(httpServer, config, services = {}) {
           transcript: detection.transcript,
           error,
         });
+      }
+
+      if (productCard && !hasUsableSalePrice(productCard) && voicePrice?.value) {
+        productCard.voicePrice = voicePrice.value;
+        productCard.priceSource = "voice";
       }
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
@@ -1313,6 +1463,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotSessionId: confirmedLot.lotSessionId,
         productName: productCard?.name || null,
         salePrice: productCard?.salePrice ?? null,
+        voicePrice: productCard?.voicePrice ?? null,
         availableStock: productCard?.availableStock ?? null,
         transcript: confirmedLot.transcript,
         source: confirmedLot.source,
@@ -1391,6 +1542,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               sessionLog.logTranscriptFinal({ text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
               rememberFinal(text);
+              const priceResult = detectPrice(text);
 
               const discountResult = detectDiscount(text, config.discount.triggers);
               if (discountResult) {
@@ -1490,8 +1642,11 @@ export function attachWsServer(httpServer, config, services = {}) {
                       runId,
                       enforceActiveRun: true,
                       expectedDetectionId: detectionWithId.detectionId,
+                      voicePrice: priceResult,
                     },
                   );
+                } else if (priceResult) {
+                  await applyVoicePrice(priceResult, text);
                 } else if (detectionWithId.status === "ambiguous") {
                   logger.warn("article", "article_ambiguous", {
                     connectionId,

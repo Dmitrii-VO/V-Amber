@@ -182,6 +182,7 @@ a { color: inherit; }
 }
 .brand-name { font-weight: 600; font-size: var(--fs-md); letter-spacing: -0.01em; }
 .brand-sub { color: var(--text-dim); font-size: var(--fs-xs); font-family: var(--font-mono); }
+.brand-version { color: var(--amber); }
 
 .topbar-controls { display: flex; align-items: center; gap: var(--gap-3); flex: 1; min-width: 0; }
 .topbar-controls .mic-select { flex: 1; max-width: 280px; }

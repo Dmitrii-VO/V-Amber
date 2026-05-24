@@ -37,6 +37,18 @@ function toMinorUnits(value) {
   return typeof value === "number" ? Math.round(value * 100) : 0;
 }
 
+function getEffectiveSalePrice(activeLot, productCard) {
+  const salePrice = productCard?.salePrice ?? activeLot?.product?.salePrice;
+  if (typeof salePrice === "number" && Number.isFinite(salePrice) && salePrice > 0) {
+    return salePrice;
+  }
+
+  const voicePrice = productCard?.voicePrice ?? activeLot?.product?.voicePrice;
+  return typeof voicePrice === "number" && Number.isFinite(voicePrice) && voicePrice > 0
+    ? voicePrice
+    : salePrice;
+}
+
 function extractEntityIdFromHref(href, entity) {
   const escaped = String(entity || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`/entity/${escaped}/([0-9a-f-]+)`, "i").exec(String(href || ""));
@@ -979,7 +991,7 @@ export function createMoySkladClient(config, options = {}) {
         positions: [
           {
             quantity: 1,
-            price: toMinorUnits((productCard?.salePrice ?? activeLot.product.salePrice) - (activeLot.discountAmount || 0)),
+            price: toMinorUnits(getEffectiveSalePrice(activeLot, productCard) - (activeLot.discountAmount || 0)),
             reserve: 1,
             assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
           },
@@ -1010,7 +1022,7 @@ export function createMoySkladClient(config, options = {}) {
       const payload = [
         {
           quantity: 1,
-          price: toMinorUnits((productCard?.salePrice ?? activeLot.product.salePrice) - (activeLot.discountAmount || 0)),
+          price: toMinorUnits(getEffectiveSalePrice(activeLot, productCard) - (activeLot.discountAmount || 0)),
           reserve: 1,
           assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
         },

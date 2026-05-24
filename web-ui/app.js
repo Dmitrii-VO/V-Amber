@@ -12,6 +12,7 @@ const elements = {
   sessionPill: $("sessionPill"),
   sessionDot: $("sessionDot"),
   sessionLabel: $("sessionLabel"),
+  projectVersion: $("projectVersion"),
 
   socketDot: $("socketDot"),
   socketState: $("socketState"),
@@ -223,6 +224,19 @@ function setSessionPill(kind, label) {
   }
 }
 
+async function fetchProjectVersion() {
+  try {
+    const response = await fetch("/health");
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data.version && elements.projectVersion) {
+      elements.projectVersion.textContent = `v${data.version}`;
+    }
+  } catch {
+    // Version label is informational; keep the header quiet if /health is unavailable.
+  }
+}
+
 function setSocketState(value) {
   elements.socketState.textContent = value;
   elements.socketDot.className = "dot";
@@ -333,7 +347,8 @@ function renderActiveLot(lot) {
   elements.lotArticle.textContent = `· ${code}`;
   elements.lotName.textContent = product.name || "—";
   elements.lotArticleValue.textContent = product.code || code;
-  elements.lotPrice.textContent = product.salePrice != null ? formatPrice(product.salePrice) : "—";
+  const lotPrice = product.salePrice > 0 ? product.salePrice : product.voicePrice;
+  elements.lotPrice.textContent = lotPrice != null ? formatPrice(lotPrice) : "—";
 
   const stock = product.availableStock;
   elements.lotStock.textContent = stock != null ? String(stock) : "—";
@@ -2028,6 +2043,7 @@ elements.wishlistArchiveFilter.addEventListener("input", () => renderWishlistArc
 elements.wishlistSubmit.addEventListener("click", submitWishlist);
 
 // Initial badge fetch on page load
+void fetchProjectVersion();
 void fetchWishlistCount();
 // Preload suppliers/stores (used by manual supplier picker in "Без поставщика" группе).
 void loadWishlistSettings();

@@ -61,7 +61,7 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
       ``,
       `**Что делать:** проверить вручную в МойСкладе, что для этих зрителей созданы заказы. Если нет — создать; если есть, но без позиции на лот ${lot.code || "—"}, добавить позицию. Ответьте им в VK.`,
       ``,
-      `_Эти зрители также добавлены в Wish list для последующего предзаказа поставщику._`,
+      `_Эти зрители не добавлены в Wish list автоматически: теперь нужно подтверждение комментарием «СПИСОК код товара»._`,
       ``,
     ].join("\n");
 
@@ -89,23 +89,11 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
       logger.error("recovery", "orphan_writeout_failed", { error });
     }
 
-    // Миграция orphans в wish list — оператор увидит «накопленный спрос»
-    // даже от упавшей сессии, и сможет одним кликом создать предзаказ.
-    if (wishlistStore) {
-      try {
-        await wishlistStore.addFromWaitlistOnClose({
-          events: orphans,
-          lot,
-          reason: "crash_recovery",
-          productMetaResolver: () => ({
-            productId: lot?.product?.id || null,
-            productName: lot?.product?.name || "",
-          }),
-        });
-      } catch (error) {
-        logger.error("recovery", "wishlist_migrate_failed", { error });
-      }
-    }
+    logger.info("recovery", "wishlist_auto_migrate_skipped_confirmation_required", {
+      lotSessionId: lot.lotSessionId || null,
+      code: lot.code || null,
+      orphanCount: orphans.length,
+    });
   }
 
   // В любом случае стираем state-файл — это «обработанный» инцидент.
@@ -198,7 +186,7 @@ async function main() {
   const rawVk = createVkPublisher(config.vk);
   const vk = wrapWithSafeMode(
     rawVk,
-    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishReservationReply", "sendDirectMessage"],
+    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishPriceUpdate", "publishReservationReply", "sendDirectMessage"],
     "vk",
   );
 

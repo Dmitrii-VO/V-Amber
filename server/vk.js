@@ -53,6 +53,18 @@ function formatStock(value, fallback = "-") {
   return typeof value === "number" ? String(value) : fallback;
 }
 
+function getLotPrice(activeLot) {
+  const salePrice = activeLot?.product?.salePrice;
+  if (typeof salePrice === "number" && Number.isFinite(salePrice) && salePrice > 0) {
+    return salePrice;
+  }
+
+  const voicePrice = activeLot?.product?.voicePrice;
+  return typeof voicePrice === "number" && Number.isFinite(voicePrice) && voicePrice > 0
+    ? voicePrice
+    : salePrice;
+}
+
 function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
   const product = activeLot?.product;
   const discountAmount = activeLot?.discountAmount || 0;
@@ -65,11 +77,12 @@ function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
   lines.push(`Код товара: ${activeLot.code}`);
 
   if (product) {
+    const price = getLotPrice(activeLot);
     if (discountAmount > 0) {
-      const effectivePrice = product.salePrice - discountAmount;
+      const effectivePrice = price - discountAmount;
       lines.push(`Цена: ${formatPrice(effectivePrice)} (скидка −${formatPrice(discountAmount)})`);
     } else {
-      lines.push(`Цена: ${formatPrice(product.salePrice)}`);
+      lines.push(`Цена: ${formatPrice(price)}`);
     }
     lines.push(`Доступный остаток: ${formatStock(product.availableStock)} шт`);
 
@@ -455,7 +468,7 @@ export function createVkPublisher(config) {
       }
 
       const discountAmount = activeLot.discountAmount || 0;
-      const effectivePrice = (activeLot.product?.salePrice || 0) - discountAmount;
+      const effectivePrice = (getLotPrice(activeLot) || 0) - discountAmount;
       const message = [
         `Обновлённая цена: ${formatPrice(effectivePrice)}`,
         `Скидка: −${formatPrice(discountAmount)}`,
@@ -471,6 +484,41 @@ export function createVkPublisher(config) {
         }),
         {
           kind: "discount_update",
+          code: activeLot.code,
+          lotSessionId: activeLot.lotSessionId,
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+        },
+      );
+    },
+
+    async publishPriceUpdate(activeLot) {
+      if (!isEnabled || !activeLot?.lotSessionId) {
+        logger.info("vk", "publish_skipped_not_configured", {
+          kind: "price_update",
+          lotSessionId: activeLot?.lotSessionId || null,
+          hasUserToken: Boolean(userToken),
+          ownerId: liveOwnerId || null,
+          videoId: liveVideoId || null,
+        });
+        return { ok: false, skipped: true };
+      }
+
+      const price = getLotPrice(activeLot);
+      const message = [
+        `Цена: ${formatPrice(price)}`,
+        `Код товара: ${activeLot.code}`,
+        `lotSessionId: ${activeLot.lotSessionId}`,
+      ].join("\n");
+
+      return sendWithRetry(
+        () => callVkApi("video.createComment", {
+          owner_id: liveOwnerId,
+          video_id: liveVideoId,
+          message,
+        }),
+        {
+          kind: "price_update",
           code: activeLot.code,
           lotSessionId: activeLot.lotSessionId,
           ownerId: liveOwnerId,
