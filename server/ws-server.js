@@ -1010,7 +1010,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
-    async function applyDiscount(input) {
+    async function applyDiscount(input, transcript = null) {
       // Раньше здесь требовался vkPublication.commentId — это блокировало
       // применение скидки в safe mode и при любых сбоях публикации в VK
       // (например, видео недоступно). Скидку считаем по внутреннему лоту
@@ -1071,7 +1071,15 @@ export function attachWsServer(httpServer, config, services = {}) {
         code: activeLot.code,
         lotSessionId: activeLot.lotSessionId,
       });
-      sessionLog.logDiscount({ amount, originalPrice, newPrice, code: activeLot.code });
+      sessionLog.logDiscount({
+        amount,
+        originalPrice,
+        newPrice,
+        code: activeLot.code,
+        lotSessionId: activeLot.lotSessionId,
+        descriptor,
+        transcript,
+      });
 
       // Публикация апдейта в VK имеет смысл только если карточка лота уже
       // ушла туда и лот не «битый». Иначе пропускаем без шума — скидка во
@@ -1389,7 +1397,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 // detectDiscount now returns { kind, value }. Pass the full
                 // descriptor so percent discounts are scaled by current
                 // salePrice — fixes the "скидка 30 процентов → 30₽" bug.
-                void applyDiscount(discountResult).catch((error) => {
+                void applyDiscount(discountResult, text).catch((error) => {
                   logger.error("discount", "apply_failed", { connectionId, text, error });
                 });
               } else {
@@ -1405,6 +1413,12 @@ export function attachWsServer(httpServer, config, services = {}) {
                 if (matchedDiscountTrigger) {
                   logger.warn("discount", "discount_skipped", {
                     connectionId,
+                    text,
+                    reason: "trigger_matched_but_no_amount_extracted",
+                    lotSessionId: activeLot?.lotSessionId || null,
+                    code: activeLot?.code || null,
+                  });
+                  sessionLog.logDiscountSkipped({
                     text,
                     reason: "trigger_matched_but_no_amount_extracted",
                     lotSessionId: activeLot?.lotSessionId || null,

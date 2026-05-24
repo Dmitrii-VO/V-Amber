@@ -7,3 +7,6 @@ PLAN.md
 AGENTS.md
 CLAUDE.md
 V-Amber.zip
+.claude/settings.local.json
+/.claude
+.claude/settings.local.json

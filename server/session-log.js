@@ -186,9 +186,13 @@ export function createSessionLog() {
       jsonlEvent("customer_order_created", { viewerName, viewerId, orderId, lotCode, appended });
     },
 
-    logDiscount({ amount, originalPrice, newPrice, code } = {}) {
+    logDiscount({ amount, originalPrice, newPrice, code, lotSessionId, descriptor, transcript } = {}) {
       append(`- ${nowTime()} **Скидка** −${amount} ₽ на лот ${code}: ${originalPrice} ₽ → ${newPrice} ₽`);
-      jsonlEvent("discount_applied", { amount, originalPrice, newPrice, code });
+      jsonlEvent("discount_applied", { amount, originalPrice, newPrice, code, lotSessionId, descriptor, transcript });
+    },
+
+    logDiscountSkipped({ text, reason, code, lotSessionId } = {}) {
+      jsonlEvent("discount_skipped", { text, reason, code, lotSessionId });
     },
 
     logError({ component, message } = {}) {

@@ -127,6 +127,7 @@ function isVkFatalError(error) {
 
 export function createVkPublisher(config) {
   const userToken = config?.userToken || "";
+  const groupToken = config?.groupToken || "";
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
@@ -185,7 +186,7 @@ export function createVkPublisher(config) {
     return run;
   }
 
-  async function callVkApi(method, params) {
+  async function callVkApi(method, params, token = userToken) {
     const url = new URL(`https://api.vk.com/method/${method}`);
 
     for (const [key, value] of Object.entries(params || {})) {
@@ -194,7 +195,7 @@ export function createVkPublisher(config) {
       }
     }
 
-    url.searchParams.set("access_token", userToken);
+    url.searchParams.set("access_token", token);
     url.searchParams.set("v", apiVersion);
 
     return enqueueVkApiCall(method, async () => {
@@ -305,6 +306,7 @@ export function createVkPublisher(config) {
 
   return {
     isEnabled,
+    dmEnabled: Boolean(groupToken),
     buildLotCardMessage(activeLot) {
       return buildLotCardMessage(activeLot, placeholderImageUrl);
     },
@@ -477,6 +479,47 @@ export function createVkPublisher(config) {
       );
     },
 
+    async checkDmAllowed(userId) {
+      if (!groupToken) {
+        logger.info("vk", "dm_check_skipped_not_configured", {
+          userId: userId || null,
+          hasGroupToken: Boolean(groupToken),
+        });
+        return { allowed: false, skipped: true, reason: "no_group_token" };
+      }
+
+      const groupId = String(config?.groupId || "").replace(/^-/, "");
+      const response = await callVkApi("messages.isMessagesFromGroupAllowed", {
+        group_id: groupId || undefined,
+        user_id: userId,
+      }, groupToken);
+
+      return { allowed: Boolean(response?.is_allowed), raw: response };
+    },
+
+    async sendDirectMessage({ userId, message, randomId }) {
+      if (!groupToken || !userId || !message) {
+        logger.info("vk", "dm_skipped_not_configured", {
+          userId: userId || null,
+          hasGroupToken: Boolean(groupToken),
+          hasMessage: Boolean(message),
+        });
+        return { ok: false, skipped: true };
+      }
+
+      return sendWithRetry(
+        () => callVkApi("messages.send", {
+          user_id: userId,
+          message,
+          random_id: randomId || Date.now(),
+        }, groupToken),
+        {
+          kind: "reservation_digest_dm",
+          userId,
+        },
+      );
+    },
+
     setLiveVideoUrl(url) {
       const parsed = parseLiveVideoReference(url || "");
       liveOwnerId = normalizeVkOwnerId(parsed.ownerId);
@@ -568,6 +611,7 @@ export function resolveVkConfig(env) {
 
   return {
     userToken: env.VK_USER_TOKEN?.trim() || "",
+    groupToken: env.VK_GROUP_TOKEN?.trim() || "",
     accessToken: env.VK_ACCESS_TOKEN?.trim() || "",
     groupId: env.VK_GROUP_ID?.trim() || "",
     apiVersion: env.VK_API_VERSION?.trim() || "5.199",

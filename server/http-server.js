@@ -7,9 +7,11 @@ import { randomUUID, createHash } from "node:crypto";
 import { logger } from "./logger.js";
 import { isSafeMode, setSafeMode } from "./safe-mode.js";
 import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
+import { createReservationDigestLog } from "./reservation-digest-log.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 const WISHLIST_MAX_BODY = 256 * 1024;
+const DIGEST_MAX_BODY = 64 * 1024;
 const SUPPLIERS_CACHE_TTL_MS = 5 * 60 * 1000;
 const CHECK_ORDERS_CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -86,6 +88,74 @@ function computeGroupHash(group) {
   return "sha256:" + createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
+function computeDigestHash(client) {
+  const canonical = {
+    orderIds: [...(client.orderIds || [])].sort(),
+    positions: (client.positions || [])
+      .map((p) => ({
+        productId: p.productId || null,
+        productCode: p.productCode || "",
+        productName: p.productName || "",
+        quantity: Number(p.quantity) || 0,
+        price: Number(p.price) || 0,
+        sum: Number(p.sum) || 0,
+      }))
+      .sort((a, b) => `${a.productId || ""}:${a.productCode}`.localeCompare(`${b.productId || ""}:${b.productCode}`)),
+    total: Number(client.total) || 0,
+  };
+  return "sha256:" + createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function formatDigestDate(date) {
+  const [, , month, day] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "") || [];
+  return day && month ? `${day}.${month}` : date;
+}
+
+function formatRub(value) {
+  return `${new Intl.NumberFormat("ru-RU").format(Math.round(Number(value) || 0))} ₽`;
+}
+
+function buildReservationDigestMessage(date, client, updated = false) {
+  const dateLabel = formatDigestDate(date);
+  const lines = [
+    updated
+      ? `Обновленная сводка броней за эфир ${dateLabel}:`
+      : `Ваши брони за эфир ${dateLabel}:`,
+    "",
+  ];
+  (client.positions || []).forEach((position, index) => {
+    const code = position.productCode || "без артикула";
+    const name = position.productName || "Товар";
+    const qty = Number(position.quantity) || 0;
+    lines.push(`${index + 1}. ${code} — ${name}, ${qty} шт, ${formatRub(position.sum)}`);
+  });
+  lines.push("", `Итого: ${formatRub(client.total)}`, "Если нужно что-то изменить, напишите сюда.");
+  return lines.join("\n");
+}
+
+async function enrichDigestWithSendState(digest, sendLog) {
+  const clients = [];
+  for (const client of digest.clients || []) {
+    const digestHash = computeDigestHash(client);
+    const sendKey = client.viewerId ? `${digest.date}:${client.viewerId}:${digestHash}` : null;
+    const alreadySent = sendKey ? await sendLog.has(sendKey) : false;
+    const hasPriorSend = client.viewerId ? await sendLog.hasAnyFor(digest.date, client.viewerId) : false;
+    clients.push({
+      ...client,
+      digestHash,
+      sendKey,
+      alreadySent,
+      hasPriorSend,
+      canSend: Boolean(client.canSend && !alreadySent),
+      cannotSendReason: alreadySent ? "already_sent" : client.cannotSendReason,
+      message: client.viewerId
+        ? buildReservationDigestMessage(digest.date, client, hasPriorSend && !alreadySent)
+        : "",
+    });
+  }
+  return { ...digest, clients };
+}
+
 function serializeWishlistEntry(entry) {
   if (!entry) return null;
   return {
@@ -119,6 +189,7 @@ export function createStaticServer({
     if (diagnosticRouter?.emitGeneric) diagnosticRouter.emitGeneric(kind, payload);
   }
   let logsInFlight = false;
+  const reservationDigestLog = createReservationDigestLog();
 
   // Кэш списков из МС, чтобы операторские открытия модалки не били в МС каждый раз.
   let suppliersCache = null;
@@ -231,6 +302,205 @@ export function createStaticServer({
       return;
     }
 
+    // -------------------- Reservation digests --------------------
+
+    if (pathname === "/api/reservation-digests/preview") {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      const date = urlObject.searchParams.get("date") || new Date().toISOString().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        jsonResponse(response, 400, { error: "invalid_date" });
+        return;
+      }
+
+      try {
+        const digest = moysklad?.getReservationDigestForDate
+          ? await moysklad.getReservationDigestForDate(date, { source: "http" })
+          : { date, count: 0, clients: [] };
+        const enriched = await enrichDigestWithSendState(digest, reservationDigestLog);
+        jsonResponse(response, 200, enriched);
+      } catch (error) {
+        logger.error("http", "reservation_digest_preview_failed", { date, error: error?.message || String(error) });
+        jsonResponse(response, 500, { error: "preview_failed", message: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/reservation-digests/send") {
+      if (request.method !== "POST") return methodNotAllowed(response, "POST");
+      let body;
+      try { body = await readJsonBody(request, DIGEST_MAX_BODY); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const date = String(body.date || new Date().toISOString().slice(0, 10));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        jsonResponse(response, 400, { error: "invalid_date" });
+        return;
+      }
+
+      const selectedViewerIds = Array.isArray(body.viewerIds)
+        ? new Set(body.viewerIds.map((id) => String(id)).filter(Boolean))
+        : null;
+
+      try {
+        const digest = await moysklad.getReservationDigestForDate(date, { source: "http" });
+        const enriched = await enrichDigestWithSendState(digest, reservationDigestLog);
+        const results = [];
+
+        for (const client of enriched.clients || []) {
+          if (selectedViewerIds && !selectedViewerIds.has(String(client.viewerId || ""))) {
+            continue;
+          }
+
+          if (!client.viewerId) {
+            results.push({
+              viewerId: null,
+              viewerName: client.viewerName,
+              status: "missing_vk_id",
+              orderIds: client.orderIds || [],
+            });
+            continue;
+          }
+
+          if (client.alreadySent) {
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: "already_sent",
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+            continue;
+          }
+
+          if (!client.canSend) {
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: client.cannotSendReason || "failed",
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+            continue;
+          }
+
+          if (isSafeMode()) {
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: "safe_mode_blocked",
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+            continue;
+          }
+
+          let dmAllowed;
+          try {
+            dmAllowed = await vk.checkDmAllowed(client.viewerId);
+          } catch (error) {
+            logger.warn("http", "reservation_digest_dm_check_failed", {
+              viewerId: client.viewerId,
+              error: error?.message || String(error),
+            });
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: "failed",
+              error: error?.message || String(error),
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+            continue;
+          }
+
+          if (!dmAllowed?.allowed) {
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: "dm_not_allowed",
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+            continue;
+          }
+
+          try {
+            const sent = await vk.sendDirectMessage({
+              userId: client.viewerId,
+              message: client.message,
+              randomId: Math.floor(Math.random() * 2147483647),
+            });
+
+            if (sent?.safeMode) {
+              results.push({
+                viewerId: client.viewerId,
+                viewerName: client.viewerName,
+                status: "safe_mode_blocked",
+                orderIds: client.orderIds || [],
+                digestHash: client.digestHash,
+              });
+              continue;
+            }
+            if (sent?.skipped) {
+              results.push({
+                viewerId: client.viewerId,
+                viewerName: client.viewerName,
+                status: "failed",
+                error: "vk_group_token_missing",
+                orderIds: client.orderIds || [],
+                digestHash: client.digestHash,
+              });
+              continue;
+            }
+
+            await reservationDigestLog.record({
+              key: client.sendKey,
+              date,
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              digestHash: client.digestHash,
+              orderIds: client.orderIds || [],
+              orderNames: client.orderNames || [],
+              total: client.total,
+              messageId: sent ?? null,
+            });
+
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: "sent",
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+          } catch (error) {
+            logger.error("http", "reservation_digest_send_failed", {
+              viewerId: client.viewerId,
+              error: error?.message || String(error),
+            });
+            results.push({
+              viewerId: client.viewerId,
+              viewerName: client.viewerName,
+              status: "failed",
+              error: error?.message || String(error),
+              orderIds: client.orderIds || [],
+              digestHash: client.digestHash,
+            });
+          }
+        }
+
+        jsonResponse(response, 200, {
+          ok: true,
+          date,
+          results,
+          sentCount: results.filter((item) => item.status === "sent").length,
+        });
+      } catch (error) {
+        logger.error("http", "reservation_digest_send_request_failed", { date, error: error?.message || String(error) });
+        jsonResponse(response, 500, { error: "send_failed", message: error?.message || String(error) });
+      }
+      return;
+    }
+
     // -------------------- Wish list --------------------
 
     if (pathname === "/api/wishlist/count") {
@@ -328,63 +598,25 @@ export function createStaticServer({
         entriesWithKeys.push({ id, viewerId: entry.viewerId, viewerName: entry.viewerName, productId: entry.productId });
       }
 
-      // Группируем по viewerId — для одного зрителя resolve counterparty один раз.
-      const byViewer = new Map();
-      for (const e of entriesWithKeys) {
-        if (!byViewer.has(e.viewerId)) {
-          byViewer.set(e.viewerId, { viewerName: e.viewerName, entries: [] });
-        }
-        byViewer.get(e.viewerId).entries.push(e);
-      }
-
       const result = {};
       for (const id of entryIds) result[id] = { inOpenOrder: false };
-
-      for (const [viewerId, group] of byViewer) {
-        let counterpartyId = null;
-        try {
-          // ВАЖНО: createIfMissing:false — это read-only check, не должна
-          // создавать нового контрагента в МС только потому что оператор нажал
-          // «🔍 Проверить пересечения». Если контрагента нет — ничего не было
-          // и в открытых заказах, возвращаем inOpenOrder:false для всех entries.
-          const cp = await moysklad.ensureCounterparty({
-            viewerId,
-            viewerName: group.viewerName,
-            createIfMissing: false,
-          });
-          counterpartyId = cp?.id || null;
-        } catch (error) {
-          logger.warn("wishlist", "check_counterparty_resolve_failed", {
-            viewerId, error: error?.message || String(error),
-          });
-          // По контракту: ошибка lookup должна быть видна оператору per-entry,
-          // а не молча оставлять { inOpenOrder:false }. Иначе ZIP покажет
-          // «пересечений нет», хотя проверка просто не выполнилась.
-          for (const e of group.entries) {
-            result[e.id] = { inOpenOrder: false, error: "lookup_failed" };
-          }
-          continue;
-        }
-        if (!counterpartyId) continue; // нет контрагента в МС → точно нет открытых заказов
-
-        for (const e of group.entries) {
-          const cacheKey = `${counterpartyId}:${e.productId}`;
-          const cached = getCachedCheck(cacheKey);
-          if (cached) {
-            result[e.id] = cached;
-            continue;
-          }
-          try {
-            const probe = await moysklad.hasPositionForProduct(counterpartyId, e.productId, { source: "http" });
-            setCachedCheck(cacheKey, probe);
-            result[e.id] = probe;
-          } catch (error) {
-            logger.warn("wishlist", "check_position_failed", {
-              counterpartyId, productId: e.productId, error: error?.message || String(error),
-            });
-            // Не кэшируем ошибку — позволяем retry следующим запросом.
-            result[e.id] = { inOpenOrder: false, error: "lookup_failed" };
-          }
+      try {
+        const probes = await moysklad.checkOpenOrderPositionsForEntries(
+          entriesWithKeys.map((entry) => ({
+            entryId: entry.id,
+            viewerId: entry.viewerId,
+            viewerName: entry.viewerName,
+            productId: entry.productId,
+          })),
+          { source: "http" },
+        );
+        Object.assign(result, probes);
+      } catch (error) {
+        logger.warn("wishlist", "bulk_check_positions_failed", {
+          error: error?.message || String(error),
+        });
+        for (const entry of entriesWithKeys) {
+          result[entry.id] = { inOpenOrder: false, error: "lookup_failed" };
         }
       }
 

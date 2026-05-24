@@ -559,6 +559,61 @@ a { color: inherit; }
 }
 .wishlist-actions > div { display: flex; gap: var(--gap-3); }
 
+/* ===== Reservation digest ===== */
+.digest-body { max-height: 65vh; overflow: auto; }
+.digest-toolbar {
+  display: flex; align-items: flex-end; gap: var(--gap-3); flex-wrap: wrap;
+}
+.digest-date-field {
+  display: flex; flex-direction: column; gap: var(--gap-2);
+  color: var(--text-muted); font-size: var(--fs-sm);
+}
+.digest-list { display: flex; flex-direction: column; gap: var(--gap-3); }
+.digest-client {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); overflow: hidden;
+}
+.digest-client--muted { opacity: 0.78; }
+.digest-client-head {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: var(--gap-3); padding: var(--gap-3) var(--gap-4);
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.digest-check {
+  display: flex; align-items: center; gap: var(--gap-2);
+  font-weight: 600; min-width: 0;
+}
+.digest-check span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.digest-meta {
+  display: flex; gap: var(--gap-4); flex-wrap: wrap;
+  padding: var(--gap-2) var(--gap-4);
+  color: var(--text-dim); font-size: var(--fs-xs);
+  border-bottom: 1px solid var(--border);
+}
+.digest-meta a { color: var(--blue); text-decoration: none; }
+.digest-meta a:hover { text-decoration: underline; }
+.digest-positions {
+  margin: 0; padding: 0; list-style: none;
+}
+.digest-positions li {
+  display: grid; grid-template-columns: 90px 1fr 70px 90px;
+  gap: var(--gap-3); padding: var(--gap-2) var(--gap-4);
+  border-bottom: 1px solid var(--border); font-size: var(--fs-sm);
+  align-items: center;
+}
+.digest-positions li:last-child { border-bottom: 0; }
+.digest-error {
+  padding: var(--gap-2) var(--gap-4); color: var(--red);
+  font-size: var(--fs-xs); font-family: var(--font-mono);
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 700px) {
+  .digest-positions li { grid-template-columns: 70px 1fr; }
+}
+
 /* ===== VK URL status badge ===== */
 .vk-url-status {
   font-size: var(--fs-xs); padding: 4px 8px; border-radius: 4px;

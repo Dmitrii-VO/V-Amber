@@ -52,6 +52,16 @@ const elements = {
 
   safeModeToggle: $("safeModeToggle"),
   safeModeBadge: $("safeModeBadge"),
+  digestButton: $("digestButton"),
+  digestModal: $("digestModal"),
+  digestClose: $("digestClose"),
+  digestCancel: $("digestCancel"),
+  digestDate: $("digestDate"),
+  digestRefresh: $("digestRefresh"),
+  digestList: $("digestList"),
+  digestSummary: $("digestSummary"),
+  digestStatus: $("digestStatus"),
+  digestSend: $("digestSend"),
   sendLogsButton: $("sendLogsButton"),
   sendLogsModal: $("sendLogsModal"),
   sendLogsClose: $("sendLogsClose"),
@@ -125,6 +135,15 @@ const state = {
   safeMode: false,
   startedAt: 0,
   uptimeTimer: null,
+};
+
+const digestState = {
+  date: "",
+  clients: [],
+  loading: false,
+  sending: false,
+  results: new Map(),
+  selectedViewerIds: new Set(),
 };
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -961,6 +980,218 @@ fetchSafeModeInitial();
 navigator.mediaDevices.addEventListener("devicechange", loadInputDevices);
 loadInputDevices();
 
+// ===== Reservation digests =====
+
+function todayLocalDate() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function setDigestStatus(text, level) {
+  elements.digestStatus.hidden = !text;
+  elements.digestStatus.textContent = text || "";
+  elements.digestStatus.className = "modal-status" + (level ? ` ${level}` : "");
+}
+
+function statusLabel(status) {
+  const map = {
+    sent: "отправлено",
+    already_sent: "уже отправлено",
+    dm_not_allowed: "ЛС закрыты",
+    missing_vk_id: "нет VK ID",
+    safe_mode_blocked: "safe mode",
+    failed: "ошибка",
+  };
+  return map[status] || status || "";
+}
+
+function digestClientStatus(client) {
+  const result = client.viewerId ? digestState.results.get(String(client.viewerId)) : null;
+  if (result?.status) return result.status;
+  if (client.alreadySent) return "already_sent";
+  if (!client.viewerId) return "missing_vk_id";
+  if (!client.canSend && client.cannotSendReason) return client.cannotSendReason;
+  return "ready";
+}
+
+function updateDigestSendState() {
+  const selectedCount = digestState.clients.filter((client) =>
+    client.viewerId
+    && !client.alreadySent
+    && client.canSend
+    && digestState.selectedViewerIds.has(String(client.viewerId))
+  ).length;
+  elements.digestSend.disabled = digestState.loading || digestState.sending || selectedCount === 0;
+  elements.digestSummary.textContent = digestState.loading
+    ? "Загрузка..."
+    : `${digestState.clients.length} клиентов, к отправке ${selectedCount}`;
+}
+
+function renderDigestPreview() {
+  const previousSelection = digestState.selectedViewerIds;
+  digestState.selectedViewerIds = new Set();
+  for (const client of digestState.clients) {
+    const viewerId = client.viewerId ? String(client.viewerId) : "";
+    if (!viewerId || client.alreadySent || !client.canSend) continue;
+    if (previousSelection.size === 0 || previousSelection.has(viewerId)) {
+      digestState.selectedViewerIds.add(viewerId);
+    }
+  }
+
+  if (digestState.clients.length === 0) {
+    elements.digestList.innerHTML = `<div class="wishlist-empty">За выбранный день открытых броней с #Эфир не найдено.</div>`;
+    updateDigestSendState();
+    return;
+  }
+
+  elements.digestList.innerHTML = digestState.clients.map((client) => {
+    const status = digestClientStatus(client);
+    const ready = status === "ready";
+    const statusClass = ready || status === "sent" ? "pill--green"
+      : (status === "already_sent" ? "pill--blue" : "pill--amber");
+    const positions = (client.positions || []).map((p) => `
+      <li>
+        <span class="mono">${escapeHtml(p.productCode || "—")}</span>
+        <span>${escapeHtml(p.productName || "Товар")}</span>
+        <span class="mono">${escapeHtml(p.quantity || 0)} шт</span>
+        <span class="mono">${escapeHtml(formatPrice(p.sum || 0))}</span>
+      </li>
+    `).join("");
+    const orders = (client.orders || []).map((order) => `
+      <a href="${escapeHtml(order.url || "#")}" target="_blank" rel="noreferrer">${escapeHtml(order.name || order.id || "заказ")}</a>
+    `).join(", ");
+    const result = client.viewerId ? digestState.results.get(String(client.viewerId)) : null;
+    const error = result?.error ? `<div class="digest-error">${escapeHtml(result.error)}</div>` : "";
+    const checked = client.viewerId && digestState.selectedViewerIds.has(String(client.viewerId));
+    return `
+      <section class="digest-client ${ready ? "" : "digest-client--muted"}">
+        <div class="digest-client-head">
+          <label class="digest-check">
+            <input class="digest-select" data-viewer-id="${escapeHtml(client.viewerId || "")}" type="checkbox" ${ready && checked ? "checked" : ""} ${ready ? "" : "disabled"} />
+            <span>${escapeHtml(client.viewerName || (client.viewerId ? `VK ${client.viewerId}` : "Клиент без VK ID"))}</span>
+          </label>
+          <span class="pill ${statusClass}">${ready ? "можно отправить" : escapeHtml(statusLabel(status))}</span>
+        </div>
+        <div class="digest-meta">
+          <span>VK: <span class="mono">${escapeHtml(client.viewerId || "—")}</span></span>
+          <span>Заказы: ${orders || "—"}</span>
+          <span>Итого: <span class="mono">${escapeHtml(formatPrice(client.total || 0))}</span></span>
+        </div>
+        <ul class="digest-positions">${positions}</ul>
+        ${error}
+      </section>
+    `;
+  }).join("");
+
+  document.querySelectorAll(".digest-select").forEach((input) => {
+    input.addEventListener("change", () => {
+      const viewerId = String(input.dataset.viewerId || "");
+      if (!viewerId) return;
+      if (input.checked) digestState.selectedViewerIds.add(viewerId);
+      else digestState.selectedViewerIds.delete(viewerId);
+      updateDigestSendState();
+    });
+  });
+  updateDigestSendState();
+}
+
+async function loadDigestPreview() {
+  const date = elements.digestDate.value || todayLocalDate();
+  digestState.date = date;
+  digestState.loading = true;
+  digestState.results = new Map();
+  digestState.selectedViewerIds = new Set();
+  setDigestStatus("Загружаю брони из МойСклада...", null);
+  updateDigestSendState();
+  try {
+    const res = await fetch(`/api/reservation-digests/preview?date=${encodeURIComponent(date)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    digestState.clients = data.clients || [];
+    renderDigestPreview();
+    setDigestStatus(`Предпросмотр обновлен: ${data.count || 0}.`, "ok");
+  } catch (error) {
+    digestState.clients = [];
+    renderDigestPreview();
+    setDigestStatus(`Ошибка: ${error.message}`, "error");
+  } finally {
+    digestState.loading = false;
+    updateDigestSendState();
+  }
+}
+
+function openDigestModal() {
+  elements.digestModal.hidden = false;
+  elements.digestDate.value = digestState.date || todayLocalDate();
+  setDigestStatus("", null);
+  void loadDigestPreview();
+}
+
+function closeDigestModal() {
+  elements.digestModal.hidden = true;
+}
+
+async function sendDigestMessages() {
+  const viewerIds = digestState.clients
+    .filter((client) =>
+      client.viewerId
+      && !client.alreadySent
+      && client.canSend
+      && digestState.selectedViewerIds.has(String(client.viewerId))
+    )
+    .map((client) => String(client.viewerId));
+  if (viewerIds.length === 0) return;
+
+  digestState.sending = true;
+  elements.digestSend.disabled = true;
+  setDigestStatus("Отправляю сообщения VK...", null);
+  try {
+    const res = await fetch("/api/reservation-digests/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ date: elements.digestDate.value, viewerIds }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    digestState.results = new Map((data.results || [])
+      .filter((item) => item.viewerId)
+      .map((item) => [String(item.viewerId), item]));
+    for (const client of digestState.clients) {
+      const result = client.viewerId ? digestState.results.get(String(client.viewerId)) : null;
+      if (result?.status === "sent" || result?.status === "already_sent") {
+        client.alreadySent = true;
+        client.canSend = false;
+      }
+    }
+    renderDigestPreview();
+    const counts = (data.results || []).reduce((acc, item) => {
+      acc[item.status] = (acc[item.status] || 0) + 1;
+      return acc;
+    }, {});
+    setDigestStatus(
+      `Готово: отправлено ${counts.sent || 0}, уже было ${counts.already_sent || 0}, ЛС закрыты ${counts.dm_not_allowed || 0}, safe mode ${counts.safe_mode_blocked || 0}, ошибок ${counts.failed || 0}.`,
+      (counts.failed || counts.dm_not_allowed || counts.safe_mode_blocked) ? "error" : "ok",
+    );
+  } catch (error) {
+    setDigestStatus(`Ошибка отправки: ${error.message}`, "error");
+  } finally {
+    digestState.sending = false;
+    updateDigestSendState();
+  }
+}
+
+elements.digestButton.addEventListener("click", openDigestModal);
+elements.digestClose.addEventListener("click", closeDigestModal);
+elements.digestCancel.addEventListener("click", closeDigestModal);
+elements.digestRefresh.addEventListener("click", loadDigestPreview);
+elements.digestSend.addEventListener("click", sendDigestMessages);
+elements.digestModal.addEventListener("click", (event) => {
+  if (event.target === elements.digestModal) closeDigestModal();
+});
+
 // ===== Wish list =====
 const wishlistState = {
   draftId: null,
@@ -1135,7 +1366,7 @@ function renderWishlistActive() {
     cb.addEventListener("change", () => {
       const entry = findEntry(cb.dataset.entryToggle);
       if (entry) entry.selected = cb.checked;
-      renderWishlistActive();
+      renderGroupTotals();
       persistDraftDebounced();
     });
   });
@@ -1277,6 +1508,11 @@ function renderGroupTotals() {
     const selCount = g.entries.filter((e) => e.selected).length;
     const stats = groupEl.querySelector(".wishlist-group-stats");
     if (stats) stats.textContent = `${selCount}/${g.entries.length} · ${formatKopecks(sum)}`;
+    const groupToggle = groupEl.querySelector("[data-group-toggle]");
+    if (groupToggle) {
+      groupToggle.checked = selCount > 0 && selCount === g.entries.length;
+      groupToggle.indeterminate = selCount > 0 && selCount < g.entries.length;
+    }
   });
   updateSubmitButtonState();
 }

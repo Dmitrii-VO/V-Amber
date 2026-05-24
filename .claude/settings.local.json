@@ -69,7 +69,31 @@
       "Bash(git log *)",
       "Bash(awk -F= '{print $1}')",
       "Bash(node --check server/state-store.js)",
-      "Bash(node --check server/session-log.js)"
+      "Bash(node --check server/session-log.js)",
+      "Bash(node --check server/wishlist-store.js)",
+      "Bash(node --check server/wishlist-submissions.js)",
+      "Bash(node --check server/settings-store.js)",
+      "Bash(node --check server/session-jsonl.js)",
+      "Bash(node --check server/product-code-cache.js)",
+      "Bash(powershell -Command \"Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 500; Write-Output stopped\")",
+      "Bash(curl -s http://localhost:8080/api/wishlist)",
+      "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"draftId\":\"test-draft-1\",\"groups\":[{\"positions\":[{\"productId\":\"foo\",\"quantity\":1,\"price\":100,\"entryIds\":[\"x\"]}]}]}' http://localhost:8080/api/wishlist/purchase-order)",
+      "Bash(powershell -Command \"if \\(Test-Path logs/wishlist.jsonl\\) { Get-Content logs/wishlist.jsonl | Measure-Object -Line }\")",
+      "Bash(node --check web-ui/app.js)",
+      "Bash(curl -s -X PATCH -H \"content-type: application/json\" -d '{\"buyPrice\":45000,\"quantity\":3}' \"http://localhost:8080/api/wishlist/a7d1a557-f159-4276-b0d4-78511152a1c5\")",
+      "Bash(node --check server/bundle-index.js)",
+      "Bash(curl -s http://localhost:8080/api/send-logs/preview)",
+      "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"download\":true}' -o /tmp/v-amber-bundle.zip http://localhost:8080/api/send-logs)",
+      "Bash(powershell -Command \"Get-Item /tmp/v-amber-bundle.zip | Select-Object Length\")",
+      "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"download\":true}' -o ./bundle.zip http://localhost:8080/api/send-logs)",
+      "Bash(powershell -Command \"Get-Item bundle.zip | Select-Object Length, Name\")",
+      "Bash(powershell -Command \"Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force\")",
+      "Bash(npm start *)",
+      "Bash(curl -s http://localhost:8080/api/moysklad/suppliers -o /dev/null -w \"suppliers: %{http_code}\\\\n\")",
+      "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"download\":true}' -o ./bundle2.zip http://localhost:8080/api/send-logs)",
+      "Bash(powershell -Command \"Expand-Archive bundle2.zip -DestinationPath ./bundle2 -Force; Get-Content bundle2/INDEX.md | Select-Object -First 30\")",
+      "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"entryIds\":[\"a7d1a557-f159-4276-b0d4-78511152a1c5\"]}' http://localhost:8080/api/wishlist/check-customerorders)",
+      "Bash(powershell -Command \"Get-Content logs/server.log -Tail 6\")"
     ]
   }
 }

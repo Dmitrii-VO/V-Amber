@@ -28,8 +28,24 @@ function normalizeMoney(value) {
   return typeof value === "number" ? value / 100 : null;
 }
 
+function normalizeQuantity(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function toMinorUnits(value) {
   return typeof value === "number" ? Math.round(value * 100) : 0;
+}
+
+function extractEntityIdFromHref(href, entity) {
+  const escaped = String(entity || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`/entity/${escaped}/([0-9a-f-]+)`, "i").exec(String(href || ""));
+  return match?.[1] || null;
+}
+
+function extractViewerIdFromText(text) {
+  const match = /viewerId\s*=\s*(\d+)/i.exec(String(text || ""));
+  return match?.[1] || null;
 }
 
 function buildEntityMeta(baseUrl, entity, id) {
@@ -419,6 +435,50 @@ export function createMoySkladClient(config, options = {}) {
     return attr?.value ?? null;
   }
 
+  function extractViewerIdFromCounterparty(counterparty, attributeId) {
+    const attrValue = findVkIdAttributeValue(counterparty, attributeId);
+    const normalizedAttr = String(attrValue || "").trim();
+    if (/^\d+$/.test(normalizedAttr)) {
+      return normalizedAttr;
+    }
+    return extractViewerIdFromText(counterparty?.description);
+  }
+
+  function isNewCustomerOrderState(order, defaults) {
+    const state = order?.state || null;
+    const stateName = String(state?.name || "").trim();
+    if (stateName) {
+      return /^нов/i.test(stateName);
+    }
+    const stateHref = state?.meta?.href || "";
+    return Boolean(defaults?.customerOrderStateHref && stateHref === defaults.customerOrderStateHref);
+  }
+
+  function buildMoySkladCustomerOrderUrl(orderId) {
+    return orderId ? `https://online.moysklad.ru/app/#customerorder/edit?id=${orderId}` : "";
+  }
+
+  function buildDigestClient({ order, counterparty, viewerId, positions }) {
+    const total = positions.reduce((sum, item) => sum + item.sum, 0);
+    const counterpartyId = counterparty?.id
+      || order?.agent?.id
+      || extractEntityIdFromHref(order?.agent?.meta?.href, "counterparty");
+    return {
+      viewerId: viewerId || null,
+      viewerName: counterparty?.name || order?.agent?.name || "",
+      counterpartyId: counterpartyId || null,
+      orders: [{
+        id: order.id,
+        name: order.name || "",
+        moment: order.moment || "",
+        stateName: order.state?.name || "",
+        url: buildMoySkladCustomerOrderUrl(order.id),
+      }],
+      positions,
+      total,
+    };
+  }
+
   async function findCounterpartyByVkId(viewerId, attributeId) {
     if (!attributeId) {
       return null;
@@ -494,6 +554,29 @@ export function createMoySkladClient(config, options = {}) {
       name: row.name,
       counterpartyId,
     };
+  }
+
+  async function getOpenOrderProductIds(counterpartyId, { source } = {}) {
+    const open = await findLatestOpenCustomerOrder(counterpartyId, { source });
+    if (!open?.id) {
+      return { open: null, productIds: new Set() };
+    }
+
+    // Тянем позиции открытого заказа один раз на клиента. limit 1000 покрывает
+    // реалистичные объёмы; больший заказ уже требует отдельной операторской проверки.
+    const positionsPayload = await requestJson(
+      `entity/customerorder/${open.id}/positions`,
+      { limit: 1000 },
+      { source },
+    );
+    const rows = Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [];
+    const productIds = new Set();
+    for (const row of rows) {
+      const productId = row?.assortment?.id
+        || extractEntityIdFromHref(row?.assortment?.meta?.href, "product");
+      if (productId) productIds.add(productId);
+    }
+    return { open, productIds };
   }
 
   async function ensureOrderHasBroadcastDescription(orderId) {
@@ -681,25 +764,80 @@ export function createMoySkladClient(config, options = {}) {
       if (!isEnabled || !counterpartyId || !productId) {
         return { inOpenOrder: false };
       }
-      const open = await findLatestOpenCustomerOrder(counterpartyId, { source });
+      const { open, productIds } = await getOpenOrderProductIds(counterpartyId, { source });
       if (!open?.id) return { inOpenOrder: false };
-
-      // Тянем позиции открытого заказа. limit 1000 покрывает все реалистичные
-      // объёмы — клиент с заказом из 1000+ позиций уже сам по себе аномалия.
-      const positionsPayload = await requestJson(
-        `entity/customerorder/${open.id}/positions`,
-        { limit: 1000 },
-        { source },
-      );
-      const rows = Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [];
-      const productHrefSuffix = `/entity/product/${productId}`;
-      const found = rows.some((row) => {
-        const href = row?.assortment?.meta?.href || "";
-        return href.endsWith(productHrefSuffix);
-      });
-      return found
+      return productIds.has(productId)
         ? { inOpenOrder: true, orderId: open.id, orderName: open.name || null }
         : { inOpenOrder: false };
+    },
+    async checkOpenOrderPositionsForEntries(entries, { source } = {}) {
+      const result = {};
+      const rows = Array.isArray(entries) ? entries : [];
+      for (const entry of rows) {
+        if (entry?.entryId) result[entry.entryId] = { inOpenOrder: false };
+      }
+      if (!isEnabled || rows.length === 0) {
+        return result;
+      }
+
+      const byViewer = new Map();
+      for (const entry of rows) {
+        const entryId = entry?.entryId;
+        const viewerId = entry?.viewerId == null ? "" : String(entry.viewerId);
+        const productId = entry?.productId;
+        if (!entryId || !viewerId || !productId) continue;
+        if (!byViewer.has(viewerId)) {
+          byViewer.set(viewerId, { viewerName: entry.viewerName || "", entries: [] });
+        }
+        byViewer.get(viewerId).entries.push({ entryId, productId });
+      }
+
+      for (const [viewerId, group] of byViewer) {
+        let counterparty = null;
+        try {
+          counterparty = await this.ensureCounterparty({
+            viewerId,
+            viewerName: group.viewerName,
+            createIfMissing: false,
+          });
+        } catch (error) {
+          logger.warn("moysklad", "bulk_open_order_counterparty_lookup_failed", {
+            viewerId,
+            error: error?.message || String(error),
+          });
+          for (const entry of group.entries) {
+            result[entry.entryId] = { inOpenOrder: false, error: "lookup_failed" };
+          }
+          continue;
+        }
+
+        if (!counterparty?.id) continue;
+
+        let open;
+        let productIds;
+        try {
+          ({ open, productIds } = await getOpenOrderProductIds(counterparty.id, { source }));
+        } catch (error) {
+          logger.warn("moysklad", "bulk_open_order_positions_lookup_failed", {
+            viewerId,
+            counterpartyId: counterparty.id,
+            error: error?.message || String(error),
+          });
+          for (const entry of group.entries) {
+            result[entry.entryId] = { inOpenOrder: false, error: "lookup_failed" };
+          }
+          continue;
+        }
+
+        if (!open?.id) continue;
+        for (const entry of group.entries) {
+          result[entry.entryId] = productIds.has(entry.productId)
+            ? { inOpenOrder: true, orderId: open.id, orderName: open.name || null }
+            : { inOpenOrder: false };
+        }
+      }
+
+      return result;
     },
     async ensureCounterparty({ viewerId, viewerName, createIfMissing = true }) {
       if (!isEnabled) {
@@ -1034,6 +1172,115 @@ export function createMoySkladClient(config, options = {}) {
         name: created.name,
         agentId,
       };
+    },
+
+    async getReservationDigestForDate(date, { source } = {}) {
+      if (!isEnabled) {
+        logger.info("moysklad", "reservation_digest_skipped_not_configured", { date });
+        return { date, count: 0, clients: [] };
+      }
+
+      const normalizedDate = /^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))
+        ? String(date)
+        : new Date().toISOString().slice(0, 10);
+      const defaults = await resolveDefaults();
+      const start = `${normalizedDate} 00:00:00`;
+      const end = `${normalizedDate} 23:59:59`;
+      const filter = [`moment>=${start}`, `moment<=${end}`].join(";");
+      const attributeId = await resolveVkIdAttributeId();
+      const clientsByKey = new Map();
+      const limit = 100;
+      let offset = 0;
+
+      while (true) {
+        const payload = await requestJson("entity/customerorder", {
+          filter,
+          order: "moment,asc",
+          expand: "agent,state",
+          limit,
+          offset,
+        }, { source, timeoutMs: bulkRequestTimeoutMs });
+        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+
+        for (const order of rows) {
+          const description = String(order?.description || "");
+          if (!description.includes("#Эфир")) continue;
+          if (!isNewCustomerOrderState(order, defaults)) continue;
+          if (!order?.id) continue;
+
+          let counterparty = order.agent || null;
+          const counterpartyHref = order.agent?.meta?.href || "";
+          const counterpartyId = extractEntityIdFromHref(counterpartyHref, "counterparty");
+          let viewerId = extractViewerIdFromText(description);
+          if (!viewerId && counterpartyId && (!Array.isArray(counterparty?.attributes) || !counterparty?.description)) {
+            try {
+              counterparty = await requestJson(
+                `entity/counterparty/${counterpartyId}`,
+                {},
+                { source },
+              );
+            } catch (error) {
+              logger.warn("moysklad", "reservation_digest_counterparty_load_failed", {
+                orderId: order.id,
+                error: error?.message || String(error),
+              });
+            }
+          }
+
+          viewerId = viewerId || extractViewerIdFromCounterparty(counterparty, attributeId);
+          const positionsPayload = await requestJson(
+            `entity/customerorder/${order.id}/positions`,
+            { expand: "assortment", limit: 1000 },
+            { source, timeoutMs: bulkRequestTimeoutMs },
+          );
+          const positions = (Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [])
+            .map((row) => {
+              const quantity = normalizeQuantity(row.quantity);
+              const price = normalizeMoney(row.price) ?? 0;
+              const sum = normalizeMoney(row.sum) ?? quantity * price;
+              const assortment = row.assortment || {};
+              return {
+                id: row.id || null,
+                productId: assortment.id || extractEntityIdFromHref(assortment?.meta?.href, "product"),
+                productCode: String(assortment.code || "").trim(),
+                productName: assortment.name || "",
+                quantity,
+                price,
+                sum,
+              };
+            })
+            .filter((row) => row.quantity > 0);
+
+          const client = buildDigestClient({ order, counterparty, viewerId, positions });
+          const key = viewerId || `missing:${order.id}`;
+          const existing = clientsByKey.get(key);
+          if (existing) {
+            existing.orders.push(...client.orders);
+            existing.positions.push(...client.positions);
+            existing.total += client.total;
+          } else {
+            clientsByKey.set(key, client);
+          }
+        }
+
+        offset += rows.length;
+        const total = Number(payload?.meta?.size || 0);
+        if (rows.length === 0 || offset >= total) break;
+      }
+
+      const clients = [...clientsByKey.values()]
+        .map((client) => ({
+          ...client,
+          orderIds: client.orders.map((order) => order.id).filter(Boolean),
+          orderNames: client.orders.map((order) => order.name).filter(Boolean),
+          canSend: Boolean(client.viewerId && client.positions.length > 0),
+          cannotSendReason: !client.viewerId
+            ? "missing_vk_id"
+            : (client.positions.length === 0 ? "empty_positions" : null),
+        }))
+        .sort((a, b) => String(a.viewerName || a.viewerId || "").localeCompare(String(b.viewerName || b.viewerId || ""), "ru"));
+
+      return { date: normalizedDate, count: clients.length, clients };
     },
   };
 }

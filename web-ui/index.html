@@ -41,6 +41,10 @@
             <span id="wishlistCount" class="wishlist-badge">0</span>
           </button>
 
+          <button id="digestButton" class="btn btn--ghost" title="Сводка открытых броней за день из МойСклада">
+            Сводка броней
+          </button>
+
           <button id="sendLogsButton" class="btn btn--ghost" title="Скачать диагностический ZIP">
             Скачать логи
           </button>
@@ -198,6 +202,33 @@
     </div>
 
     <input id="wsUrlInput" type="hidden" value="ws://localhost:8080/ws/stt" />
+
+    <div id="digestModal" class="modal" hidden>
+      <div class="modal-card modal-card--wide">
+        <div class="modal-head">
+          <h3>Сводка броней за день</h3>
+          <button id="digestClose" class="btn btn--ghost" aria-label="Закрыть">×</button>
+        </div>
+        <div class="modal-body digest-body">
+          <div class="digest-toolbar">
+            <label class="digest-date-field">
+              <span>Дата эфира</span>
+              <input id="digestDate" class="input" type="date" />
+            </label>
+            <button id="digestRefresh" class="btn btn--ghost">Обновить предпросмотр</button>
+            <span id="digestSummary" class="wishlist-summary">—</span>
+          </div>
+          <div id="digestList" class="digest-list">
+            <div class="wishlist-empty">Выберите дату и обновите предпросмотр.</div>
+          </div>
+          <div id="digestStatus" class="modal-status" hidden></div>
+        </div>
+        <div class="modal-actions wishlist-actions">
+          <button id="digestCancel" class="btn btn--ghost">Закрыть</button>
+          <button id="digestSend" class="btn btn--primary" disabled>Отправить в ЛС</button>
+        </div>
+      </div>
+    </div>
 
     <div id="wishlistModal" class="modal" hidden>
       <div class="modal-card modal-card--wide">
