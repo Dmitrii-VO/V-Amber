@@ -389,6 +389,10 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function getReservationReplyMessage(event) {
       if (event.status === "out_of_stock") {
+        if (event.wishlistEntryId) {
+          return `${event.viewerName}, к сожалению, не успели забронировать. Добавили вас в список желающих с сохранением скидки.`;
+        }
+
         return `${event.viewerName}, к сожалению, не успели забронировать. Вас добавить в список желающих с сохранением скидки? Напишите "СПИСОК ${event.lotCode || ""}" для подтверждения.`;
       }
 
@@ -462,16 +466,16 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
-    async function addWishlistFromComment(lot, event) {
+    async function addWishlistFromComment(lot, event, trigger = "wishlist_confirmed") {
       if (!wishlistStore || !lot || !event?.viewerName) {
-        return;
+        return null;
       }
 
       const cacheEntry = productCodeCache?.getProductByCode?.(lot.code) || null;
       const entry = await wishlistStore.addFromOutOfStock({
         event,
         lot,
-        trigger: "wishlist_confirmed",
+        trigger,
         productMeta: cacheEntry
           ? {
               productId: cacheEntry.id || lot.product?.id || null,
@@ -494,7 +498,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         viewerId: event.viewerId,
         viewerName: event.viewerName,
         entryId: entry?.id || null,
+        trigger,
       });
+
+      return entry;
     }
 
     function isReservationSessionCurrent(lot, reservationSessionVersion) {
@@ -586,6 +593,21 @@ export function attachWsServer(httpServer, config, services = {}) {
           viewerId: event.viewerId,
           lotCode: lot.code,
         });
+        try {
+          const wishlistEntry = await addWishlistFromComment(lot, event, "out_of_stock_reservation");
+          if (wishlistEntry?.id) {
+            event.wishlistEntryId = wishlistEntry.id;
+          }
+        } catch (error) {
+          logger.warn("wishlist", "add_from_out_of_stock_reservation_failed", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            error,
+          });
+        }
         emitState();
         notifyReservationStatus(lot, event);
         return;
