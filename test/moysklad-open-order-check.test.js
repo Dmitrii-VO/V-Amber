@@ -25,11 +25,11 @@ function pathFromUrl(url) {
 
 function createFetchMock(handler) {
   const calls = [];
-  const mock = async (url) => {
+  const mock = async (url, init) => {
     const parsed = new URL(String(url));
     const path = pathFromUrl(url);
-    calls.push({ path, searchParams: parsed.searchParams });
-    return handler(path, parsed.searchParams);
+    calls.push({ path, searchParams: parsed.searchParams, init });
+    return handler(path, parsed.searchParams, init);
   };
   mock.calls = calls;
   return mock;
@@ -191,6 +191,96 @@ test("checkOpenOrderPositionsForEntries reports lookup_failed per entry on looku
       "e-1": { inOpenOrder: false, error: "lookup_failed" },
       "e-2": { inOpenOrder: false, error: "lookup_failed" },
     });
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty ignores open orders without today's marker", async () => {
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({
+        rows: [
+          { id: "old-open", name: "VK00001", description: "Regular unpaid order" },
+          { id: "today-live", name: "VK00002", description: "#Эфир 2026-05-24\nVK reservation" },
+          { id: "yesterday-live", name: "VK00003", description: "#Эфир 2026-05-23\nVK reservation" },
+        ],
+      });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", {
+      broadcastDate: "2026-05-24",
+    });
+
+    assert.deepEqual(result, {
+      id: "today-live",
+      name: "VK00002",
+      counterpartyId: "cp-1",
+      broadcastDate: "2026-05-24",
+    });
+    const lookup = fetchMock.calls.find((call) => call.path === "entity/customerorder");
+    assert.equal(lookup.searchParams.get("limit"), "100");
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty returns null when only old open order exists", async () => {
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({ rows: [{ id: "old-open", name: "VK00001", description: "Regular unpaid order" }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", {
+      broadcastDate: "2026-05-24",
+    });
+
+    assert.equal(result, null);
+  } finally {
+    restore();
+  }
+});
+
+test("createCustomerOrderReservation writes daily broadcast marker", async () => {
+  let createdPayload = null;
+  const fetchMock = createFetchMock((path, searchParams, init) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      createdPayload = JSON.parse(init.body);
+      return jsonResponse({ id: "co-new", name: "VK00004" });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.createCustomerOrderReservation({
+      activeLot: {
+        code: "03230",
+        lotSessionId: "lot-1",
+        product: { id: "product-1", salePrice: 2860 },
+      },
+      productCard: { salePrice: 2860 },
+      reservation: { viewerId: 123, viewerName: "Елена", commentId: 456 },
+      counterparty: { id: "cp-1" },
+      broadcastDate: "2026-05-24",
+    });
+
+    assert.equal(result.id, "co-new");
+    assert.match(createdPayload.description, /^#Эфир 2026-05-24\n/);
   } finally {
     restore();
   }

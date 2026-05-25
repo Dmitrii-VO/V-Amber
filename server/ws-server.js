@@ -118,6 +118,12 @@ export function attachWsServer(httpServer, config, services = {}) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
     }
 
+    function formatBroadcastDate(value) {
+      const d = value instanceof Date ? value : new Date(value);
+      const p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    }
+
     function markLotPoisoned(lot, reason, error) {
       const lotSessionId = lot?.lotSessionId;
       if (!lotSessionId || poisonedLotSessionIds.has(lotSessionId)) {
@@ -512,6 +518,8 @@ export function attachWsServer(httpServer, config, services = {}) {
     async function processReservationEvent(lot, event) {
       const state = ensureReservationState(lot);
       const reservationSessionVersion = customerOrderSessionVersion;
+      const broadcastDate = formatBroadcastDate(new Date(event.createdAt || Date.now()));
+      const customerOrderKey = `${broadcastDate}:${event.viewerId}`;
 
       if (isSafeMode()) {
         event.status = "safe_mode_logged";
@@ -624,7 +632,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       let nextWaitlistEvent = null;
 
       try {
-        let existingOrder = customerOrdersByViewerId.get(event.viewerId) || null;
+        let existingOrder = customerOrdersByViewerId.get(customerOrderKey) || null;
         let resolvedCounterparty = null;
 
         // Cross-session merge: in-memory map is wiped when the WebSocket
@@ -638,7 +646,10 @@ export function attachWsServer(httpServer, config, services = {}) {
               viewerName: event.viewerName,
             });
             if (resolvedCounterparty?.id) {
-              const found = await moysklad.findOpenCustomerOrderForCounterparty(resolvedCounterparty.id);
+              const found = await moysklad.findBroadcastCustomerOrderForCounterparty(
+                resolvedCounterparty.id,
+                { broadcastDate },
+              );
               if (found?.id) {
                 existingOrder = found;
                 logger.info("moysklad", "open_customer_order_reused", {
@@ -677,6 +688,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               voicePrice: lot.product?.voicePrice,
             },
             reservation: event,
+            broadcastDate,
           });
           order = (appendResult && appendResult.skipped === true && appendResult.safeMode === true)
             ? appendResult
@@ -690,6 +702,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             },
             reservation: event,
             counterparty: resolvedCounterparty,
+            broadcastDate,
           });
         }
 
@@ -716,7 +729,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         // the same viewer appends to this order instead of creating a third
         // orphan record. This is the orphan-prevention path.
         if (!existingOrder?.id && order?.id) {
-          customerOrdersByViewerId.set(event.viewerId, order);
+          customerOrdersByViewerId.set(customerOrderKey, order);
         }
 
         if (!isReservationSessionCurrent(lot, reservationSessionVersion)) {

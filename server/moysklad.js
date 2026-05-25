@@ -60,6 +60,19 @@ function extractViewerIdFromText(text) {
   return match?.[1] || null;
 }
 
+function formatBroadcastDate(value = new Date()) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    return formatBroadcastDate(new Date());
+  }
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function buildBroadcastMarker(broadcastDate) {
+  return `#Эфир ${formatBroadcastDate(broadcastDate)}`;
+}
+
 function buildEntityMeta(baseUrl, entity, id) {
   return {
     meta: {
@@ -568,6 +581,44 @@ export function createMoySkladClient(config, options = {}) {
     };
   }
 
+  async function findLatestBroadcastCustomerOrder(counterpartyId, { broadcastDate, source } = {}) {
+    if (!counterpartyId) {
+      return null;
+    }
+
+    const defaults = await resolveDefaults();
+    if (!defaults.customerOrderStateHref) {
+      logger.warn("moysklad", "broadcast_order_lookup_skipped_no_state", { counterpartyId });
+      return null;
+    }
+
+    const marker = buildBroadcastMarker(broadcastDate);
+    const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
+    const filter = [
+      `agent=${agentHref}`,
+      `state=${defaults.customerOrderStateHref}`,
+    ].join(";");
+
+    const payload = await requestJson("entity/customerorder", {
+      filter,
+      order: "moment,desc",
+      limit: 100,
+    }, { source });
+
+    const row = (payload.rows || [])
+      .find((item) => String(item?.description || "").includes(marker));
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      name: row.name,
+      counterpartyId,
+      broadcastDate: formatBroadcastDate(broadcastDate),
+    };
+  }
+
   async function getOpenOrderProductIds(counterpartyId, { source } = {}) {
     const open = await findLatestOpenCustomerOrder(counterpartyId, { source });
     if (!open?.id) {
@@ -591,17 +642,18 @@ export function createMoySkladClient(config, options = {}) {
     return { open, productIds };
   }
 
-  async function ensureOrderHasBroadcastDescription(orderId) {
+  async function ensureOrderHasBroadcastDescription(orderId, broadcastDate) {
     const order = await requestJson(`entity/customerorder/${orderId}`);
     const description = String(order.description || "");
+    const marker = buildBroadcastMarker(broadcastDate);
 
-    if (description.includes("#Эфир")) {
+    if (description.includes(marker)) {
       return order;
     }
 
     const nextDescription = description.trim()
-      ? `#Эфир\n${description}`
-      : "#Эфир";
+      ? `${marker}\n${description}`
+      : marker;
 
     return patchJson(`entity/customerorder/${orderId}`, {
       description: nextDescription,
@@ -765,6 +817,12 @@ export function createMoySkladClient(config, options = {}) {
         return null;
       }
       return findLatestOpenCustomerOrder(counterpartyId);
+    },
+    async findBroadcastCustomerOrderForCounterparty(counterpartyId, { broadcastDate, source } = {}) {
+      if (!isEnabled) {
+        return null;
+      }
+      return findLatestBroadcastCustomerOrder(counterpartyId, { broadcastDate, source });
     },
     // Проверяет: есть ли у контрагента открытый customerorder, в который УЖЕ
     // добавлена позиция с productId. Используется для UI-пометки «✔ уже в
@@ -966,7 +1024,7 @@ export function createMoySkladClient(config, options = {}) {
       counterpartyLocks.set(lockKey, promise);
       return promise;
     },
-    async createCustomerOrderReservation({ activeLot, productCard, reservation, counterparty: preResolvedCounterparty }) {
+    async createCustomerOrderReservation({ activeLot, productCard, reservation, counterparty: preResolvedCounterparty, broadcastDate }) {
       if (!isEnabled || !activeLot?.product?.id || !reservation?.viewerId) {
         return null;
       }
@@ -984,7 +1042,7 @@ export function createMoySkladClient(config, options = {}) {
         });
 
       const payload = {
-        description: `#Эфир\nVK reservation. lot=${activeLot.code}; lotSessionId=${activeLot.lotSessionId}; commentId=${reservation.commentId}; viewerId=${reservation.viewerId}`,
+        description: `${buildBroadcastMarker(broadcastDate)}\nVK reservation. lot=${activeLot.code}; lotSessionId=${activeLot.lotSessionId}; commentId=${reservation.commentId}; viewerId=${reservation.viewerId}`,
         organization: buildEntityMeta(config.baseUrl, "organization", defaults.organizationId),
         store: buildEntityMeta(config.baseUrl, "store", defaults.storeId),
         agent: buildEntityMeta(config.baseUrl, "counterparty", counterparty.id),
@@ -1012,12 +1070,12 @@ export function createMoySkladClient(config, options = {}) {
         counterpartyId: counterparty.id,
       };
     },
-    async appendPositionToCustomerOrder({ orderId, activeLot, productCard, reservation }) {
+    async appendPositionToCustomerOrder({ orderId, activeLot, productCard, reservation, broadcastDate }) {
       if (!isEnabled || !orderId || !activeLot?.product?.id || !reservation?.viewerId) {
         return null;
       }
 
-      await ensureOrderHasBroadcastDescription(orderId);
+      await ensureOrderHasBroadcastDescription(orderId, broadcastDate);
 
       const payload = [
         {
