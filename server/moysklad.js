@@ -1048,9 +1048,9 @@ export function createMoySkladClient(config, options = {}) {
         agent: buildEntityMeta(config.baseUrl, "counterparty", counterparty.id),
         positions: [
           {
-            quantity: 1,
+            quantity: Math.max(1, Number(reservation?.quantity) || 1),
             price: toMinorUnits(getEffectiveSalePrice(activeLot, productCard) - (activeLot.discountAmount || 0)),
-            reserve: 1,
+            reserve: Math.max(1, Number(reservation?.quantity) || 1),
             assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
           },
         ],
@@ -1079,9 +1079,9 @@ export function createMoySkladClient(config, options = {}) {
 
       const payload = [
         {
-          quantity: 1,
+          quantity: Math.max(1, Number(reservation?.quantity) || 1),
           price: toMinorUnits(getEffectiveSalePrice(activeLot, productCard) - (activeLot.discountAmount || 0)),
-          reserve: 1,
+          reserve: Math.max(1, Number(reservation?.quantity) || 1),
           assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
         },
       ];

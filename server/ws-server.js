@@ -9,6 +9,7 @@ import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
+import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -58,7 +59,6 @@ export function attachWsServer(httpServer, config, services = {}) {
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
-  const reservationKeyword = "бронь";
 
   function broadcastWishlistCount(count) {
     const payload = JSON.stringify({ type: "wishlist_count_changed", count });
@@ -102,6 +102,18 @@ export function attachWsServer(httpServer, config, services = {}) {
     let lastDetection = null;
     let triggerActiveUntil = 0;
     let triggerSessionFinals = [];
+
+    // Сброс окна голосовых триггеров. Точка отказа: если когда-нибудь
+    // привяжем авто-таймауты к моменту первого детекта, надо будет
+    // централизованно решить, что делать здесь. Reason оставляется в
+    // логах warn-уровня только при DEBUG_TRIGGER_WINDOW=1.
+    function resetTriggerWindow(reason) {
+      triggerActiveUntil = 0;
+      triggerSessionFinals = [];
+      if (process.env.DEBUG_TRIGGER_WINDOW === "1") {
+        logger.debug("article", "trigger_window_reset", { connectionId, reason });
+      }
+    }
     let nextRunId = 1;
     let activeRunId = null;
     let activeDetectionActionId = null;
@@ -218,8 +230,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       activeLot = null;
       lastDetection = null;
       activeDetectionActionId = null;
-      triggerActiveUntil = 0;
-      triggerSessionFinals = [];
+      resetTriggerWindow("detection_state_reset");
     }
 
     function resetCustomerOrders() {
@@ -231,44 +242,8 @@ export function attachWsServer(httpServer, config, services = {}) {
       clearActiveState().catch(() => {});
     }
 
-    function normalizeReservationText(text) {
-      return String(text || "").trim().toLowerCase();
-    }
-
     function normalizeReservationCode(code) {
       return String(code || "").trim();
-    }
-
-    function parseReservationComment(text) {
-      const normalized = normalizeReservationText(text);
-      const match = /^бронь[\s:.,;!?-]+(\d+)\s*[.,;!?]*$/.exec(normalized);
-      if (!match) {
-        return {
-          hasReservationKeyword: normalized === reservationKeyword || normalized.startsWith(`${reservationKeyword} `),
-          code: null,
-        };
-      }
-
-      return {
-        hasReservationKeyword: true,
-        code: match[1],
-      };
-    }
-
-    function parseWishlistComment(text) {
-      const normalized = normalizeReservationText(text);
-      const match = /^список[\s:.,;!?-]+(\d+)\s*[.,;!?]*$/.exec(normalized);
-      if (!match) {
-        return {
-          hasWishlistKeyword: normalized === "список" || normalized.startsWith("список "),
-          code: null,
-        };
-      }
-
-      return {
-        hasWishlistKeyword: true,
-        code: match[1],
-      };
     }
 
     const RESERVATION_HISTORY_LIMIT = 200;
@@ -419,7 +394,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       if (event.status === "order_failed") {
-        return "Не удалось обработать бронь. Напишите \"Бронь\" и код товара ещё раз.";
+        return "Не удалось обработать бронь. Напишите код товара ещё раз — можно так: \"03204\", \"бр 03204\", \"беру 03204\" или \"+03204\".";
       }
 
       return "";
@@ -439,6 +414,50 @@ export function attachWsServer(httpServer, config, services = {}) {
         ? Math.max(1, Math.floor(availableStock))
         : 1;
       return Math.max(0, effectiveStock - getCommittedReservationCount(state));
+    }
+
+    // Ленивая попытка дотянуть availableStock из MoySklad, если первая бронь
+    // приходит на лот, для которого карточка вернула null/non-finite.
+    // floor=1 в getRemainingAvailableStock — это страховка от over-sell в
+    // эфире, но если МойСклад временно недоступен на старте лота, мы
+    // принимаем за «склад > 0» даже когда реально 0. Здесь даём один шанс
+    // получить настоящее число.
+    async function ensureStockKnownBeforeFirstReservation(lot, state) {
+      if (!lot?.code) return;
+      if (getCommittedReservationCount(state) > 0) return;
+      const current = lot.product?.availableStock;
+      if (typeof current === "number" && Number.isFinite(current)) return;
+      if (isLotPoisoned(lot.lotSessionId)) return;
+      try {
+        const productCard = await moysklad.getProductCardByCode(lot.code);
+        if (activeLot !== lot) return;
+        if (productCard && typeof productCard.availableStock === "number"
+            && Number.isFinite(productCard.availableStock)) {
+          lot.product = lot.product || {};
+          lot.product.availableStock = productCard.availableStock;
+          logger.info("moysklad", "stock_refreshed_before_first_reservation", {
+            connectionId,
+            code: lot.code,
+            lotSessionId: lot.lotSessionId,
+            availableStock: productCard.availableStock,
+          });
+        } else {
+          logger.warn("moysklad", "stock_unknown_first_reservation", {
+            connectionId,
+            code: lot.code,
+            lotSessionId: lot.lotSessionId,
+            reason: "card_returned_no_stock",
+          });
+        }
+      } catch (error) {
+        logger.warn("moysklad", "stock_unknown_first_reservation", {
+          connectionId,
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          reason: "card_lookup_failed",
+          error,
+        });
+      }
     }
 
     function notifyReservationStatus(lot, event) {
@@ -585,8 +604,19 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      // На первой брони со «склад=unknown» — однократная попытка дотянуть
+      // реальное число из MoySklad. Защищает от молчаливого over-sell в
+      // случаях, когда стартовая карточка лота вернула null/0.
+      await ensureStockKnownBeforeFirstReservation(lot, state);
+      if (activeLot !== lot) {
+        // Лот сменился, пока мы ждали MoySklad — выходим без побочных
+        // эффектов; processReservationEvent вызывался для устаревшего лота.
+        return;
+      }
+
+      const needed = Math.max(1, Number(event.quantity) || 1);
       const remainingStock = getRemainingAvailableStock(lot, state);
-      if (remainingStock !== null && remainingStock <= 0) {
+      if (remainingStock !== null && remainingStock < needed) {
         event.status = "out_of_stock";
         logger.info("vk", "reservation_out_of_stock", {
           connectionId,
@@ -626,7 +656,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         viewerId: event.viewerId,
       };
       event.status = "creating_order";
-      state.committedReservationCount = (state.committedReservationCount || 0) + 1;
+      state.committedReservationCount = (state.committedReservationCount || 0) + needed;
       emitState();
 
       let nextWaitlistEvent = null;
@@ -713,7 +743,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         if (order && order.skipped === true && order.safeMode === true) {
           event.status = "safe_mode_logged";
           // No MoySklad write happened — release the slot in the counter.
-          state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - 1);
+          state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - needed);
           logger.warn("safe-mode", "reservation_blocked_mid_flight", {
             connectionId,
             lotSessionId: lot.lotSessionId,
@@ -902,9 +932,11 @@ export function attachWsServer(httpServer, config, services = {}) {
               // Forensic: каждый новый комментарий в окне лота попадает в лог,
               // даже если не «бронь». Это позволяет позже увидеть пропущенные
               // брони (опечатки, «забронируй», эмодзи) и общий шум вокруг лота.
-              const reservationComment = parseReservationComment(comment.text);
-              const wishlistComment = parseWishlistComment(comment.text);
               const expectedReservationCode = normalizeReservationCode(currentLot.code);
+              const reservationComment = parseReservationComment(comment.text, {
+                preferredCode: expectedReservationCode,
+              });
+              const wishlistComment = parseWishlistComment(comment.text);
               const matchedReservation = Boolean(
                 reservationComment.code
                 && reservationComment.code === expectedReservationCode,
@@ -928,6 +960,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 createdAt: new Date(comment.date * 1000).toISOString(),
                 reservationCommentCode: reservationComment.code,
                 hasReservationKeyword: reservationComment.hasReservationKeyword,
+                reservationCommentQuantity: reservationComment.quantity ?? 1,
                 wishlistCommentCode: wishlistComment.code,
                 hasWishlistKeyword: wishlistComment.hasWishlistKeyword,
                 matchedReservation,
@@ -991,6 +1024,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
               addBoundedId(reservationState.acceptedUserIds, viewerId);
 
+              const reservationQuantity = Math.max(1, Math.min(10, Number(reservationComment.quantity) || 1));
               const event = {
                 commentId: comment.id,
                 viewerId,
@@ -999,6 +1033,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 createdAt: new Date(comment.date * 1000).toISOString(),
                 status: "pending_reservation",
                 lotCode: currentLot.code,
+                quantity: reservationQuantity,
               };
 
               addReservationEvent(currentLot, event);
@@ -1394,10 +1429,113 @@ export function attachWsServer(httpServer, config, services = {}) {
         allCandidates,
       });
 
-      triggerActiveUntil = 0;
-      triggerSessionFinals = [];
+      resetTriggerWindow("lot_opened");
       emitState();
       return nextLot;
+    }
+
+    async function mergeSameCodeRedetection(detection, source, voicePrice, gate) {
+      const lot = activeLot;
+      if (!lot) return;
+      let productCardLazyFetched = false;
+      // Lazy lookup: если карточка не подтянулась с первой попытки (например,
+      // МойСклад был в таймауте), даём редетекции шанс заполнить её.
+      if (!lot.product?.id) {
+        try {
+          const productCard = await moysklad.getProductCardByCode(lot.code);
+          if (!isDetectionStillActive(gate)) return;
+          if (productCard) {
+            productCardLazyFetched = true;
+            lot.product = {
+              id: productCard.id,
+              name: productCard.name,
+              code: productCard.code,
+              pathName: productCard.pathName,
+              salePrice: productCard.salePrice,
+              voicePrice: productCard.voicePrice ?? voicePrice?.value ?? null,
+              priceSource: productCard.priceSource || (voicePrice?.value ? "voice" : "moysklad"),
+              availableStock: productCard.availableStock,
+              hasPhoto: Boolean(productCard.photo),
+            };
+          }
+        } catch (error) {
+          logger.warn("moysklad", "product_card_lookup_failed_on_redetection", {
+            connectionId, code: lot.code, error,
+          });
+        }
+      }
+
+      // Между awaits активный лот мог смениться (оператор успел назвать
+      // другой код, лот закрылся и т.д.). Любая мутация / публикация по
+      // этой точке должна быть отброшена — иначе обновим цену на старом
+      // объекте и выстрелим price-update в VK по уже закрытому лоту.
+      if (activeLot !== lot || !isDetectionStillActive(gate)) return;
+
+      let priceChanged = false;
+      if (voicePrice?.value && lot.product
+          && lot.product.voicePrice !== voicePrice.value) {
+        lot.product.voicePrice = voicePrice.value;
+        lot.product.priceSource = "voice";
+        priceChanged = true;
+      }
+
+      lot.transcript = detection.transcript;
+      lastDetection = {
+        ...detection,
+        status: "confirmed",
+        chosen: { code: lot.code, source, fragment: detection.transcript, confidence: 1 },
+        redetection: true,
+      };
+
+      logger.info("article", "article_redetection_same_code", {
+        connectionId,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        source,
+        transcript: detection.transcript,
+        priceChanged,
+        productCardLazyFetched,
+        reservationsKept: lot.reservations?.events?.length || 0,
+      });
+
+      const acceptedReservationCount = lot.reservations?.events?.length || 0;
+      if (priceChanged && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+        // Если в лоте уже есть принятые брони — не рискуем зачумить лот
+        // ошибкой VK (например, vkErrorCode=801 «комментарии закрыты»
+        // через handleVkPublishError → markLotPoisoned). Цена в локальном
+        // состоянии уже обновлена, операторский UI её увидит; для
+        // покупателей карточка останется со старой ценой — это меньшее
+        // зло, чем потеря sticky-лота со всеми броньями. Если броней
+        // ещё нет, риск приемлем: терять нечего.
+        if (acceptedReservationCount > 0) {
+          logger.info("vk", "redetection_price_update_skipped_due_to_reservations", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            acceptedReservationCount,
+          });
+        } else {
+          // Повторная проверка: между предыдущей проверкой и публикацией
+          // ничего не было await'нуто, но это самая дорогая операция —
+          // выстрелить нерелевантным update'ом в VK хуже, чем пропустить
+          // обновление цены.
+          if (activeLot !== lot || !isDetectionStillActive(gate)) {
+            emitState();
+            return;
+          }
+          try {
+            await vk.publishPriceUpdate(lot);
+          } catch (error) {
+            handleVkPublishError(lot, error);
+            logger.warn("vk", "redetection_price_update_failed", {
+              connectionId, lotSessionId: lot.lotSessionId, error,
+            });
+          }
+        }
+      }
+
+      resetTriggerWindow("redetection_merged");
+      emitState();
     }
 
     async function handleConfirmedDetection(detection, selectedCode, source, options = {}) {
@@ -1409,6 +1547,24 @@ export function attachWsServer(httpServer, config, services = {}) {
       } = options;
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
+        return;
+      }
+
+      // Идемпотентная переразметка. Оператор регулярно проговаривает код
+      // повторно (распознавание сорвалось, диктует цену, добавляет описание).
+      // Раньше каждый такой повтор закрывал текущий лот, помечал ожидающих
+      // как orphan_waitlist, и открывал заново — терялись брони, написанные
+      // между двумя произнесениями (см. эфир 24.05.2026: лоты 03199/03202/
+      // 03212 переоткрывались 2–3 раза каждый). При том же коде, что и у
+      // активного лота, не делаем close+reopen — только мерджим новые данные
+      // (voicePrice, product card если был null) в существующий lotSessionId.
+      if (activeLot
+          && activeLot.code === selectedCode
+          && activeLot.lotSessionId
+          && !isLotPoisoned(activeLot.lotSessionId)) {
+        await mergeSameCodeRedetection(detection, source, voicePrice, {
+          runId, enforceActiveRun, expectedDetectionId,
+        });
         return;
       }
 
@@ -1505,8 +1661,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
       startCommentPolling(confirmedLot);
 
-      triggerActiveUntil = 0;
-      triggerSessionFinals = [];
+      resetTriggerWindow("confirmed_detection_completed");
     }
 
     logger.info("ws", "client_connected", { connectionId });
