@@ -118,7 +118,13 @@ export async function clearActiveState() {
   //    оставить stale-файл. writeChain накапливает все flushPending'и.
   try {
     await writeChain;
-  } catch { /* ignore */ }
+  } catch (error) {
+    // Сам flushPending логирует "save_failed"; здесь повторно не шумим,
+    // но debug-строкой фиксируем, что clear отработал поверх упавшего save.
+    logger.debug("state-store", "clear_after_failed_write", {
+      error: error?.message || String(error),
+    });
+  }
   // 3) Удалить state-файл и временный, если есть.
   try {
     await unlink(stateFilePath);
