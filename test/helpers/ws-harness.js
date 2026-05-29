@@ -22,10 +22,13 @@ function recorder() {
 // Мок VK-издателя: записывает каждый вызов и его аргументы. publishLotCard
 // по умолчанию выдаёт инкрементный commentId, чтобы лот считался
 // опубликованным (иначе ws-server не запустит поллер и не сохранит лот).
+// getComments отдаёт накопленную очередь комментариев (vk.pushComment) —
+// так тест драйвит путь броней без реального VK API.
 export function createVkMock(overrides = {}) {
   let nextCommentId = 100;
-  const r = recorder();
-  const calls = r.calls;
+  const calls = [];
+  const commentItems = [];
+  const profiles = [];
   const wrap = (name, impl) => (...args) => {
     calls.push({ name, args });
     return impl ? impl(...args) : undefined;
@@ -38,8 +41,17 @@ export function createVkMock(overrides = {}) {
     publishPriceUpdate: wrap("publishPriceUpdate", overrides.publishPriceUpdate || (async () => {})),
     publishDiscountUpdate: wrap("publishDiscountUpdate", overrides.publishDiscountUpdate || (async () => {})),
     publishReservationReply: wrap("publishReservationReply", overrides.publishReservationReply || (async () => {})),
-    getComments: wrap("getComments", overrides.getComments || (async () => ({ items: [] }))),
+    getComments: wrap("getComments", overrides.getComments
+      || (async () => ({ items: [...commentItems], profiles: [...profiles] }))),
     setLiveVideoUrl: wrap("setLiveVideoUrl", overrides.setLiveVideoUrl || (() => {})),
+  };
+  // Кладёт комментарий в очередь, которую возвращает getComments. Поллер
+  // дедупит по id/lastCommentId, поэтому повторные опросы безопасны.
+  vk.pushComment = ({ id, fromId, text, firstName = "Покупатель", lastName = "" }) => {
+    commentItems.push({ id, from_id: fromId, text, date: Math.floor(Date.now() / 1000) });
+    if (!profiles.some((p) => p.id === fromId)) {
+      profiles.push({ id: fromId, first_name: firstName, last_name: lastName });
+    }
   };
   vk.calls = calls;
   vk.callsTo = (name) => calls.filter((c) => c.name === name);
@@ -63,7 +75,7 @@ export function createMoyskladMock({ cardsByCode = {}, overrides = {} } = {}) {
     appendPositionToCustomerOrder: wrap("appendPositionToCustomerOrder",
       overrides.appendPositionToCustomerOrder || (async () => null)),
     createCustomerOrderReservation: wrap("createCustomerOrderReservation",
-      overrides.createCustomerOrderReservation || (async () => null)),
+      overrides.createCustomerOrderReservation || (async () => ({ id: "co-test-1" }))),
   };
   moysklad.calls = calls;
   moysklad.callsTo = (name) => calls.filter((c) => c.name === name);

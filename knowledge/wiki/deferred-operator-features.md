@@ -100,13 +100,13 @@ What the operator expects: a text field on the active-lot card. Type
 - Manual code with `lot.acceptedReservations > 0` → must not poison
   the lot or skip `publishPriceUpdate`.
 
-Covered in `test/ws-server.manual-code.test.js`: Variant-A gate, catalog
-rejection (unknown code + unloaded catalog), idle open with
+All covered in `test/ws-server.manual-code.test.js`: Variant-A gate,
+catalog rejection (unknown code + unloaded catalog), idle open with
 `source: "manual"`, same-code merge, manual→voice→manual single lot,
-different-code close+reopen. The last two scenarios above (stock-floor
-and `acceptedReservations > 0`) drive the **reservation** path and need
-the comment-poller reservation helpers added to the harness — tracked as
-a follow-up, not yet covered.
+different-code close+reopen, unknown-stock first reservation at `floor=1`,
+and same-code re-entry preserving an accepted reservation (no poison, no
+close). The reservation scenarios drive the comment poller via
+`vk.pushComment` in the harness.
 
 ### Partial workaround already in place
 

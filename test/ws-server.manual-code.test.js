@@ -14,6 +14,17 @@ const CARD_03199 = {
   id: "p-03199", name: "Кольцо янтарь", code: "03199",
   pathName: "Украшения/Кольца", salePrice: 3200, availableStock: 4,
 };
+// Карточка с НЕизвестным остатком (availableStock отсутствует) — для
+// проверки floor=1 на первой брони.
+const CARD_03204_NO_STOCK = {
+  id: "p-03204", name: "Серьги янтарь", code: "03204",
+  pathName: "Украшения/Серьги", salePrice: 4500, availableStock: null,
+};
+
+const hasReserved = (m) =>
+  m.type === "state"
+  && Array.isArray(m.activeLot?.reservations?.events)
+  && m.activeLot.reservations.events.some((e) => e.status === "reserved");
 
 // Запускает STT-стрим (без голосовой детекции) — ставит activeRunId.
 async function startStream(client, harness) {
@@ -133,6 +144,61 @@ test("#14: manual -> voice -> manual on the same code keeps a single lot", async
     // Один лот за всю цепочку → одна карточка, ни одного закрытия.
     assert.equal(harness.vk.callsTo("publishLotCard").length, 1);
     assert.equal(harness.vk.callsTo("publishLotClosed").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("#14: manualCode with unknown stock — first reservation falls back to floor=1", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204_NO_STOCK },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    const open = await client.waitFor((m) => m.type === "state" && m.activeLot);
+    assert.equal(open.activeLot.product.availableStock, null);
+
+    // Зритель бронирует голым кодом — поллер подхватит на ближайшем опросе.
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03204", firstName: "Аня" });
+
+    const reserved = await client.waitFor(hasReserved, { timeoutMs: 6000 });
+    assert.equal(reserved.activeLot.reservations.committedReservationCount, 1);
+    // Открытие лота + ensureStockKnownBeforeFirstReservation → карточка
+    // запрошена минимум дважды (floor=1 пропускает первую бронь).
+    assert.ok(harness.moysklad.callsTo("getProductCardByCode").length >= 2);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("#14: manualCode re-entry preserves an accepted reservation (no poison, no close)", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204 },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    const open = await client.waitFor((m) => m.type === "state" && m.activeLot);
+    const lotSessionId = open.activeLot.lotSessionId;
+
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03204", firstName: "Аня" });
+    await client.waitFor(hasReserved, { timeoutMs: 6000 });
+
+    // Повторный ручной ввод того же кода → merge, бронь не теряется.
+    client.send({ type: "manualCode", code: "03204" });
+    const merged = await client.waitFor("state");
+    assert.equal(merged.activeLot.lotSessionId, lotSessionId);
+    assert.equal(merged.activeLot.reservations.committedReservationCount, 1);
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 0);
+    assert.equal(harness.vk.callsTo("publishLotCard").length, 1);
   } finally {
     await client.close();
     await harness.close();
