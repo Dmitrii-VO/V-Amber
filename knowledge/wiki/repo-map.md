@@ -7,10 +7,21 @@ a replacement for code search, but it gives agents the right entry points.
 
 `server/` contains the Node.js backend:
 
-- `server/index.js` starts the application and wires services.
+- `server/index.js` starts the application and wires services. Hosts
+  top-level `unhandledRejection` and `uncaughtException` handlers and the
+  product-code-cache refresh loop with consecutive-failure tracking.
 - `server/http-server.js` serves `web-ui/` and HTTP API endpoints.
 - `server/ws-server.js` owns WebSocket session flow, active lots,
   reservations, VK comments, discounts, safe mode broadcasts, and runtime state.
+- `server/ws-helpers.js` holds pure helpers extracted from `ws-server.js`
+  (VK comment ID parsing, error code extraction, broadcast-date formatting,
+  bounded id sets, reservation reply templates, fatal-comment-read detection).
+- `server/moysklad-helpers.js` holds pure helpers extracted from
+  `moysklad.js` (auth header, URL building, money/quantity normalization,
+  entity meta, product snapshot, broadcast marker).
+- `server/auth.js` builds the optional `API_TOKEN` middleware (HTTP and WS)
+  and the WS `Origin` allowlist. Uses `crypto.timingSafeEqual` for token
+  comparison.
 - `server/speechkit-stream.js` streams microphone audio to Yandex SpeechKit.
 - `server/article-extractor.js` extracts spoken product codes.
 - `server/reservation-parser.js` parses VK buyer comments into reservation
@@ -60,10 +71,13 @@ See [[service-scripts]].
 `test/` currently contains Node test-runner tests:
 
 - `test/article-extractor.test.js`
+- `test/auth.test.js`
+- `test/moysklad-helpers.test.js`
 - `test/moysklad-open-order-check.test.js`
 - `test/price-detector.test.js`
 - `test/reservation-digest-log.test.js`
 - `test/reservation-parser.test.js`
+- `test/ws-helpers.test.js`
 
 See [[testing-guide]].
 

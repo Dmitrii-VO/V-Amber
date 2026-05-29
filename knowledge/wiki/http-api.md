@@ -1,0 +1,74 @@
+# HTTP API
+
+V-Amber serves the browser UI and local operator APIs from
+`server/http-server.js`.
+
+## Core routes
+
+| Route | Method | Behavior |
+|---|---|---|
+| `/` | `GET` | Serves `web-ui/index.html`. Static assets are served with `cache-control: no-store`. |
+| `/health` | `GET` | Returns `{ ok, version, subsystems }` where `subsystems` carries MoySklad cache health (`status`, `loadedAt`, `productCount`, `lastError`, `refreshing`), VK and SpeechKit configuration status, and current safe-mode flag. Returns `503` when MoySklad has a `lastError` or when VK token / SpeechKit key are missing. No external API is pinged — values come from the last refresh attempt. |
+| `/api/vk/validate-url` | `GET` | Validates a VK live video URL. Query: `url`. |
+| `/api/safe-mode` | `GET` | Returns current safe mode state. |
+| `/api/safe-mode` | `POST` | Accepts `{ "enabled": true|false }`. |
+| `/api/send-logs/preview` | `GET` | Lists files that would be included in the diagnostic ZIP. |
+| `/api/send-logs` | `POST` | Streams the diagnostic ZIP when called with `{ "userNote": "...", "download": true }`. |
+| `/api/product-codes/refresh` | `POST` | Refreshes the in-memory product-code cache from MoySklad. |
+| `/api/product-codes/status` | `GET` | Returns product-code cache status. |
+| `/api/settings` | `GET` | Returns persisted operator settings. |
+| `/api/settings` | `PATCH` | Deep-merges settings and persists them under `logs/settings.json`. |
+| `/api/moysklad/suppliers` | `GET` | Returns cached MoySklad suppliers for wishlist purchase orders. |
+| `/api/moysklad/stores` | `GET` | Returns cached MoySklad stores for wishlist purchase orders. |
+
+## Wishlist routes
+
+| Route | Method | Behavior |
+|---|---|---|
+| `/api/wishlist/count` | `GET` | Returns active wishlist count. |
+| `/api/wishlist` | `GET` | Returns active wishlist entries grouped by supplier. |
+| `/api/wishlist/archive` | `GET` | Returns archived and consumed wishlist entries. |
+| `/api/wishlist/draft` | `POST` | Creates a submission draft and returns grouped wishlist snapshot. |
+| `/api/wishlist/entries` | `POST` | Adds a manual wishlist entry. |
+| `/api/wishlist/:entryId` | `PATCH` | Edits an active wishlist entry. |
+| `/api/wishlist/:entryId` | `DELETE` | Removes an active wishlist entry. |
+| `/api/wishlist/check-customerorders` | `POST` | Checks whether wishlist entries already exist in open MoySklad customer orders. |
+| `/api/wishlist/purchase-order` | `POST` | Creates MoySklad purchase orders from selected wishlist groups, with idempotency by draft/group hash. |
+
+## Reservation digest routes
+
+| Route | Method | Behavior |
+|---|---|---|
+| `/api/reservation-digests/preview` | `GET` | Builds a per-client reservation digest for a date and enriches it with send state. |
+| `/api/reservation-digests/send` | `POST` | Sends selected client digests via VK DM unless already sent, blocked, or safe mode is active. |
+
+## Safety and stability notes
+
+`/api/send-logs` supports download mode only; remote delivery returns
+`remote_delivery_disabled`. The bundle build is wrapped in a 60-second
+`Promise.race` timeout so the `logsInFlight` flag cannot get stuck.
+Wishlist purchase-order creation is safe-mode aware: blocked groups are
+not consumed and can be retried later.
+
+The `checkOrdersCache` in `server/http-server.js` (used by
+`/api/wishlist/check-customerorders`) is a bounded LRU with cap 1000 —
+re-inserting an entry refreshes its position, and the oldest entry is
+evicted at the cap.
+
+VK direct-message random IDs use `crypto.randomInt`, not `Math.random`.
+
+## Authentication
+
+When `API_TOKEN` is set in `.env`, all `/api/*` endpoints require the
+token. `/health` and static assets remain accessible (the latter only via
+the initial `?token=<value>` redirect that sets the cookie). See
+[[configuration-and-secrets]] for accepted token sources and
+[[runtime-architecture]] for the WS-upgrade Origin allowlist.
+
+## Related pages
+
+- [[runtime-architecture]]
+- [[logging-and-diagnostics]]
+- [[wishlist]]
+- [[reservation-digests]]
+- [[configuration-and-secrets]]

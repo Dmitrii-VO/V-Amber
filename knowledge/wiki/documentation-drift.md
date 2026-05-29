@@ -91,3 +91,62 @@ Wiki review after introducing `server/reservation-parser.js` and
   cover the obvious cases.
 - Quantity dashboard setting (per-lot or per-buyer cap), if `10` proves
   too generous or too tight in practice.
+
+## Project audit pass (2026-05-29)
+
+Audit-driven fixes landed in six commits (`82cda18` … `0f16ce3`).
+Relevant durable changes:
+
+**Security:**
+
+- `npm audit fix` upgraded `ws` and `protobufjs`. `npm audit` is now
+  clean.
+- `server/auth.js` provides optional shared-token auth — gated by
+  `API_TOKEN` in `.env`. Token accepted via Bearer header, `x-api-token`
+  header, `api_token` cookie, or `?token=` query. Constant-time compare
+  via `crypto.timingSafeEqual`. See [[configuration-and-secrets]].
+- WS `/ws/stt` upgrade now checks `Origin`. Default allowlist is loopback;
+  `ALLOWED_ORIGINS` env replaces it.
+- `HOST` env var added; defaults to `0.0.0.0` for Docker, can be set to
+  `127.0.0.1` for local-only access.
+
+**Reliability:**
+
+- `process.on("unhandledRejection")` and `process.on("uncaughtException")`
+  handlers in `server/index.js` log instead of letting the process drop
+  silently.
+- 60-second timeout on the `/api/send-logs` bundle build so `logsInFlight`
+  cannot stick.
+- VK random IDs now use `crypto.randomInt` (was `Math.random`).
+- `checkOrdersCache` is a bounded LRU (cap 1000) instead of an
+  unlimited Map.
+- `/health` now reports per-subsystem state (MoySklad cache, VK and
+  SpeechKit config presence, safe mode) and returns `503` on degradation.
+  See [[http-api]].
+- Product-code-cache refresh in `server/index.js` tracks consecutive
+  failures and logs `WARN product_code_cache_refresh_failing` at the third
+  failure in a row, with a recovery line on success — replacing the
+  previous silent `.catch(() => {})`.
+
+**Refactor — god modules:**
+
+- `server/ws-helpers.js` (new, 132 LOC) holds 13 pure helpers extracted
+  from `server/ws-server.js` (2010 → 1919 LOC).
+- `server/moysklad-helpers.js` (new, 107 LOC) holds 13 pure helpers
+  extracted from `server/moysklad.js` (1356 → 1264 LOC).
+- Deeper splits (reservation flow, comment polling, customer-order
+  pipeline) are deferred — they need integration test scaffolding on
+  WebSocket sessions first.
+
+**Tests:**
+
+- 56 new unit tests across `test/auth.test.js`,
+  `test/ws-helpers.test.js`, `test/moysklad-helpers.test.js`.
+- Full suite: 131/131 passing (up from 57).
+
+**Still open from the audit:**
+
+- No tests on `http-server.js`, `ws-server.js`, `vk.js`,
+  `speechkit-stream.js` — these are the highest-value modules for
+  integration tests (they move money / send messages).
+- Deeper split of `ws-server.js` and `moysklad.js` per domain.
