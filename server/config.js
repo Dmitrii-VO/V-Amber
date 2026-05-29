@@ -43,6 +43,7 @@ function getRequiredEnv(name) {
 
 export const config = {
   port: Number(process.env.PORT || 8080),
+  host: process.env.HOST?.trim() || "0.0.0.0",
   vk: resolveVkConfig(process.env),
   moysklad: {
     baseUrl: process.env.MOYSKLAD_BASE_URL?.trim() || "https://api.moysklad.ru/api/remap/1.2/",

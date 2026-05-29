@@ -230,10 +230,11 @@ async function main() {
     });
   });
 
-  httpServer.listen(config.port, () => {
+  httpServer.listen(config.port, config.host, () => {
     logger.info("http", "server_started", {
+      host: config.host,
       port: config.port,
-      url: `http://localhost:${config.port}`,
+      url: `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`,
       logFile: logger.filePath,
       version: packageVersion,
       safeMode: isSafeMode(),
@@ -247,6 +248,18 @@ async function main() {
     }, PRODUCT_CODE_CACHE_REFRESH_INTERVAL_MS).unref();
   });
 }
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("process", "unhandled_rejection", {
+    reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason,
+  });
+});
+
+process.on("uncaughtException", (error) => {
+  logger.error("process", "uncaught_exception", {
+    error: { message: error?.message, stack: error?.stack },
+  });
+});
 
 main().catch((error) => {
   logger.error("startup", "fatal", { error });

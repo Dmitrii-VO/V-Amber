@@ -3,13 +3,14 @@ import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, randomInt, createHash } from "node:crypto";
 import { logger } from "./logger.js";
 import { isSafeMode, setSafeMode } from "./safe-mode.js";
 import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 import { createReservationDigestLog } from "./reservation-digest-log.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
+const SEND_LOGS_TIMEOUT_MS = 60 * 1000;
 const WISHLIST_MAX_BODY = 256 * 1024;
 const DIGEST_MAX_BODY = 64 * 1024;
 const SUPPLIERS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -431,7 +432,7 @@ export function createStaticServer({
             const sent = await vk.sendDirectMessage({
               userId: client.viewerId,
               message: client.message,
-              randomId: Math.floor(Math.random() * 2147483647),
+              randomId: randomInt(2147483647),
             });
 
             if (sent?.safeMode) {
@@ -928,10 +929,15 @@ export function createStaticServer({
 
       logsInFlight = true;
       try {
-        const bundle = await buildLogBundle({
-          userNote, config,
-          wishlistStore, wishlistSubmissions, settingsStore,
-        });
+        const bundle = await Promise.race([
+          buildLogBundle({
+            userNote, config,
+            wishlistStore, wishlistSubmissions, settingsStore,
+          }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("log_bundle_timeout")), SEND_LOGS_TIMEOUT_MS).unref(),
+          ),
+        ]);
 
         const buffer = bundle.parts.length === 1
           ? bundle.parts[0].buffer
