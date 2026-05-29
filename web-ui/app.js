@@ -237,7 +237,6 @@ function setSessionPill(kind, label) {
 async function fetchProjectVersion() {
   try {
     const response = await fetch("/health");
-    if (!response.ok) return;
     const data = await response.json();
     if (data.version && elements.projectVersion) {
       elements.projectVersion.textContent = `v${data.version}`;
