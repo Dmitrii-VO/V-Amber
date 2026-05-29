@@ -11,44 +11,25 @@ import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
 import { createAuth } from "./auth.js";
+import {
+  sendJson,
+  getVkPublicationCommentId,
+  getVkApiErrorCode,
+  formatBroadcastDate,
+  normalizeReservationCode,
+  createBoundedIdSet,
+  addBoundedId,
+  hasUsableSalePrice,
+  getLotEffectivePrice,
+  getReservationReplyMessage,
+  getCommittedReservationCount,
+  isFatalCommentReadError,
+  RESERVATION_HISTORY_LIMIT,
+} from "./ws-helpers.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
 let nextDetectionId = 1;
-
-function sendJson(socket, payload) {
-  if (socket.readyState === 1) {
-    socket.send(JSON.stringify(payload));
-  }
-}
-
-function getVkPublicationCommentId(publication) {
-  const rawValue = typeof publication === "number"
-    ? publication
-    : publication?.comment_id ?? publication?.commentId ?? null;
-
-  if (typeof rawValue === "number" && Number.isFinite(rawValue) && rawValue > 0) {
-    return rawValue;
-  }
-
-  const parsed = Number.parseInt(String(rawValue || ""), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function getVkApiErrorCode(error) {
-  if (typeof error?.vkErrorCode === "number" && Number.isFinite(error.vkErrorCode)) {
-    return error.vkErrorCode;
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  const match = /VK API\s+(\d+):/i.exec(message);
-  if (!match) {
-    return null;
-  }
-
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 export function attachWsServer(httpServer, config, services = {}) {
   const wsServer = new WebSocketServer({ noServer: true });
@@ -150,12 +131,6 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function isLotPoisoned(lotSessionId) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
-    }
-
-    function formatBroadcastDate(value) {
-      const d = value instanceof Date ? value : new Date(value);
-      const p = (n) => String(n).padStart(2, "0");
-      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
     }
 
     function markLotPoisoned(lot, reason, error) {
@@ -264,30 +239,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       clearActiveState().catch(() => {});
     }
 
-    function normalizeReservationCode(code) {
-      return String(code || "").trim();
-    }
-
-    const RESERVATION_HISTORY_LIMIT = 200;
-
-    function createBoundedIdSet(initial) {
-      const set = new Set(Array.isArray(initial) ? initial : []);
-      while (set.size > RESERVATION_HISTORY_LIMIT) {
-        set.delete(set.values().next().value);
-      }
-      return set;
-    }
-
-    function addBoundedId(set, id) {
-      if (set.has(id)) {
-        set.delete(id);
-      }
-      set.add(id);
-      while (set.size > RESERVATION_HISTORY_LIMIT) {
-        set.delete(set.values().next().value);
-      }
-    }
-
     function ensureReservationState(lot) {
       if (!lot) {
         return null;
@@ -328,22 +279,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       const state = ensureReservationState(lot);
       state.events.push(event);
       state.events = state.events.slice(-20);
-    }
-
-    function hasUsableSalePrice(product) {
-      const salePrice = product?.salePrice;
-      return typeof salePrice === "number" && Number.isFinite(salePrice) && salePrice > 0;
-    }
-
-    function getLotEffectivePrice(lot) {
-      if (hasUsableSalePrice(lot?.product)) {
-        return lot.product.salePrice;
-      }
-
-      const voicePrice = lot?.product?.voicePrice;
-      return typeof voicePrice === "number" && Number.isFinite(voicePrice) && voicePrice > 0
-        ? voicePrice
-        : lot?.product?.salePrice;
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
@@ -390,41 +325,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       return true;
     }
 
-    function getReservationReplyMessage(event) {
-      if (event.status === "out_of_stock") {
-        if (event.wishlistEntryId) {
-          return `${event.viewerName}, к сожалению, не успели забронировать. Добавили вас в список желающих с сохранением скидки.`;
-        }
-
-        return `${event.viewerName}, к сожалению, не успели забронировать. Вас добавить в список желающих с сохранением скидки? Напишите "СПИСОК ${event.lotCode || ""}" для подтверждения.`;
-      }
-
-      if (event.status === "product_not_found") {
-        return "Товар не найден. Бронь не создана.";
-      }
-
-      if (event.status === "waitlist_pending") {
-        return "Бронь принята. Вы в очереди, подтвердим следующим сообщением.";
-      }
-
-      if (event.status === "reserved") {
-        return `${event.viewerName}, бронь подтверждена.`;
-      }
-
-      if (event.status === "reserved_appended") {
-        return `${event.viewerName}, бронь подтверждена. Товар добавлен в ваш заказ.`;
-      }
-
-      if (event.status === "order_failed") {
-        return "Не удалось обработать бронь. Напишите код товара ещё раз — можно так: \"03204\", \"бр 03204\", \"беру 03204\" или \"+03204\".";
-      }
-
-      return "";
-    }
-
-    function getCommittedReservationCount(state) {
-      return Math.max(0, state?.committedReservationCount || 0);
-    }
 
     function getRemainingAvailableStock(lot, state) {
       const availableStock = lot?.product?.availableStock;
@@ -889,19 +789,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
         void processReservationEvent(lot, nextWaitlistEvent);
       }
-    }
-
-    function isFatalCommentReadError(error) {
-      // Genuinely unrecoverable for THIS video: access denied, bad params,
-      // video missing, comments closed. Auth errors (code 5) are LOUD but
-      // recoverable on token refresh, so they no longer kill the poll loop.
-      const errorCode = getVkApiErrorCode(error);
-      if (errorCode !== null) {
-        return [15, 100, 801].includes(errorCode);
-      }
-
-      const message = error instanceof Error ? error.message : String(error);
-      return /video not found/i.test(message);
     }
 
     function startCommentPolling(lot) {

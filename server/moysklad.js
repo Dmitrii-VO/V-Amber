@@ -1,110 +1,18 @@
 import { logger } from "./logger.js";
-
-function buildBasicAuthHeader(login, password) {
-  return `Basic ${Buffer.from(`${login}:${password}`).toString("base64")}`;
-}
-
-function getAuthHeader(config) {
-  if (config.login && config.password) {
-    return buildBasicAuthHeader(config.login, config.password);
-  }
-
-  return "";
-}
-
-function buildApiUrl(baseUrl, path, searchParams) {
-  const url = new URL(path, `${baseUrl.replace(/\/$/, "")}/`);
-
-  for (const [key, value] of Object.entries(searchParams || {})) {
-    if (value !== undefined && value !== null && value !== "") {
-      url.searchParams.set(key, String(value));
-    }
-  }
-
-  return url;
-}
-
-function normalizeMoney(value) {
-  return typeof value === "number" ? value / 100 : null;
-}
-
-function normalizeQuantity(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function toMinorUnits(value) {
-  return typeof value === "number" ? Math.round(value * 100) : 0;
-}
-
-function getEffectiveSalePrice(activeLot, productCard) {
-  const salePrice = productCard?.salePrice ?? activeLot?.product?.salePrice;
-  if (typeof salePrice === "number" && Number.isFinite(salePrice) && salePrice > 0) {
-    return salePrice;
-  }
-
-  const voicePrice = productCard?.voicePrice ?? activeLot?.product?.voicePrice;
-  return typeof voicePrice === "number" && Number.isFinite(voicePrice) && voicePrice > 0
-    ? voicePrice
-    : salePrice;
-}
-
-function extractEntityIdFromHref(href, entity) {
-  const escaped = String(entity || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`/entity/${escaped}/([0-9a-f-]+)`, "i").exec(String(href || ""));
-  return match?.[1] || null;
-}
-
-function extractViewerIdFromText(text) {
-  const match = /viewerId\s*=\s*(\d+)/i.exec(String(text || ""));
-  return match?.[1] || null;
-}
-
-function formatBroadcastDate(value = new Date()) {
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) {
-    return formatBroadcastDate(new Date());
-  }
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-function buildBroadcastMarker(broadcastDate) {
-  return `#Эфир ${formatBroadcastDate(broadcastDate)}`;
-}
-
-function buildEntityMeta(baseUrl, entity, id) {
-  return {
-    meta: {
-      href: `${baseUrl.replace(/\/$/, "")}/entity/${entity}/${id}`,
-      type: entity,
-      mediaType: "application/json",
-    },
-  };
-}
-
-function buildProductSnapshot(product, stockRow) {
-  const salePrice = normalizeMoney(stockRow?.salePrice)
-    ?? normalizeMoney(product.salePrices?.[0]?.value);
-  const stock = typeof stockRow?.stock === "number" ? stockRow.stock : null;
-  const reserve = typeof stockRow?.reserve === "number" ? stockRow.reserve : null;
-  const availableStock = typeof stockRow?.quantity === "number"
-    ? stockRow.quantity
-    : (stock !== null && reserve !== null ? stock - reserve : null);
-
-  return {
-    id: product.id,
-    code: product.code,
-    name: product.name,
-    pathName: product.pathName || stockRow?.folder?.name || "",
-    salePrice,
-    stock,
-    reserve,
-    availableStock,
-    imageHref: stockRow?.image?.meta?.href || "",
-    imageFilename: stockRow?.image?.filename || "product.jpg",
-  };
-}
+import {
+  getAuthHeader,
+  buildApiUrl,
+  normalizeMoney,
+  normalizeQuantity,
+  toMinorUnits,
+  getEffectiveSalePrice,
+  extractEntityIdFromHref,
+  extractViewerIdFromText,
+  formatBroadcastDate,
+  buildBroadcastMarker,
+  buildEntityMeta,
+  buildProductSnapshot,
+} from "./moysklad-helpers.js";
 
 export function createMoySkladClient(config, options = {}) {
   const authHeader = getAuthHeader(config || {});
