@@ -685,3 +685,23 @@ a { color: inherit; }
   background: rgba(251, 191, 36, 0.08);
   border-color: rgba(251, 191, 36, 0.3);
 }
+
+/* Ручной ввод артикула на активном лоте (#14). */
+.manual-code {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-1, 6px);
+}
+.manual-code__input {
+  width: 110px;
+  padding: 4px 8px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2, 6px);
+}
+.manual-code__input:focus {
+  outline: none;
+  border-color: var(--accent, #60a5fa);
+}

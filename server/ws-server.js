@@ -1928,6 +1928,94 @@ export function attachWsServer(httpServer, config, services = {}) {
           return;
         }
 
+        if (payload.type === "manualCode") {
+          // Ручной ввод артикула на активном лоте (#14). Закрывает разрыв,
+          // когда SpeechKit подтвердил НЕ тот код: оператор добивает код с
+          // клавиатуры, а бэкенд ведёт себя как при голосовом подтверждении.
+          // Конструируем detection напрямую и идём через
+          // handleConfirmedDetection — НЕ через detectArticle, поэтому
+          // YandexGPT-фоллбек физически недостижим (см.
+          // knowledge/wiki/deferred-operator-features.md #14, FM#4).
+          //
+          // Вариант А: ручной ввод доступен ТОЛЬКО при активном STT-стриме.
+          // Без него весь жизненный цикл лота (поллер VK, журнал сессии,
+          // закрытие) не на месте — кнопка в UI заблокирована, но дублируем
+          // проверку на сервере.
+          if (activeRunId === null) {
+            sendJson(websocket, {
+              type: "warning",
+              message: "Запустите распознавание перед ручным вводом кода",
+            });
+            return;
+          }
+
+          const code = String(payload.code ?? "").trim();
+          if (!code) {
+            sendJson(websocket, {
+              type: "warning",
+              message: "Введите код товара",
+            });
+            return;
+          }
+
+          // Валидация по каталогу: все товары обязаны быть в базе МойСклад.
+          // Если кэш кодов недоступен/пуст — блокируем, иначе по
+          // непроверенному коду откроется лот и создастся ошибочная бронь.
+          const knownCodes = productCodeCache?.getCodes?.() || null;
+          if (!knownCodes || knownCodes.size === 0) {
+            logger.warn("article", "manual_code_rejected_no_catalog", {
+              connectionId,
+              code,
+              catalogSize: knownCodes?.size ?? null,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: "Каталог товаров не загружен — ручной ввод недоступен",
+            });
+            return;
+          }
+          if (!knownCodes.has(code)) {
+            logger.warn("article", "manual_code_rejected_unknown", {
+              connectionId,
+              code,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: `Код ${code} не найден в каталоге МойСклад`,
+            });
+            return;
+          }
+
+          const detectionId = `det-manual-${activeRunId}-${nextDetectionId++}`;
+          const detection = {
+            transcript: `manual:${code}`,
+            matchedTrigger: false,
+            status: "confirmed",
+            candidates: [{ code, source: "manual", confidence: 1, knownCode: true }],
+            chosen: { code, source: "manual", confidence: 1 },
+            detectionId,
+          };
+
+          logger.info("article", "manual_code_submitted", {
+            connectionId,
+            code,
+            detectionId,
+            activeLotCode: activeLot?.code || null,
+          });
+
+          // Помечаем как активную детекцию — поздний голосовой final с другим
+          // кодом инвалидирует этот manual через expectedDetectionId, и
+          // наоборот (см. concurrency-gate в handleConfirmedDetection).
+          activeDetectionActionId = detectionId;
+          await handleConfirmedDetection(detection, code, "manual", {
+            runId: activeRunId,
+            enforceActiveRun: true,
+            expectedDetectionId: detectionId,
+            voicePrice: null,
+          });
+          return;
+        }
+
         if (payload.type === "closeLot") {
           // Operator manually closes the active lot — same path as voice
           // re-detection / stream_stop, but without ending the session.
