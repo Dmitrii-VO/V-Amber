@@ -112,6 +112,31 @@ function buildConfig(overrides = {}) {
   };
 }
 
+function createSessionLogMock() {
+  const noop = () => {};
+  return {
+    getFilePath: () => null,
+    getJsonl: () => null,
+    logSafemodeToggled: noop,
+    logStateSnapshot: noop,
+    logReservationWaitlist: noop,
+    logReservationOutOfStock: noop,
+    logOrderCreated: noop,
+    logWaitlistPromoted: noop,
+    logVkComment: noop,
+    logReservation: noop,
+    logOrphanWaitlist: noop,
+    logWaitlistMigratedToWishlist: noop,
+    logDiscount: noop,
+    logLotOpened: noop,
+    logSessionStart: noop,
+    logTranscriptFinal: noop,
+    logDiscountSkipped: noop,
+    logSessionEnd: noop,
+    flush: async () => {},
+  };
+}
+
 // Поднимает сервер. Возвращает { url, vk, moysklad, productCodeCache,
 // getLastSpeechKitSession, connect, close }.
 export async function startHarness({
@@ -147,6 +172,9 @@ export async function startHarness({
     moysklad,
     productCodeCache,
     createSpeechKitSession,
+    createSessionLog: createSessionLogMock,
+    saveActiveState: () => {},
+    clearActiveState: async () => {},
     packageVersion: "test",
   });
 

@@ -51,6 +51,9 @@ export function attachWsServer(httpServer, config, services = {}) {
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
+  const createSessionLogImpl = services.createSessionLog || createSessionLog;
+  const saveActiveStateImpl = services.saveActiveState || saveActiveState;
+  const clearActiveStateImpl = services.clearActiveState || clearActiveState;
   // Seam для тестов: позволяет подменить реальную gRPC-сессию SpeechKit
   // фейком, который скармливает скриптовые транскрипты через onFinal без
   // сети. Прод всегда идёт дефолтным путём (new SpeechKitStreamingSession).
@@ -129,7 +132,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
   wsServer.on("connection", (websocket) => {
     const connectionId = `ws-${nextConnectionId++}`;
-    const sessionLog = createSessionLog();
+    const sessionLog = createSessionLogImpl();
     let session = null;
     let activeLot = null;
     let lastDetection = null;
@@ -206,7 +209,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // время эфира не «терял» очередь брони. Запись атомарна (tmp+rename)
       // и дебаунсится внутри state-store. На graceful shutdown файл удаляется.
       if (activeLot?.lotSessionId) {
-        saveActiveState({
+        saveActiveStateImpl({
           activeLot,
           sessionFilePath: sessionLog.getFilePath(),
           connectionId,
@@ -266,7 +269,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // Граcеful shutdown — стирать persisted state, чтобы следующий старт
       // не подхватил его как «брошенный после краша». Fire-and-forget:
       // ошибка disk-IO не должна блокировать остановку сессии.
-      clearActiveState().catch(() => {});
+      clearActiveStateImpl().catch(() => {});
     }
 
     function ensureReservationState(lot) {
