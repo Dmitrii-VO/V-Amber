@@ -31,6 +31,15 @@ let nextConnectionId = 1;
 let nextLotSessionId = 1;
 let nextDetectionId = 1;
 
+// Сброс модульных счётчиков id между тестами: иначе порядок прогона течёт
+// в lotSessionId/detectionId и снапшоты становятся хрупкими. Прод-код это
+// не вызывает (счётчики живут весь процесс).
+export function __resetIdCountersForTests() {
+  nextConnectionId = 1;
+  nextLotSessionId = 1;
+  nextDetectionId = 1;
+}
+
 export function attachWsServer(httpServer, config, services = {}) {
   const wsServer = new WebSocketServer({ noServer: true });
   // moysklad/vk должны быть уже обёрнуты wrapWithSafeMode в server/index.js,
@@ -42,6 +51,12 @@ export function attachWsServer(httpServer, config, services = {}) {
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
+  // Seam для тестов: позволяет подменить реальную gRPC-сессию SpeechKit
+  // фейком, который скармливает скриптовые транскрипты через onFinal без
+  // сети. Прод всегда идёт дефолтным путём (new SpeechKitStreamingSession).
+  const createSpeechKitSession = services.createSpeechKitSession
+    || ((speechkitConfig, handlers, meta) =>
+      new SpeechKitStreamingSession(speechkitConfig, handlers, meta));
 
   function broadcastWishlistCount(count) {
     const payload = JSON.stringify({ type: "wishlist_count_changed", count });
@@ -1851,7 +1866,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               logger.info("speechkit", "stream_ended", { connectionId, autoReconnect: true });
               session?.close();
               try {
-                session = new SpeechKitStreamingSession(config.speechkit, speechKitHandlers, { connectionId });
+                session = createSpeechKitSession(config.speechkit, speechKitHandlers, { connectionId });
                 logger.info("speechkit", "stream_auto_reconnected", { connectionId });
                 sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
               } catch (error) {
@@ -1870,7 +1885,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
             },
           };
-          session = new SpeechKitStreamingSession(config.speechkit, speechKitHandlers, { connectionId });
+          session = createSpeechKitSession(config.speechkit, speechKitHandlers, { connectionId });
 
           resetDetectionState();
           emitState();
