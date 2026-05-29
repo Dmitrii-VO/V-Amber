@@ -17,7 +17,12 @@ function parseCookies(header) {
     if (idx < 0) continue;
     const key = part.slice(0, idx).trim();
     const value = part.slice(idx + 1).trim();
-    if (key) out[key] = decodeURIComponent(value);
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(value);
+    } catch {
+      // Ignore malformed cookie values instead of failing the whole request.
+    }
   }
   return out;
 }

@@ -1,187 +1,75 @@
-# Repository notes
+# Repository instructions
 
-Repo no longer spec-only. Current tree contains runnable MVP prototype:
-- `server/` Node.js backend on ESM modules.
-- `web-ui/` static browser UI for microphone control and session status.
-- `package.json` with local Node.js runtime command: `npm start`.
-- `Dockerfile`, `docker-compose.yml`, and `start-docker.command` for Docker
-  Desktop based macOS startup.
-- `start.command` for local macOS Node.js startup and `update.command` for
-  one-click GitHub Release updates.
-- `.env` for secrets, `logs/` for runtime logs, `todo.md` for product notes.
+Read [knowledge/wiki/index.md](knowledge/wiki/index.md) before non-trivial
+project work. Keep durable project knowledge in the Obsidian wiki instead of
+expanding this file with reference material.
 
-Do not treat `node_modules/`, `logs/`, or `.env` as source files.
-`Amberry_Voice_Technical_Specification.md`, `todo.md`, `PLAN.md`,
-`AGENTS.md`, `CLAUDE.md`, and `V-Amber.zip` are ignored by `.gitignore` in
-this local workspace, but they are still active working documents when the user
-asks to update them.
+## Source of truth
 
-# Source of truth
+- `Amberry_Voice_Technical_Specification.md` is the product source of truth for
+  scope, business rules, and Russian terminology.
+- Current code is the source of truth for implemented behavior.
+- If docs and code disagree, trust current code for implementation details and
+  record the mismatch in [documentation-drift](knowledge/wiki/documentation-drift.md).
+- Preserve product terms and external API names exactly when adding code or
+  docs.
 
-`Amberry_Voice_Technical_Specification.md` remains product source of truth for
-scope, business rules, and terminology.
+## Current runtime
 
-When spec conflicts with executable code or verified runtime behavior, trust
-code for current implementation details and update docs accordingly.
+V-Amber is a runnable Node.js MVP, not a spec-only repository. The maintained
+architecture map is in [repo-map](knowledge/wiki/repo-map.md) and
+[runtime-architecture](knowledge/wiki/runtime-architecture.md).
 
-Spec language is Russian. Preserve product terms and external API names exactly
-when adding code or docs.
+Do not treat these as source files:
 
-# Current implementation
+- `node_modules/`
+- `logs/`
+- `.env`
 
-Current stack in repo:
-- JavaScript on Node.js, not TypeScript yet.
-- Browser Web UI served by local HTTP server.
-- WebSocket audio streaming from browser to backend.
-- Yandex SpeechKit Streaming API integration for realtime STT.
-- Article extraction from transcript with regex/number-word parsing and
-  optional MoySklad product-code cache hints.
-- Voice discount detection and VK discount publication.
-- MoySklad integration for product lookup and customer order reservation.
-- VK integration for live comment polling, lot-card publishing, and reservation
-  handling.
-- Reservation flow checks the active lot's `product.availableStock` against
-  already creating/confirmed reservation events before writing to MoySklad, so
-  later `бронь` comments do not oversell the current lot.
-- Safe mode that blocks external write actions while still logging detected
-  events.
-- JSON server logging plus per-session Markdown logs under `logs/sessions/`.
-- Docker packaging for current Node.js MVP, with `logs/` mounted from the host.
+## Verified commands
 
-Main entrypoints and modules:
-- `server/index.js`: starts HTTP server.
-- `server/http-server.js`: serves `web-ui/` assets, `/health`, and
-  `/api/safe-mode`.
-- `server/ws-server.js`: WebSocket session flow, active lot state, VK comments,
-  reservations, discounts, safe mode broadcasts.
-- `server/speechkit-stream.js`: SpeechKit gRPC streaming session.
-- `server/article-extractor.js`: spoken article parsing.
-- `server/discount-detector.js`: spoken discount parsing.
-- `server/moysklad.js`: MoySklad API client.
-- `server/product-code-cache.js`: in-memory MoySklad product-code cache used
-  to disambiguate spoken article codes from sizes/prices.
-- `server/vk.js`: VK publishing, comment polling, URL validation, and VK API
-  throttling/backoff for `VK API 6`.
-- `server/config.js`: environment-driven config.
-- `server/safe-mode.js`: process-wide safe mode state and write guards.
-- `server/session-log.js`: per-stream Markdown session log writer.
-- `server/logger.js`: JSON console/file logger.
-- `server/version-check.js`: startup check against GitHub Releases that prints
-  a console banner when local `package.json` version is behind the latest tag.
-  Disabled by `DISABLE_UPDATE_CHECK=1`.
-- `server/log-bundle.js`: collects `server.log` (+ rotated copies) and
-  `logs/sessions/*.md` into a ZIP with a `manifest.json` (install ID,
-  version, integrations, user note). Splits >40 MB into sequential parts.
-- `server/install-id.js`: persists a per-installation UUID in
-  `logs/install-id` for deduplicating bug reports.
-- `server/zip-writer.js`: dependency-free ZIP archive builder (deflate +
-  CRC32) used by the log bundle.
-- `scripts/backfill-vk-id-dry-run.js`: dry-run diagnostic script for MoySklad
-  counterparties. It finds the `VK ID` attribute, counts populated values,
-  detects `viewerId=` candidates in descriptions, and reports duplicate groups
-  without writing changes.
-- `.github/workflows/release.yml`: on push to `main`, auto-bumps patch version
-  (or honors a manual bump in `package.json`) and publishes the matching
-  `vX.Y.Z` GitHub Release. Skips itself on commits containing `[skip ci]`.
-- `Dockerfile`: Node 20 production image for the MVP.
-- `docker-compose.yml`: local one-service runtime, `.env` injection, port
-  mapping, and `logs/` bind mount.
-- `start-docker.command`: macOS double-click Docker launcher with first-run
-  minimal `.env` setup.
-- `start.command`: macOS double-click Node.js launcher with first-run `.env`
-  setup.
-- `update.command`: macOS double-click updater that downloads the latest GitHub
-  Release, preserves `.env`, `logs/`, and `node_modules/`, and runs
-  `npm install`.
+Use commands backed by repository config:
 
-# Verified commands
+```bash
+npm install
+npm start
+npm test
+docker compose --env-file .env up --build
+```
 
-Only use commands backed by repo config:
-- `npm start` runs `node server/index.js`.
-- `docker compose --env-file .env up --build` builds and runs the Dockerized
-  MVP.
+`npm start` runs `node server/index.js`. `npm test` runs Node's built-in test
+runner over `test/**/*.test.js`. More command notes live in
+[operational-commands](knowledge/wiki/operational-commands.md).
 
-`npm install` is valid for installing dependencies from `package-lock.json`, but
-it is not a verification command.
+## Working rules
 
-No verified test, lint, standalone build, Redis, or SQLite migration commands
-exist in repo yet. Do not invent them. The only CI in the repo is the auto
-release workflow described above; do not add unrelated jobs to it.
+- Prefer minimal changes inside existing modules and follow current JavaScript
+  patterns unless the user asks for a refactor.
+- Do not assume planned architecture from the specification is implemented.
+  Redis, SQLite, TypeScript, and Python audio-driver code are not part of the
+  current runtime.
+- Before adding new commands to docs, verify them from `package.json` or other
+  executable config.
+- Before changing reservation behavior, trace `activeLot`,
+  `primaryReservation`, waitlist event status, `customerOrderSessionVersion`,
+  and safe mode handling in `server/ws-server.js`.
+- Before changing article, price, or discount parsing, check rule-based parsing
+  and MoySklad product-code cache behavior.
+- When changing external write behavior, keep safe mode blocking explicit.
 
-# Release process
+## Obsidian workflow
 
-Versions follow `package.json` `version` ↔ git tag `vX.Y.Z`. The release
-workflow runs on every push to `main`:
+Use the Amberry39-style vault structure:
 
-- For routine commits, it bumps patch automatically and tags the result.
-- For minor or major bumps, edit `version` in `package.json` in the same push;
-  the workflow will use that value verbatim.
+- `knowledge/raw/` stores append-only source material and redacted evidence.
+- `knowledge/wiki/` stores maintained wiki pages.
+- `knowledge/wiki/index.md` is the wiki entry point.
+- `knowledge/wiki/log.md` is the maintenance record.
+- `templates/` stores reusable Obsidian note templates.
 
-The startup banner in `server/version-check.js` relies on this convention — if
-the workflow is disabled or tags are created out of band, the check will
-silently no-op rather than fail the server.
+When durable knowledge is discovered, update the relevant wiki page and append
+a short entry to [log](knowledge/wiki/log.md). Keep maintained wiki filenames
+lowercase and kebab-cased.
 
-# Environment and runtime assumptions
-
-Runtime depends on `.env` values. `server/config.js` currently requires at
-least `YANDEX_SPEECHKIT_API_KEY` at startup.
-
-Several integrations are optional at code level and degrade to skipped actions
-when not configured, but STT startup is not optional.
-
-Logs write to `logs/server.log`; stream session summaries write to
-`logs/sessions/*.md`.
-
-Docker runtime uses the host `.env` file and bind-mounts host `./logs` to
-container `/app/logs`. Browser microphone access still happens in the host
-browser through `http://localhost:<PORT>`, not inside the container.
-
-HTTP surface:
-- `GET /` serves `web-ui/index.html`.
-- `GET /health` returns `{ ok: true }`.
-- `GET /api/safe-mode` returns current safe mode state.
-- `POST /api/safe-mode` accepts JSON `{ "enabled": true|false }`.
-- `GET /api/send-logs/preview` returns the list of files that would be
-  included in the diagnostic bundle.
-- `POST /api/send-logs` accepts JSON `{ "userNote": "...", "download": true }`
-  and streams the archive back as `application/zip` for the operator to save
-  locally.
-- `POST /api/product-codes/refresh` refreshes the in-memory product-code cache
-  from MoySklad.
-- `GET /api/product-codes/status` returns product-code cache status.
-
-Web UI sends microphone PCM frames over WebSocket. It also lets the operator
-choose a microphone, enter or persist a VK live video URL, start/stop streaming,
-view transcript/session state, and toggle safe mode.
-
-# Product context
-
-Project goal unchanged: voice-assisted live-commerce workflow for VK.
-
-Implemented or partially implemented integrations in code:
-- Yandex SpeechKit Streaming API.
-- VK API for live comment read/publish flow.
-- MoySklad API for product lookup and reservation orders.
-
-# Working rules for future sessions
-
-Prefer minimal changes inside existing modules. Repo already has working JS
-implementation patterns; follow them unless user asks for refactor.
-
-Do not assume planned architecture from spec is already present. In
-particular, Redis, SQLite, TypeScript, and Python audio-driver code are
-described in spec but not present in this repo state. Docker Compose is present
-only as a local packaging/runtime wrapper for the current Node.js MVP.
-
-Before adding new commands to this file, verify them from `package.json` or
-other executable config first.
-
-Before changing reservation behavior, trace `activeLot`, `primaryReservation`,
-waitlist event status, `customerOrderSessionVersion`, and safe mode handling in
-`server/ws-server.js`.
-
-Before changing article or discount parsing, check both regex/number-word logic
-and MoySklad product-code cache behavior where applicable.
-
-If docs or code drift from spec later, keep this file aligned with verified
-repository state and note missing planned pieces explicitly.
+Do not store secrets, tokens, credentials, or private customer data in the
+wiki. Use redacted examples and references to secure local files instead.

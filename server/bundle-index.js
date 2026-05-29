@@ -176,6 +176,22 @@ export function generateIndexMd({
   const sessionOnlyIncidents = sessionIncidents.filter((i) => !knownKeys.has(`${i.productCode}|${i.viewerName}`));
   const allIncidents = [...orderFailedFromWishlist, ...sessionOnlyIncidents];
 
+  // Фактические wishlist-add'ы из events.jsonl, разбитые по триггеру. Раньше
+  // INDEX.md писал "N out_of_stock → попали в wishlist", опираясь только на
+  // счётчик OoS-отказов из сессий. На деле часть отказов в wishlist не
+  // попадает (например, если сервер не рестартовали после фикса, либо
+  // wishlistStore.addFromOutOfStock вернул null из-за отсутствия viewerId).
+  // Считаем по факту — по записям kind:"added" в events.jsonl.
+  const wishlistAddRecords = wishlistRecords.filter((r) => r.kind === "added");
+  const wishlistAddsByTrigger = wishlistAddRecords.reduce((acc, r) => {
+    const key = r.trigger || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const wishlistAddsFromOos =
+    (wishlistAddsByTrigger.out_of_stock_reservation || 0)
+    + (wishlistAddsByTrigger.out_of_stock || 0);
+
   // Агрегаты по всем сессиям.
   const totals = sessionSummaries.reduce((acc, s) => {
     const x = s.summary;
@@ -229,8 +245,16 @@ export function generateIndexMd({
   lines.push(`- **Сессий:** ${sessions.length}`);
   lines.push(`- **Лотов открыто:** ${totals.lotsOpened}`);
   lines.push(`- **Броней принято:** ${totals.reservationsAccepted}`);
-  lines.push(`- **Out of stock:** ${totals.outOfStock} → попали в wishlist при первом отказе`);
+  lines.push(`- **Out of stock отказов:** ${totals.outOfStock} (в wishlist попало: ${wishlistAddsFromOos})`);
   lines.push(`- **Waitlist → Wishlist на закрытии лотов:** ${totals.waitlistMigrated}`);
+  const wishlistAddsTotal = wishlistAddRecords.length;
+  if (wishlistAddsTotal > 0) {
+    const breakdown = Object.entries(wishlistAddsByTrigger)
+      .sort((a, b) => b[1] - a[1])
+      .map(([trigger, count]) => `${trigger}=${count}`)
+      .join(", ");
+    lines.push(`- **Wishlist добавлений всего:** ${wishlistAddsTotal} (${breakdown})`);
+  }
   lines.push(`- **Вызовов МойСклад:** ${totals.moyskladCalls} (ошибок: ${totals.moyskladErrors})`);
   lines.push(`- **Purchase orders создано:** ${totals.purchaseOrdersOk}, ошибок: ${totals.purchaseOrdersFailed}`);
   lines.push(`- **Инциденты order_failed (всего):** ${totals.incidents}`);

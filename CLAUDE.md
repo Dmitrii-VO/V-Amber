@@ -1,81 +1,35 @@
-# CLAUDE.md
+# Claude Code instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Use [AGENTS.md](AGENTS.md) as the authoritative operating guide. Read
+[knowledge/wiki/index.md](knowledge/wiki/index.md) before non-trivial project
+work, and update the wiki when you discover durable project knowledge.
 
-See [AGENTS.md](AGENTS.md) for the authoritative repository notes: verified commands, current implementation state, module map, product context, and working rules for AI sessions. This file extends those notes with Claude Code-specific guidance only.
-
-## Running the project
+## Quick start
 
 ```bash
-npm install     # install dependencies from package-lock.json when needed
-npm start       # node server/index.js - the only verified runtime command
-docker compose --env-file .env up --build  # Docker Desktop runtime
+npm install
+npm start
+npm test
+docker compose --env-file .env up --build
 ```
 
-Open `http://localhost:8080` in a browser after starting. Select a microphone and click Start.
+Open `http://localhost:8080` after starting. `YANDEX_SPEECHKIT_API_KEY` is
+required in `.env`; VK and MoySklad degrade when not configured.
 
-Mandatory at startup: `YANDEX_SPEECHKIT_API_KEY` in `.env`. Missing it crashes on launch. VK and MoySklad degrade gracefully when not configured.
+macOS launchers are documented in
+[macos-launchers](knowledge/wiki/macos-launchers.md). The HTTP surface is in
+[http-api](knowledge/wiki/http-api.md), release behavior is in
+[release-process](knowledge/wiki/release-process.md), and architecture is in
+[runtime-architecture](knowledge/wiki/runtime-architecture.md).
 
-For macOS one-click startup, use `start.command` for local Node.js or
-`start-docker.command` for Docker Desktop. Use `update.command` to install the
-latest GitHub Release while preserving `.env`, `logs/`, and `node_modules/`.
+## Claude-specific notes
 
-## Architecture in one paragraph
-
-Most business orchestration lives in `server/ws-server.js`. It owns the active-lot state machine, VK comment polling, reservation queue, active-lot stock guard, safe mode broadcasts, discount application, and per-session logging. The browser (`web-ui/app.js`) streams raw PCM audio over WebSocket; the server forwards it to Yandex SpeechKit via gRPC (`speechkit-stream.js`), extracts product article codes from final transcripts (`article-extractor.js`) with optional MoySklad product-code cache hints, detects spoken discounts (`discount-detector.js`), looks up inventory in MoySklad, and publishes lot cards to VK. Runtime state is in-memory and is lost on restart; durable output is limited to `logs/server.log` and `logs/sessions/*.md`.
-
-## Key flows
-
-| Flow | Entry point |
-|------|------------|
-| New lot opened (voice code detected) | `ws-server.js` → `article-extractor.js` → `moysklad.js` → `vk.js` |
-| Reservation received (VK "бронь" comment) | `vk.js` poll → `ws-server.js` → `moysklad.js` |
-| Discount command (voice) | `discount-detector.js` → `ws-server.js` → `vk.js` |
-| Product-code cache refresh | `web-ui/app.js` → `/api/product-codes/refresh` → `moysklad.js` |
-| Safe mode toggle | `web-ui/app.js` or `/api/safe-mode` → `safe-mode.js` write guards |
-
-Reservation writes must not exceed the active lot's `product.availableStock`.
-Count statuses `creating_order`, `reserved`, and `reserved_appended` before any
-MoySklad write. If stock is exhausted, mark the event `out_of_stock` and reply
-in VK without creating or appending a customer order.
-
-## HTTP surface
-
-| Route | Behavior |
-|-------|----------|
-| `GET /` | Serves `web-ui/index.html` |
-| `GET /health` | Returns `{ ok: true }` |
-| `GET /api/safe-mode` | Returns current safe mode state |
-| `POST /api/safe-mode` | Accepts `{ "enabled": true|false }` |
-| `GET /api/send-logs/preview` | Lists files that would be included in the ZIP |
-| `POST /api/send-logs` | Returns ZIP bundle for download with `{download:true}` |
-| `POST /api/product-codes/refresh` | Refreshes MoySklad product-code cache |
-| `GET /api/product-codes/status` | Returns product-code cache status |
-
-## Configuration
-
-All tunable behavior is in `server/config.js` (loaded from `.env`). Add new feature flags there; never hardcode values that operators may need to adjust.
-
-Docker Compose also reads the same `.env` file. It maps `${PORT:-8080}` from the
-host to the same port in the container and bind-mounts `./logs` to `/app/logs`.
-
-## Russian domain terms
-
-Preserve these exactly in code, logs, and comments:
-
-- **Артикул** — product article/code (the number spoken during livestream)
-- **Лот** — active lot (product + session context)
-- **Бронь** — reservation keyword detected in VK comments
-- **Оператор** — livestream host
-- **МойСклад** — external inventory/CRM service
-
-## Caveats for code changes
-
-- No test suite exists. Verify changes by running `npm start` and exercising the flow manually.
-- Before changing lot lifecycle logic in `ws-server.js`, trace `activeLot`, `primaryReservation`, waitlist event status, `customerOrderSessionVersion`, and safe mode behavior through the full reservation flow. Race conditions have caused bugs here before.
-- Before changing reservation capacity logic, verify that waitlist processing
-  still subtracts already creating/confirmed events from `product.availableStock`.
-- `article-extractor.js` has a regex/number-word path plus optional known-code hints from MoySklad cache.
-- `safe-mode.js` wraps external write methods for MoySklad and VK. Keep write-blocking behavior explicit when adding new side effects.
-- `todo.md` tracks open bugs and planned features (Russian); check it before implementing adjacent features.
-- Versioning is automated: pushing to `main` triggers `.github/workflows/release.yml`, which patch-bumps `package.json` and publishes a matching `vX.Y.Z` release. For minor/major bumps, edit `version` in the same commit. The startup check in `server/version-check.js` uses the latest release tag to detect outdated installs.
+- Keep this file short. Put reference material in `knowledge/wiki/`.
+- Preserve Russian domain terms from the specification: `Артикул`, `Лот`,
+  `Бронь`, `Оператор`, `МойСклад`.
+- Before changing lot lifecycle or reservations, follow the guardrails in
+  [reservation-flow](knowledge/wiki/reservation-flow.md).
+- Before changing speech parsing, check
+  [voice-price-parsing](knowledge/wiki/voice-price-parsing.md),
+  `server/article-extractor.js`, `server/price-detector.js`, and
+  `server/discount-detector.js`.

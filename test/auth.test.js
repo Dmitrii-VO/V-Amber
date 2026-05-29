@@ -68,6 +68,17 @@ test("URL-encoded cookie value authenticates", () => {
   );
 });
 
+test("malformed cookie value is ignored without throwing", () => {
+  const auth = createAuth({ API_TOKEN: "secret" });
+  assert.equal(
+    auth.isRequestAuthenticated(
+      makeReq({ cookie: "api_token=%; other=value" }),
+      new URL("http://x/"),
+    ),
+    false,
+  );
+});
+
 test("query token authenticates", () => {
   const auth = createAuth({ API_TOKEN: "secret" });
   assert.equal(

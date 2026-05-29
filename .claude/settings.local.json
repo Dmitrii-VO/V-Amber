@@ -93,7 +93,16 @@
       "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"download\":true}' -o ./bundle2.zip http://localhost:8080/api/send-logs)",
       "Bash(powershell -Command \"Expand-Archive bundle2.zip -DestinationPath ./bundle2 -Force; Get-Content bundle2/INDEX.md | Select-Object -First 30\")",
       "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"entryIds\":[\"a7d1a557-f159-4276-b0d4-78511152a1c5\"]}' http://localhost:8080/api/wishlist/check-customerorders)",
-      "Bash(powershell -Command \"Get-Content logs/server.log -Tail 6\")"
+      "Bash(powershell -Command \"Get-Content logs/server.log -Tail 6\")",
+      "Bash(dir /B /S \"v-amber-logs-2026-05-24*\")",
+      "Bash(where /R D:\\\\myprojects\\\\V-Amber v-amber-logs-2026-05-24*)",
+      "Bash(cd /d D:\\\\myprojects\\\\V-Amber\\\\logs)",
+      "Bash(mkdir _ext1 _ext2)",
+      "Bash(powershell -Command \"Expand-Archive -Force 'v-amber-logs-2026-05-24T17-23-08-512Z.zip' '_ext1'; Expand-Archive -Force 'v-amber-logs-2026-05-24T17-47-27-989Z.zip' '_ext2'\")",
+      "Bash(dir _ext1 _ext2)",
+      "PowerShell(New-Item *)",
+      "Bash(git *)",
+      "Bash(node *)"
     ]
   }
 }

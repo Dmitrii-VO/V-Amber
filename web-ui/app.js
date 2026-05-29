@@ -851,6 +851,7 @@ async function startStreaming() {
 
   const setupGeneration = state.setupGeneration + 1;
   state.setupGeneration = setupGeneration;
+  setLifecycle("starting");
 
   try {
     try {
@@ -867,11 +868,9 @@ async function startStreaming() {
       );
     }
 
-    if (state.setupGeneration !== setupGeneration || state.lifecycle !== "idle") {
+    if (state.setupGeneration !== setupGeneration || state.lifecycle !== "starting") {
       return;
     }
-
-    setLifecycle("starting");
 
     state.chunksSent = 0;
     state.bytesSent = 0;
