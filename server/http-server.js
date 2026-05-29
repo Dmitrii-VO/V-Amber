@@ -16,6 +16,7 @@ const WISHLIST_MAX_BODY = 256 * 1024;
 const DIGEST_MAX_BODY = 64 * 1024;
 const SUPPLIERS_CACHE_TTL_MS = 5 * 60 * 1000;
 const CHECK_ORDERS_CACHE_TTL_MS = 10 * 60 * 1000;
+const CHECK_ORDERS_CACHE_MAX = 1000;
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = normalize(join(__dirname, "..", "web-ui"));
@@ -215,7 +216,15 @@ export function createStaticServer({
     return entry.result;
   }
   function setCachedCheck(key, result) {
+    // LRU-стиль на Map: повторная установка двигает ключ в конец;
+    // при переполнении удаляем самый старый. Это защищает от роста Map
+    // при долгой работе с тысячами уникальных (counterparty, product) пар.
+    if (checkOrdersCache.has(key)) checkOrdersCache.delete(key);
     checkOrdersCache.set(key, { result, expiresAt: Date.now() + CHECK_ORDERS_CACHE_TTL_MS });
+    if (checkOrdersCache.size > CHECK_ORDERS_CACHE_MAX) {
+      const oldestKey = checkOrdersCache.keys().next().value;
+      if (oldestKey !== undefined) checkOrdersCache.delete(oldestKey);
+    }
   }
 
   async function loadSuppliersCached() {
@@ -269,8 +278,30 @@ export function createStaticServer({
     }
 
     if (pathname === "/health") {
-      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true, version: packageVersion || null }));
+      // Лёгкий healthcheck: не пингуем внешние API (МойСклад/VK/SpeechKit), а
+      // отчитываемся о последнем известном состоянии. Это даёт оркестратору
+      // сигнал о деградации без дополнительной нагрузки на чужие квоты.
+      const snapshot = productCodeCache?.getSnapshot?.() || {};
+      const moyskladStatus = snapshot.lastError
+        ? "error"
+        : (snapshot.loadedAt ? "ok" : "unknown");
+      const vkStatus = config?.vk?.token ? "configured" : "missing_token";
+      const speechkitStatus = config?.speechkit?.apiKey ? "configured" : "missing_key";
+      const subsystems = {
+        moysklad: {
+          status: moyskladStatus,
+          loadedAt: snapshot.loadedAt || null,
+          productCount: snapshot.count || 0,
+          lastError: snapshot.lastError || null,
+          refreshing: Boolean(snapshot.refreshing),
+        },
+        vk: { status: vkStatus },
+        speechkit: { status: speechkitStatus },
+        safeMode: isSafeMode(),
+      };
+      const ok = moyskladStatus !== "error" && vkStatus !== "missing_token" && speechkitStatus !== "missing_key";
+      response.writeHead(ok ? 200 : 503, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ ok, version: packageVersion || null, subsystems }));
       return;
     }
 

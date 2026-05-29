@@ -241,11 +241,35 @@ async function main() {
       wishlistActive: wishlistStore.getActiveCount(),
     });
 
-    productCodeCache.refresh(moysklad).catch(() => {});
+    // Счётчик подряд-фейлов refresh. Поднимаем уровень логирования с info до
+     // warn после 3 неудач подряд, чтобы оператор увидел проблему с МойСкладом
+     // в общем потоке логов, а не только в JSONL.
+    let consecutiveRefreshFailures = 0;
+    const REFRESH_WARN_THRESHOLD = 3;
+    function refreshProductCache() {
+      productCodeCache.refresh(moysklad).then(() => {
+        if (consecutiveRefreshFailures > 0) {
+          logger.info("moysklad", "product_code_cache_recovered", {
+            failuresBefore: consecutiveRefreshFailures,
+          });
+        }
+        consecutiveRefreshFailures = 0;
+      }).catch((error) => {
+        consecutiveRefreshFailures += 1;
+        const meta = {
+          error: error?.message || String(error),
+          consecutiveFailures: consecutiveRefreshFailures,
+        };
+        if (consecutiveRefreshFailures >= REFRESH_WARN_THRESHOLD) {
+          logger.warn("moysklad", "product_code_cache_refresh_failing", meta);
+        } else {
+          logger.info("moysklad", "product_code_cache_refresh_failed", meta);
+        }
+      });
+    }
 
-    setInterval(() => {
-      productCodeCache.refresh(moysklad).catch(() => {});
-    }, PRODUCT_CODE_CACHE_REFRESH_INTERVAL_MS).unref();
+    refreshProductCache();
+    setInterval(refreshProductCache, PRODUCT_CODE_CACHE_REFRESH_INTERVAL_MS).unref();
   });
 }
 
