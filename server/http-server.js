@@ -305,12 +305,46 @@ export function createStaticServer({
       return;
     }
 
+    // POST /login: small fallback form for operators who arrived without a
+    // token-bearing URL. Body is application/x-www-form-urlencoded with a
+    // single `token=` field. On match we set the cookie and redirect to /.
+    if (auth.enabled && pathname === "/login" && request.method === "POST") {
+      try {
+        const body = await new Promise((resolve, reject) => {
+          let buf = "";
+          request.on("data", (chunk) => {
+            buf += chunk;
+            if (buf.length > 4096) {
+              request.destroy();
+              reject(new Error("body_too_large"));
+            }
+          });
+          request.on("end", () => resolve(buf));
+          request.on("error", reject);
+        });
+        const params = new URLSearchParams(body);
+        const submittedUrl = new URL(`/?token=${encodeURIComponent(params.get("token") || "")}`, "http://localhost");
+        if (auth.isRequestAuthenticated(request, submittedUrl)) {
+          auth.setTokenCookie(response);
+          response.writeHead(302, { location: "/" });
+          response.end();
+        } else {
+          response.writeHead(303, { location: "/login?error=1" });
+          response.end();
+        }
+      } catch {
+        response.writeHead(400).end("Bad request");
+      }
+      return;
+    }
+
     // Auth check: API endpoints require token when API_TOKEN is set.
     // Static assets allow auth via ?token=<value> query — cookie is set
     // and the user is redirected back without the token in the URL.
     if (auth.enabled) {
       const authed = auth.isRequestAuthenticated(request, urlObject);
       const isApi = pathname.startsWith("/api/");
+      const isLogin = pathname === "/login";
       if (isApi) {
         if (!authed) {
           logger.warn("http", "unauthorized_api_request", { pathname, method: request.method });
@@ -325,12 +359,37 @@ export function createStaticServer({
           response.writeHead(302, { location: cleanUrl.pathname + cleanUrl.search });
           response.end();
         } else {
-          response.writeHead(401).end("Unauthorized");
+          response.writeHead(303, { location: "/login?error=1" });
+          response.end();
         }
         return;
+      } else if (isLogin) {
+        // GET /login — render the form. No external assets, no scripts.
+        const errored = urlObject.searchParams.get("error") === "1";
+        const html = `<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Вход — V-Amber</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0f1115;color:#e5e7eb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+form{background:#1a1d24;border:1px solid #2a2f3a;border-radius:8px;padding:24px;min-width:320px;display:flex;flex-direction:column;gap:12px}
+h1{margin:0 0 4px;font-size:18px}
+input{padding:10px;border-radius:6px;border:1px solid #2a2f3a;background:#0f1115;color:#e5e7eb;font-size:14px}
+button{padding:10px;border-radius:6px;border:0;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer;font-size:14px}
+.err{color:#f87171;font-size:13px}
+.hint{color:#9ca3af;font-size:12px}
+</style></head>
+<body><form method="post" action="/login">
+<h1>Вход в V-Amber</h1>
+${errored ? '<div class="err">Неверный токен. Проверьте значение API_TOKEN.</div>' : ""}
+<input type="password" name="token" autofocus required placeholder="API_TOKEN" autocomplete="off" />
+<button type="submit">Войти</button>
+<div class="hint">Токен задаётся в .env (переменная API_TOKEN). Если потеряли — посмотрите файл .env на сервере.</div>
+</form></body></html>`;
+        response.writeHead(401, { "content-type": "text/html; charset=utf-8" });
+        response.end(html);
+        return;
       } else if (!authed) {
-        response.writeHead(401, { "content-type": "text/plain; charset=utf-8" })
-          .end("Unauthorized. Append ?token=<API_TOKEN> to the URL once to authenticate.");
+        response.writeHead(302, { location: "/login" });
+        response.end();
         return;
       }
     }

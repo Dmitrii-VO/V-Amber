@@ -92,6 +92,21 @@ export function attachWsServer(httpServer, config, services = {}) {
       return;
     }
 
+    // Single-broadcast guard. The whole app is built around a single live
+    // operator console; a second connection would publish duplicate VK
+    // cards and run two reservation pollers in parallel. Allow override
+    // via ?force=1 in case the previous socket genuinely hung but did not
+    // close cleanly (rare — usually `close` fires on tab unload).
+    const activeClientCount = [...wsServer.clients].filter((c) => c.readyState === 1).length;
+    if (activeClientCount > 0 && url.searchParams.get("force") !== "1") {
+      logger.warn("ws", "duplicate_connection_rejected", {
+        origin,
+        activeClientCount,
+      });
+      rejectUpgrade(socket, 409, "Conflict");
+      return;
+    }
+
     wsServer.handleUpgrade(request, socket, head, (websocket) => {
       wsServer.emit("connection", websocket, request);
     });
@@ -1859,6 +1874,61 @@ export function attachWsServer(httpServer, config, services = {}) {
 
           resetDetectionState();
           emitState();
+          return;
+        }
+
+        if (payload.type === "setLotPrice") {
+          // Operator manually overrides the price on the active lot — closes
+          // the gap when voice-price detection misfires ("два пять пять
+          // ноль" misread as "2"). Bypasses applyVoicePrice's salePrice
+          // guard because manual intent is explicit.
+          const value = Number(payload.value);
+          if (!activeLot?.product || !Number.isFinite(value) || value <= 0) {
+            sendJson(websocket, { type: "warning", message: "Не удалось применить цену: лот неактивен или значение неверно" });
+            return;
+          }
+          activeLot.product.voicePrice = value;
+          activeLot.product.priceSource = "manual";
+          // For manual override we treat the value as the operator-confirmed
+          // sale price too — otherwise stock guard and reservation totals
+          // still use the (wrong) salePrice from MoySklad.
+          activeLot.product.salePrice = value;
+          logger.info("price", "manual_price_applied", {
+            connectionId,
+            value,
+            code: activeLot.code,
+            lotSessionId: activeLot.lotSessionId,
+          });
+          if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
+            await vk.publishPriceUpdate(activeLot).catch((error) => {
+              handleVkPublishError(activeLot, error);
+              logger.warn("vk", "manual_price_publish_failed", {
+                connectionId,
+                lotSessionId: activeLot?.lotSessionId,
+                error,
+              });
+            });
+          }
+          emitState();
+          return;
+        }
+
+        if (payload.type === "closeLot") {
+          // Operator manually closes the active lot — same path as voice
+          // re-detection / stream_stop, but without ending the session.
+          // Useful when speech recognition missed the operator moving on.
+          if (activeLot) {
+            const closingLot = activeLot;
+            logger.info("ws", "lot_close_requested_by_operator", {
+              connectionId,
+              lotSessionId: closingLot.lotSessionId,
+              code: closingLot.code,
+            });
+            await publishLotClosed(closingLot, "manual_close");
+            activeLot = null;
+            resetCustomerOrders();
+            emitState();
+          }
           return;
         }
 

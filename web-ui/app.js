@@ -59,6 +59,8 @@ const elements = {
   digestCancel: $("digestCancel"),
   digestDate: $("digestDate"),
   digestRefresh: $("digestRefresh"),
+  digestQuickToday: $("digestQuickToday"),
+  digestQuickYesterday: $("digestQuickYesterday"),
   digestList: $("digestList"),
   digestSummary: $("digestSummary"),
   digestStatus: $("digestStatus"),
@@ -126,6 +128,8 @@ const state = {
   lifecycle: "idle",
   setupGeneration: 0,
   selectedDeviceId: "",
+  activeLotOpenedAt: null,
+  reservationsThisSession: 0,
   chunksSent: 0,
   bytesSent: 0,
   finalLines: [],
@@ -177,6 +181,12 @@ async function loadInputDevices() {
       elements.microphoneSelect.append(option);
     }
 
+    // Restore previously chosen mic if still available; otherwise fall back to
+    // the first option. Persisted via mic-select 'change' handler.
+    const savedDeviceId = localStorage.getItem("microphoneDeviceId");
+    if (savedDeviceId && inputs.some((d) => d.deviceId === savedDeviceId)) {
+      elements.microphoneSelect.value = savedDeviceId;
+    }
     state.selectedDeviceId = elements.microphoneSelect.value;
     logEvent(`Найдено микрофонов: ${inputs.length}`, "info");
   } catch (error) {
@@ -245,8 +255,24 @@ function setSocketState(value) {
 }
 
 function setLifecycle(next) {
+  const previous = state.lifecycle;
   state.lifecycle = next;
   const isActive = next === "starting" || next === "streaming" || next === "stopping";
+
+  // Stream just ended after a session with at least one reservation —
+  // suggest opening the daily digest. The banner is dismissable; we don't
+  // open the modal automatically because that would steal focus right when
+  // the operator may still be reading the room.
+  if (next === "idle" && previous === "stopping" && state.reservationsThisSession > 0) {
+    showDigestPromptBanner(state.reservationsThisSession);
+  }
+  if (next === "starting") {
+    state.reservationsThisSession = 0;
+    state.lotsSeenThisSession = new Set();
+    state.reservationTotalsByLot = new Map();
+    state.eventsByLot = new Map();
+    hideDigestPromptBanner();
+  }
 
   elements.startButton.disabled = isActive;
   elements.startButton.hidden = isActive;
@@ -328,23 +354,102 @@ function renderDetection(detection) {
   }
 }
 
+// Per-session running totals — fed from each state push. We snapshot the
+// active lot's events array so it survives lot switches. End-of-stream recap
+// and per-buyer totals both read from this without backend changes.
+function trackSessionAggregates(lot) {
+  if (!lot) return;
+  if (!state.lotsSeenThisSession) state.lotsSeenThisSession = new Set();
+  if (!state.eventsByLot) state.eventsByLot = new Map();
+  if (!state.reservationTotalsByLot) state.reservationTotalsByLot = new Map();
+  if (lot.lotSessionId) state.lotsSeenThisSession.add(lot.lotSessionId);
+  const events = lot.reservations?.events || [];
+  state.eventsByLot.set(lot.lotSessionId, events);
+
+  let totalQty = 0;
+  let totalRub = 0;
+  for (const ev of events) {
+    if (ev.status !== "reserved" && ev.status !== "reserved_appended") continue;
+    const qty = Number(ev.quantity) || 1;
+    totalQty += qty;
+    if (typeof ev.price === "number" && ev.price > 0) totalRub += ev.price * qty;
+  }
+  state.reservationTotalsByLot.set(lot.lotSessionId, { totalQty, totalRub });
+}
+
+function aggregatePerViewer() {
+  const map = new Map();
+  for (const events of state.eventsByLot?.values() || []) {
+    for (const ev of events) {
+      if (ev.status !== "reserved" && ev.status !== "reserved_appended") continue;
+      const key = String(ev.viewerId || ev.userId || ev.viewerName || "");
+      if (!key) continue;
+      const qty = Number(ev.quantity) || 1;
+      const rub = typeof ev.price === "number" && ev.price > 0 ? ev.price * qty : 0;
+      const prev = map.get(key) || { name: ev.viewerName || ev.userName || key, count: 0, sum: 0 };
+      prev.count += 1;
+      prev.sum += rub;
+      map.set(key, prev);
+    }
+  }
+  return map;
+}
+
+function buildSessionRecap() {
+  const lotCount = state.lotsSeenThisSession?.size || 0;
+  let reservations = 0;
+  let revenue = 0;
+  for (const { totalQty, totalRub } of state.reservationTotalsByLot?.values() || []) {
+    reservations += totalQty;
+    revenue += totalRub;
+  }
+  return { lotCount, reservations, revenue };
+}
+
+function updateLotAge() {
+  const pill = document.getElementById("lotAgePill");
+  if (!pill) return;
+  if (!state.activeLotOpenedAt) {
+    pill.hidden = true;
+    return;
+  }
+  const ms = Date.now() - new Date(state.activeLotOpenedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) {
+    pill.hidden = true;
+    return;
+  }
+  const minutes = Math.floor(ms / 60000);
+  pill.hidden = false;
+  pill.textContent = minutes < 1 ? "только что" : `открыт ${minutes} мин`;
+  pill.classList.toggle("lot-age--stale", minutes >= 10);
+}
+
+setInterval(updateLotAge, 30000);
+
 function renderActiveLot(lot) {
+  const closeBtn = document.getElementById("closeLotButton");
   if (!lot) {
     elements.lotCard.hidden = true;
     elements.lotEmpty.hidden = false;
     elements.lotArticle.textContent = "";
     clearChildren(elements.lotStockPill);
     renderReservations(null);
+    state.activeLotOpenedAt = null;
+    updateLotAge();
+    if (closeBtn) closeBtn.hidden = true;
     return;
   }
 
   elements.lotCard.hidden = false;
   elements.lotEmpty.hidden = true;
+  if (closeBtn) closeBtn.hidden = false;
 
   const product = lot.product || {};
   const code = lot.code || product.code || "—";
   elements.lotCode.textContent = code;
   elements.lotArticle.textContent = `· ${code}`;
+  state.activeLotOpenedAt = lot.openedAt || state.activeLotOpenedAt || new Date().toISOString();
+  updateLotAge();
   elements.lotName.textContent = product.name || "—";
   elements.lotArticleValue.textContent = product.code || code;
   const lotPrice = product.salePrice > 0 ? product.salePrice : product.voicePrice;
@@ -352,11 +457,15 @@ function renderActiveLot(lot) {
 
   const stock = product.availableStock;
   elements.lotStock.textContent = stock != null ? String(stock) : "—";
-  elements.lotStock.classList.remove("green", "amber", "red");
+  elements.lotStock.classList.remove("green", "amber", "red", "lot-stock--low", "lot-stock--empty");
   if (typeof stock === "number") {
-    if (stock <= 0) elements.lotStock.classList.add("red");
-    else if (stock <= 2) elements.lotStock.classList.add("amber");
-    else elements.lotStock.classList.add("green");
+    if (stock <= 0) {
+      elements.lotStock.classList.add("red", "lot-stock--empty");
+    } else if (stock <= 2) {
+      elements.lotStock.classList.add("amber", "lot-stock--low");
+    } else {
+      elements.lotStock.classList.add("green");
+    }
   }
 
   clearChildren(elements.lotStockPill);
@@ -366,7 +475,13 @@ function renderActiveLot(lot) {
     if (stock <= 0) pill.classList.add("pill--red");
     else if (stock <= 2) pill.classList.add("pill--amber");
     else pill.classList.add("pill--green");
-    pill.textContent = stock <= 0 ? "нет в наличии" : `остаток ${stock}`;
+    // "осталась последняя" — explicit cue the operator can announce on air.
+    let text;
+    if (stock <= 0) text = "нет в наличии";
+    else if (stock === 1) text = "осталась последняя";
+    else if (stock <= 2) text = `осталось ${stock}`;
+    else text = `остаток ${stock}`;
+    pill.textContent = text;
     elements.lotStockPill.append(pill);
   }
 
@@ -390,7 +505,14 @@ function renderReservations(reservations) {
   }
   elements.reservationEmpty.hidden = true;
   elements.reservationCount.textContent = `· ${events.length}`;
+  // Used by the post-stop digest banner to decide whether to prompt the
+  // operator. Tracks the high-water mark across all lots in the session,
+  // not just the currently rendered lot's events.
+  if (events.length > state.reservationsThisSession) {
+    state.reservationsThisSession = events.length;
+  }
 
+  const perViewer = aggregatePerViewer();
   for (const ev of events.slice().reverse()) {
     const item = document.createElement("div");
     item.className = "res-item";
@@ -408,7 +530,18 @@ function renderReservations(reservations) {
     const detail = document.createElement("div");
     detail.className = "res-detail";
     const ts = ev.createdAt || ev.timestamp;
-    detail.textContent = ts ? new Date(ts).toLocaleTimeString() : (ev.status || "");
+    const timeText = ts ? new Date(ts).toLocaleTimeString() : (ev.status || "");
+    // Running total for this viewer across the whole stream — surfaces
+    // "Анна: 3-я бронь, 5400 ₽" in the UI without a MoySklad round-trip.
+    const key = String(ev.viewerId || ev.userId || ev.viewerName || "");
+    const agg = perViewer.get(key);
+    let totalText = "";
+    if (agg && agg.count > 1) {
+      totalText = agg.sum > 0
+        ? ` · итого ${agg.count} брони, ${formatPrice(agg.sum)}`
+        : ` · итого ${agg.count} брони`;
+    }
+    detail.textContent = `${timeText}${totalText}`;
     meta.append(nameRow, detail);
 
     const right = document.createElement("span");
@@ -517,7 +650,8 @@ function connectSocket() {
     websocket.addEventListener("open", () => {
       state.websocket = websocket;
       setSocketState("connected");
-      logEvent("WebSocket connected", "ok");
+      logEvent("Связь с сервером установлена", "ok");
+      hideConnectionBanner();
       resolve(websocket);
     });
 
@@ -538,10 +672,11 @@ function connectSocket() {
       if (state.websocket === websocket) state.websocket = null;
 
       if (expectedClose) {
-        logEvent("WebSocket closed", "info");
+        logEvent("Эфир остановлен. Связь с сервером закрыта.", "info");
         return;
       }
-      logEvent("WebSocket closed unexpectedly", "warn");
+      logEvent("Связь с сервером оборвалась. Нажмите «Перезапустить» для возобновления.", "warn");
+      showConnectionBanner();
       if (state.lifecycle !== "idle" || state.audioContext || state.mediaStream) {
         void cleanupStreamingResources();
       }
@@ -549,7 +684,14 @@ function connectSocket() {
 
     websocket.addEventListener("error", (event) => {
       setSocketState("error");
-      reject(new Error(`WebSocket error: ${event.type}`));
+      // Server-side single-broadcast guard rejects a second connection with
+      // HTTP 409 — the browser surfaces it as a generic error here. We
+      // can't read the HTTP code from the WS API, but the actionable hint
+      // is always the same.
+      reject(new Error(
+        "Не удалось подключиться. Возможно, эфир уже запущен в другой вкладке или окне. " +
+        "Закройте лишние вкладки и попробуйте снова.",
+      ));
     });
   });
 }
@@ -577,6 +719,7 @@ function handleServerMessage(payload) {
   }
 
   if (payload.type === "state") {
+    trackSessionAggregates(payload.activeLot || null);
     renderActiveLot(payload.activeLot || null);
     renderDetection(payload.lastDetection || null);
     if (typeof payload.safeMode === "boolean") applySafeModeFromServer(payload.safeMode);
@@ -611,11 +754,84 @@ function formatLatency(value) {
   return `${Math.round(value)} ms`;
 }
 
+function showDigestPromptBanner(reservationCount) {
+  const banner = document.getElementById("digestPromptBanner");
+  const text = document.getElementById("digestPromptText");
+  if (!banner) return;
+  const recap = buildSessionRecap();
+  const parts = [`Лотов: ${recap.lotCount}`, `броней: ${reservationCount}`];
+  if (recap.revenue > 0) parts.push(`сумма: ${formatPrice(recap.revenue)}`);
+  if (text) {
+    text.textContent = `${parts.join(", ")}. Отправить клиентам сводку в ЛС?`;
+  }
+  banner.hidden = false;
+}
+
+function hideDigestPromptBanner() {
+  const banner = document.getElementById("digestPromptBanner");
+  if (banner) banner.hidden = true;
+}
+
+document.getElementById("digestPromptOpen")?.addEventListener("click", () => {
+  hideDigestPromptBanner();
+  openDigestModal();
+});
+
+document.getElementById("digestPromptDismiss")?.addEventListener("click", hideDigestPromptBanner);
+
+function showConnectionBanner() {
+  const banner = document.getElementById("connectionBanner");
+  if (banner) banner.hidden = false;
+}
+
+function hideConnectionBanner() {
+  const banner = document.getElementById("connectionBanner");
+  if (banner) banner.hidden = true;
+}
+
+document.getElementById("connectionBannerStart")?.addEventListener("click", () => {
+  hideConnectionBanner();
+  if (state.lifecycle === "idle") void startStreaming();
+});
+
+// Non-blocking inline replacement for window.confirm — used at the start of a
+// session for product-code cache and during streaming for one-off operator
+// confirmations. Stays out of the main thread so partial transcripts can
+// still flow while the operator decides.
+function askCacheChoice() {
+  const remembered = localStorage.getItem("cacheBannerPref");
+  if (remembered === "load" || remembered === "skip") {
+    return Promise.resolve(remembered);
+  }
+
+  const banner = document.getElementById("cacheBanner");
+  const loadBtn = document.getElementById("cacheBannerLoad");
+  const skipBtn = document.getElementById("cacheBannerSkip");
+  const remember = document.getElementById("cacheBannerRemember");
+  if (!banner || !loadBtn || !skipBtn) {
+    // Defensive fallback — element missing in stripped HTML build.
+    return Promise.resolve("load");
+  }
+
+  return new Promise((resolve) => {
+    banner.hidden = false;
+    const finish = (choice) => {
+      if (remember?.checked) localStorage.setItem("cacheBannerPref", choice);
+      banner.hidden = true;
+      loadBtn.removeEventListener("click", onLoad);
+      skipBtn.removeEventListener("click", onSkip);
+      resolve(choice);
+    };
+    const onLoad = () => finish("load");
+    const onSkip = () => finish("skip");
+    loadBtn.addEventListener("click", onLoad);
+    skipBtn.addEventListener("click", onSkip);
+  });
+}
+
 async function refreshProductCodeCacheIfRequested() {
-  const confirmed = window.confirm(
-    "Загрузить коды товаров из МойСклад перед стартом?\n\nЭто поможет отличать артикул от размера и цены.",
-  );
-  if (!confirmed) {
+  const choice = await askCacheChoice();
+  if (choice === "skip") {
     logEvent("Загрузка кодов товаров пропущена", "warn");
     return;
   }
@@ -640,11 +856,15 @@ async function startStreaming() {
     try {
       await refreshProductCodeCacheIfRequested();
     } catch (cacheError) {
-      logEvent(`Не удалось загрузить коды товаров: ${cacheError.message || cacheError}`, "warn");
-      const shouldContinue = window.confirm("Коды товаров не загрузились. Запустить эфир без кеша кодов?");
-      if (!shouldContinue) {
-        return;
-      }
+      // Fall through: streaming proceeds without the cache. The operator
+      // sees the warning in the event log; abandoning the start mid-flight
+      // costs a couple of seconds and an extra click before air, which is
+      // worse than running the broadcast without the cache for the first
+      // few lots.
+      logEvent(
+        `Не удалось загрузить коды товаров: ${cacheError.message || cacheError}. Эфир запускается без кеша.`,
+        "warn",
+      );
     }
 
     if (state.setupGeneration !== setupGeneration || state.lifecycle !== "idle") {
@@ -730,7 +950,7 @@ async function startStreaming() {
 
     setLifecycle("streaming");
     setTranscriptStatus("listening");
-    logEvent("Стриминг запущен", "ok");
+    logEvent("Эфир запущен. Можно называть код товара или цену.", "ok");
   } catch (error) {
     handleError(error, "Не удалось запустить стриминг");
     await stopStreaming();
@@ -753,7 +973,7 @@ async function stopStreaming() {
 
   await cleanupStreamingResources();
   setTranscriptStatus("idle");
-  logEvent("Стриминг остановлен", "info");
+  logEvent("Эфир остановлен.", "info");
 }
 
 function handleError(error, prefix) {
@@ -971,8 +1191,79 @@ elements.toggleAdvanced.addEventListener("click", () => {
 elements.refreshDevicesButton.addEventListener("click", loadInputDevices);
 elements.startButton.addEventListener("click", startStreaming);
 elements.stopButton.addEventListener("click", stopStreaming);
+
+document.getElementById("closeLotButton")?.addEventListener("click", () => {
+  if (state.websocket && state.websocket.readyState === 1) {
+    state.websocket.send(JSON.stringify({ type: "closeLot" }));
+    logEvent("Лот закрыт вручную", "info");
+  } else {
+    logEvent("Связь с сервером не установлена — нельзя закрыть лот", "warn");
+  }
+});
+
+// Click-to-edit on the lot price field. Replaces the rendered price with a
+// small inline number input; Enter applies, Escape cancels. Server hops the
+// new value through setLotPrice (see ws-server.js).
+function arePriceEditsAllowed() {
+  return state.lifecycle === "streaming" || state.lifecycle === "starting";
+}
+elements.lotPrice.addEventListener("click", () => {
+  if (!arePriceEditsAllowed()) return;
+  if (elements.lotPrice.dataset.editing === "1") return;
+  elements.lotPrice.dataset.editing = "1";
+
+  const original = elements.lotPrice.textContent;
+  // Strip currency / spaces so the input shows a number the operator can edit.
+  const seed = (original || "").replace(/[^\d]/g, "");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.step = "1";
+  input.value = seed;
+  input.className = "input";
+  input.style.maxWidth = "100px";
+  input.style.padding = "2px 6px";
+
+  elements.lotPrice.textContent = "";
+  elements.lotPrice.append(input);
+  input.focus();
+  input.select();
+
+  const restore = () => {
+    elements.lotPrice.textContent = original;
+    delete elements.lotPrice.dataset.editing;
+  };
+
+  const apply = () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value <= 0) {
+      restore();
+      return;
+    }
+    if (state.websocket && state.websocket.readyState === 1) {
+      state.websocket.send(JSON.stringify({ type: "setLotPrice", value }));
+      logEvent(`Цена изменена вручную: ${value} ₽`, "ok");
+    }
+    // Server will emit a fresh state shortly; restore visually in the meantime.
+    restore();
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      apply();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      restore();
+    }
+  });
+  input.addEventListener("blur", restore);
+});
 elements.microphoneSelect.addEventListener("change", (event) => {
   state.selectedDeviceId = event.target.value;
+  if (event.target.value) {
+    localStorage.setItem("microphoneDeviceId", event.target.value);
+  }
 });
 elements.vkLiveUrlInput.addEventListener("input", () => {
   const url = elements.vkLiveUrlInput.value.trim();
@@ -1203,6 +1494,17 @@ elements.digestClose.addEventListener("click", closeDigestModal);
 elements.digestCancel.addEventListener("click", closeDigestModal);
 elements.digestRefresh.addEventListener("click", loadDigestPreview);
 elements.digestSend.addEventListener("click", sendDigestMessages);
+elements.digestQuickToday.addEventListener("click", () => {
+  elements.digestDate.value = todayLocalDate();
+  void loadDigestPreview();
+});
+elements.digestQuickYesterday.addEventListener("click", () => {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const pad = (n) => String(n).padStart(2, "0");
+  elements.digestDate.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  void loadDigestPreview();
+});
 elements.digestModal.addEventListener("click", (event) => {
   if (event.target === elements.digestModal) closeDigestModal();
 });
@@ -1424,14 +1726,55 @@ function renderWishlistActive() {
   body.querySelectorAll("[data-remove]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const entryId = btn.dataset.remove;
-      if (!confirm("Удалить запись из wish list?")) return;
-      try {
-        const res = await fetch(`/api/wishlist/${entryId}`, { method: "DELETE" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await loadWishlistActive();
-      } catch (error) {
-        setWishlistStatus(`Не удалось удалить: ${error.message}`, "error");
-      }
+      // Inline two-step delete: first click swaps the button into a confirm
+      // strip ("Удалить?  [Да]  [Нет]"). Auto-reverts after 4s if the
+      // operator clicks elsewhere — replaces the blocking window.confirm.
+      // Built with createElement / textContent only (no innerHTML) so a
+      // buyer-supplied entryId can never inject markup here.
+      const wrap = document.createElement("span");
+      wrap.className = "inline-confirm";
+
+      const label = document.createElement("span");
+      label.textContent = "Удалить?";
+      wrap.append(label);
+
+      const yes = document.createElement("button");
+      yes.type = "button";
+      yes.className = "btn btn--danger";
+      yes.textContent = "Да";
+
+      const no = document.createElement("button");
+      no.type = "button";
+      no.className = "btn btn--ghost";
+      no.textContent = "Нет";
+
+      wrap.append(yes, no);
+
+      const parent = btn.parentNode;
+      const nextSibling = btn.nextSibling;
+      parent?.replaceChild(wrap, btn);
+
+      const restore = () => {
+        if (wrap.parentNode === parent) parent.insertBefore(btn, nextSibling);
+        wrap.remove();
+      };
+      const timeout = setTimeout(restore, 4000);
+
+      no.addEventListener("click", () => {
+        clearTimeout(timeout);
+        restore();
+      });
+      yes.addEventListener("click", async () => {
+        clearTimeout(timeout);
+        try {
+          const res = await fetch(`/api/wishlist/${entryId}`, { method: "DELETE" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          await loadWishlistActive();
+        } catch (error) {
+          setWishlistStatus(`Не удалось удалить: ${error.message}`, "error");
+          restore();
+        }
+      });
     });
   });
   body.querySelectorAll("[data-archive]").forEach((btn) => {
@@ -2047,3 +2390,51 @@ void fetchProjectVersion();
 void fetchWishlistCount();
 // Preload suppliers/stores (used by manual supplier picker in "Без поставщика" группе).
 void loadWishlistSettings();
+
+// ===== Keyboard shortcuts =====
+// Space — start/stop the broadcast (only when no modal is open and focus is
+// not inside an input/textarea/contenteditable element, so typing in the
+// VK URL or wishlist forms does not toggle the stream).
+// Esc — close the topmost open modal.
+function isEditableTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
+
+function openModals() {
+  return [
+    elements.digestModal,
+    elements.wishlistModal,
+    elements.sendLogsModal,
+    elements.wishlistConfirmModal,
+  ].filter((m) => m && !m.hidden);
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
+
+  if (event.key === "Escape") {
+    const top = openModals().pop();
+    if (top) {
+      event.preventDefault();
+      // Each modal stores its dismiss handler on the close button; clicking
+      // it preserves cancel semantics (e.g. wishlistConfirm cancel does not
+      // submit the order).
+      const closeBtn = top.querySelector("[id$='Close'], [id$='Cancel']");
+      if (closeBtn) closeBtn.click();
+      else top.hidden = true;
+    }
+    return;
+  }
+
+  if ((event.key === " " || event.code === "Space") && !isEditableTarget(event.target)) {
+    if (openModals().length > 0) return;
+    event.preventDefault();
+    if (state.lifecycle === "idle") {
+      void startStreaming();
+    } else if (state.lifecycle === "streaming") {
+      void stopStreaming();
+    }
+  }
+});

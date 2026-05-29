@@ -27,11 +27,11 @@
 
         <div class="topbar-controls">
           <select id="microphoneSelect" class="select mic-select"></select>
-          <div id="vkLiveUrlWrap" style="flex:1; min-width:200px; display:flex; flex-direction:column; gap:4px;" hidden>
+          <div id="vkLiveUrlWrap" style="flex:1; min-width:200px; display:flex; flex-direction:column; gap:4px;">
             <input id="vkLiveUrlInput" class="input" type="text" placeholder="VK live URL" />
             <div id="vkUrlStatus" class="vk-url-status" hidden></div>
           </div>
-          <button id="toggleAdvanced" class="btn btn--ghost" title="Дополнительно" style="padding:0 10px;">+ VK</button>
+          <button id="toggleAdvanced" class="btn btn--ghost" title="Свернуть/развернуть поле VK" style="padding:0 10px;" hidden>+ VK</button>
           <button id="refreshDevicesButton" class="btn btn--ghost" title="Обновить устройства" style="padding:0 10px;">↻</button>
         </div>
 
@@ -66,6 +66,38 @@
         </div>
       </header>
 
+      <div id="connectionBanner" class="conn-banner" hidden role="alert">
+        <strong>Связь с сервером оборвалась.</strong>
+        <span>Голосовое распознавание сейчас не работает.</span>
+        <button id="connectionBannerStart" class="btn btn--primary" type="button">Перезапустить</button>
+      </div>
+
+      <div id="cacheBanner" class="info-banner" hidden role="dialog" aria-label="Загрузка кодов товаров">
+        <div class="info-banner-body">
+          <strong>Загрузить коды товаров из МойСклада?</strong>
+          <span class="dim">Помогает отличать артикул от размера и цены при распознавании речи.</span>
+        </div>
+        <div class="info-banner-actions">
+          <button id="cacheBannerLoad" class="btn btn--primary" type="button">Загрузить</button>
+          <button id="cacheBannerSkip" class="btn btn--ghost" type="button">Без кеша</button>
+          <label class="toggle toggle--inline">
+            <input id="cacheBannerRemember" type="checkbox" />
+            <span>Запомнить выбор</span>
+          </label>
+        </div>
+      </div>
+
+      <div id="digestPromptBanner" class="info-banner info-banner--success" hidden role="alert">
+        <div class="info-banner-body">
+          <strong>Эфир остановлен.</strong>
+          <span class="dim" id="digestPromptText">В эфире были брони — отправить клиентам сводку в ЛС?</span>
+        </div>
+        <div class="info-banner-actions">
+          <button id="digestPromptOpen" class="btn btn--primary" type="button">Открыть сводку</button>
+          <button id="digestPromptDismiss" class="btn btn--ghost" type="button">Позже</button>
+        </div>
+      </div>
+
       <div class="main">
         <div class="col col--left">
           <section class="panel">
@@ -73,8 +105,12 @@
               <div class="panel-title">
                 <span>Активный лот</span>
                 <span id="lotArticle" class="count"></span>
+                <span id="lotAgePill" class="lot-age" hidden></span>
               </div>
-              <div id="lotStockPill"></div>
+              <div style="display:flex; align-items:center; gap:var(--gap-2);">
+                <button id="closeLotButton" class="btn btn--ghost" type="button" hidden title="Закрыть активный лот">× закрыть лот</button>
+                <div id="lotStockPill"></div>
+              </div>
             </div>
 
             <div id="detectionInset" class="detection" hidden>
@@ -119,7 +155,7 @@
                     </div>
                     <div>
                       <dt>Цена</dt>
-                      <dd id="lotPrice" class="mono">—</dd>
+                      <dd id="lotPrice" class="mono" title="Кликните, чтобы исправить вручную" style="cursor:pointer;">—</dd>
                     </div>
                     <div>
                       <dt>Остаток</dt>
@@ -215,6 +251,8 @@
               <span>Дата эфира</span>
               <input id="digestDate" class="input" type="date" />
             </label>
+            <button id="digestQuickToday" class="btn btn--ghost" type="button">Сегодня</button>
+            <button id="digestQuickYesterday" class="btn btn--ghost" type="button">Вчера</button>
             <button id="digestRefresh" class="btn btn--ghost">Обновить предпросмотр</button>
             <span id="digestSummary" class="wishlist-summary">—</span>
           </div>
@@ -348,6 +386,7 @@
           <textarea id="sendLogsNote" class="input modal-textarea" rows="3" maxlength="4000"
             placeholder="Опишите проблему: что делали, что ожидали, что увидели"></textarea>
           <div class="modal-meta" id="sendLogsMeta">Подготовка…</div>
+          <div class="modal-meta" style="color:var(--text-dim);">Архив не содержит .env и токены доступа — можно безопасно отправлять разработчику.</div>
           <details class="modal-files">
             <summary>Файлы в архиве (<span id="sendLogsFileCount">0</span>)</summary>
             <ul id="sendLogsFileList"></ul>
