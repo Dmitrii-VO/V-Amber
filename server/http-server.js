@@ -8,6 +8,7 @@ import { logger } from "./logger.js";
 import { isSafeMode, setSafeMode } from "./safe-mode.js";
 import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 import { createReservationDigestLog } from "./reservation-digest-log.js";
+import { createAuth } from "./auth.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 const SEND_LOGS_TIMEOUT_MS = 60 * 1000;
@@ -194,6 +195,7 @@ export function createStaticServer({
   }
   let logsInFlight = false;
   const reservationDigestLog = createReservationDigestLog();
+  const auth = createAuth();
 
   // Кэш списков из МС, чтобы операторские открытия модалки не били в МС каждый раз.
   let suppliersCache = null;
@@ -270,6 +272,36 @@ export function createStaticServer({
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true, version: packageVersion || null }));
       return;
+    }
+
+    // Auth check: API endpoints require token when API_TOKEN is set.
+    // Static assets allow auth via ?token=<value> query — cookie is set
+    // and the user is redirected back without the token in the URL.
+    if (auth.enabled) {
+      const authed = auth.isRequestAuthenticated(request, urlObject);
+      const isApi = pathname.startsWith("/api/");
+      if (isApi) {
+        if (!authed) {
+          logger.warn("http", "unauthorized_api_request", { pathname, method: request.method });
+          jsonResponse(response, 401, { error: "unauthorized" });
+          return;
+        }
+      } else if (urlObject.searchParams.has("token")) {
+        if (authed) {
+          auth.setTokenCookie(response);
+          const cleanUrl = new URL(urlObject.toString());
+          cleanUrl.searchParams.delete("token");
+          response.writeHead(302, { location: cleanUrl.pathname + cleanUrl.search });
+          response.end();
+        } else {
+          response.writeHead(401).end("Unauthorized");
+        }
+        return;
+      } else if (!authed) {
+        response.writeHead(401, { "content-type": "text/plain; charset=utf-8" })
+          .end("Unauthorized. Append ?token=<API_TOKEN> to the URL once to authenticate.");
+        return;
+      }
     }
 
     if (pathname === "/api/vk/validate-url") {

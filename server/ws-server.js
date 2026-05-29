@@ -10,6 +10,7 @@ import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
+import { createAuth } from "./auth.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -56,6 +57,7 @@ export function attachWsServer(httpServer, config, services = {}) {
   // защиту, что и WS-flow. Здесь повторно не оборачиваем.
   const moysklad = services.moysklad || createMoySkladClient(config.moysklad);
   const vk = services.vk || createVkPublisher(config.vk);
+  const auth = createAuth();
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
@@ -73,19 +75,39 @@ export function attachWsServer(httpServer, config, services = {}) {
     wishlistStore.subscribe(({ activeCount }) => broadcastWishlistCount(activeCount));
   }
 
+  function rejectUpgrade(socket, status, reason) {
+    try {
+      socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
+    } catch { /* ignore */ }
+    socket.destroy();
+  }
+
   httpServer.on("upgrade", (request, socket, head) => {
-    let pathname;
+    let url;
 
     try {
-      ({ pathname } = new URL(request.url, "http://localhost"));
+      url = new URL(request.url, "http://localhost");
     } catch {
       logger.warn("ws", "bad_upgrade_url", { url: request.url });
       socket.destroy();
       return;
     }
 
-    if (pathname !== "/ws/stt") {
+    if (url.pathname !== "/ws/stt") {
       socket.destroy();
+      return;
+    }
+
+    const origin = request.headers.origin;
+    if (!auth.isOriginAllowed(origin)) {
+      logger.warn("ws", "origin_rejected", { origin });
+      rejectUpgrade(socket, 403, "Forbidden");
+      return;
+    }
+
+    if (auth.enabled && !auth.isRequestAuthenticated(request, url)) {
+      logger.warn("ws", "unauthorized_upgrade", { origin });
+      rejectUpgrade(socket, 401, "Unauthorized");
       return;
     }
 
