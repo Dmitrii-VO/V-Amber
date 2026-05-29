@@ -65,6 +65,34 @@ the initial `?token=<value>` redirect that sets the cookie). See
 [[configuration-and-secrets]] for accepted token sources and
 [[runtime-architecture]] for the WS-upgrade Origin allowlist.
 
+Unauthenticated non-`/api/*` requests now redirect to `GET /login` —
+a small HTML form (no JS, no external assets) that accepts the token
+via `POST application/x-www-form-urlencoded`, sets the cookie, and
+redirects to `/`. Wrong token → `303` to `/login?error=1`.
+
+## WebSocket single-broadcast guard
+
+The WS upgrade handler on `/ws/stt` rejects a second simultaneous
+connection with HTTP 409 unless the request includes `?force=1`. The
+project is built around a single live console — a second tab would
+publish duplicate VK cards and run two comment pollers in parallel. If
+a previous session truly hung without closing, the operator can
+override with `?force=1`. See `server/ws-server.js`.
+
+## Operator WS messages
+
+Browser → server message types (in addition to `start`, `stop`,
+`setSafeMode`):
+
+- `closeLot` — manually close the active lot. Backend calls
+  `publishLotClosed(activeLot, "manual_close")`, resets `activeLot`,
+  and emits a fresh state. The session continues.
+- `setLotPrice` — override the active lot's price. Backend overwrites
+  both `voicePrice` and `salePrice` on the active product, sets
+  `priceSource: "manual"`, and republishes the VK card if comments are
+  open. Bypasses the `applyVoicePrice` guard that ignores voice prices
+  when a sale price is already set, because manual intent is explicit.
+
 ## Related pages
 
 - [[runtime-architecture]]

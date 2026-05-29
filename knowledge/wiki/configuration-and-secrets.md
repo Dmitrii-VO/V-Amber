@@ -56,6 +56,11 @@ Server bind and access control (added 2026-05-29):
   the loopback default, so a real domain deployment must list its own
   origin here.
 
+When `API_TOKEN` is set, unauthenticated non-`/api/*` requests are
+redirected to `GET /login` — a tiny self-contained HTML form (no
+external assets) that accepts the token via POST and sets the cookie.
+See [[http-api#Authentication]].
+
 ## Optional integrations
 
 VK and MoySklad are optional at code level: without configuration, related

@@ -150,3 +150,26 @@ Relevant durable changes:
   `speechkit-stream.js` — these are the highest-value modules for
   integration tests (they move money / send messages).
 - Deeper split of `ws-server.js` and `moysklad.js` per domain.
+
+## Operator-audit pass (2026-05-29)
+
+Full audit from the live-commerce operator perspective produced 20
+items. 18 landed in commit `f5c3bde`; two deferred. Detailed summary
+lives in [[operator-feedback]]. Highlights:
+
+- Replaced every `window.confirm` in the operator flow with inline,
+  non-blocking UI.
+- New WS message types: `closeLot`, `setLotPrice` — operator-driven
+  recovery from voice-pipeline misses.
+- WS single-broadcast guard (409 on second connection, override with
+  `?force=1`).
+- `/login` HTML form replaces the bare-text 401 for API_TOKEN.
+- Client-side per-session and per-buyer aggregates (lots, reservations,
+  revenue) — feed both the post-stop banner and the per-row running
+  totals without backend state-shape changes.
+
+**Test coverage gap noted during the pass:** the new inline-banner
+flows, `closeLot` / `setLotPrice` message paths, and the duplicate-WS
+rejection live in code that has no integration tests (UI, WS upgrade
+handler). The deferred items (#14 manual code entry, #16 cancel
+reservation) cannot land safely until that test scaffolding exists.
