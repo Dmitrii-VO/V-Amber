@@ -77,8 +77,11 @@ async function flushPending() {
   }
 }
 
-export function saveActiveState({ activeLot, sessionFilePath, connectionId } = {}) {
-  if (!activeLot) {
+export function saveActiveState({ activeLot, openLots = null, sessionFilePath, connectionId } = {}) {
+  const serializedOpenLots = Array.isArray(openLots)
+    ? openLots.map(serializeLot).filter(Boolean)
+    : [];
+  if (!activeLot && serializedOpenLots.length === 0) {
     // Нечего сохранять — но и не очищаем здесь. Очистка только через clearActiveState.
     return;
   }
@@ -91,6 +94,7 @@ export function saveActiveState({ activeLot, sessionFilePath, connectionId } = {
     connectionId: connectionId || null,
     sessionFilePath: sessionFilePath || null,
     activeLot: serializeLot(activeLot),
+    openLots: serializedOpenLots,
   };
   writeChain = writeChain.then(flushPending);
 }
@@ -154,10 +158,6 @@ export async function clearActiveState() {
 //   процесс умер прямо во время записи в МойСклад — неизвестно, успел ли
 //   заказ создаться. Оператор обязан проверить вручную.
 export function extractOrphans(state) {
-  const events = state?.activeLot?.reservations?.events;
-  if (!Array.isArray(events) || events.length === 0) {
-    return [];
-  }
   // order_failed добавлен для согласованности с close-flow: зритель товар
   // не получил, спрос есть, нужно мигрировать в wish list (с trigger:"order_failed").
   // creating_order остаётся — крэш мог произойти прямо во время записи в МС.
@@ -167,5 +167,16 @@ export function extractOrphans(state) {
     "creating_order",
     "order_failed",
   ]);
-  return events.filter((entry) => ORPHAN_STATUSES.has(entry?.status));
+  const lots = Array.isArray(state?.openLots) && state.openLots.length > 0
+    ? state.openLots
+    : [state?.activeLot].filter(Boolean);
+  return lots.flatMap((lot) => {
+    const events = lot?.reservations?.events;
+    if (!Array.isArray(events) || events.length === 0) {
+      return [];
+    }
+    return events
+      .filter((entry) => ORPHAN_STATUSES.has(entry?.status))
+      .map((entry) => ({ ...entry, lotCode: entry.lotCode || lot.code, lotSessionId: lot.lotSessionId }));
+  });
 }

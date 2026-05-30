@@ -30,10 +30,11 @@ export function createSessionLog() {
     if (!filePath) {
       return;
     }
+    const targetFilePath = filePath;
 
     writeChain = writeChain
       .then(async () => {
-        await appendFile(filePath, text + "\n", "utf8");
+        await appendFile(targetFilePath, text + "\n", "utf8");
       })
       .catch((err) => {
         console.error(`session_log_write_failed ${err instanceof Error ? err.message : String(err)}`);
@@ -55,6 +56,7 @@ export function createSessionLog() {
       const slug = dateSlug();
       filePath = join(sessionsDir, `${slug}.md`);
       jsonl = createSessionJsonl({ filePath: join(sessionsDir, `${slug}.jsonl`) });
+      const targetFilePath = filePath;
 
       // Контекстный блок: версия, env-флаги (только имена/значения, без секретов),
       // настройки оператора. Помогает разобрать сессию пост-фактум без доступа к коду.
@@ -94,7 +96,7 @@ export function createSessionLog() {
       writeChain = writeChain
         .then(async () => {
           await mkdir(sessionsDir, { recursive: true });
-          await writeFile(filePath, lines, "utf8");
+          await writeFile(targetFilePath, lines, "utf8");
         })
         .catch((err) => {
           console.error(`session_log_start_failed ${err instanceof Error ? err.message : String(err)}`);

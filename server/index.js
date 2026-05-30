@@ -35,12 +35,14 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
 
   const orphans = extractOrphans(state);
   const lot = state.activeLot || {};
+  const openLots = Array.isArray(state.openLots) && state.openLots.length > 0 ? state.openLots : [lot].filter(Boolean);
 
   logger.warn("recovery", "active_state_found_on_startup", {
     savedAt: state.savedAt,
     connectionId: state.connectionId,
     lotSessionId: lot.lotSessionId || null,
     code: lot.code || null,
+    openLotCount: openLots.length,
     orphanCount: orphans.length,
   });
 
@@ -51,16 +53,17 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
       ``,
       `> **⚠ Восстановление после краша**  `,
       `> Сервер был перезапущен в ${new Date().toLocaleString("ru-RU")}, предыдущий процесс не успел корректно закрыть сессию.`,
-      `> На лоте **${lot.code || "—"}** (\`${lot.lotSessionId || "—"}\`) остались необработанные брони:`,
+      `> На открытых лотах остались необработанные брони:`,
       ``,
       ...orphans.map((entry, index) => {
         const label = entry.viewerName || `id${entry.viewerId}`;
         const status = entry.status ? ` — _${entry.status}_` : "";
         const commentId = entry.commentId ? ` (comment ${entry.commentId})` : "";
-        return `${index + 1}. **${label}**${commentId}${status}`;
+        const lotLabel = entry.lotCode || lot.code || "—";
+        return `${index + 1}. Лот **${lotLabel}**: **${label}**${commentId}${status}`;
       }),
       ``,
-      `**Что делать:** проверить вручную в МойСкладе, что для этих зрителей созданы заказы. Если нет — создать; если есть, но без позиции на лот ${lot.code || "—"}, добавить позицию. Ответьте им в VK.`,
+      `**Что делать:** проверить вручную в МойСкладе, что для этих зрителей созданы заказы. Если нет — создать; если есть, но без позиции на нужный лот, добавить позицию. Ответьте им в VK.`,
       ``,
       `_Эти зрители не добавлены в Wish list автоматически: теперь нужно подтверждение комментарием «СПИСОК код товара»._`,
       ``,

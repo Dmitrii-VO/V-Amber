@@ -18,6 +18,8 @@ stream.
 - download diagnostic logs;
 - close the active lot manually (`× закрыть лот` button — sends
   `closeLot` WS message);
+- view all currently open lots in `#openLotsList` and close a specific old or
+  current lot by `lotSessionId`/code;
 - override the active lot price by clicking the price field (sends
   `setLotPrice` WS message, salePrice and voicePrice both updated, VK
   card refreshed);
@@ -29,7 +31,8 @@ stream.
 - cancel a confirmed reservation via the `× отменить` button on each
   reservation row (sends `cancelReservation` WS message after a confirm
   prompt) — removes the buyer's MoySklad position and frees the stock
-  slot. Blocked under safe mode. See [[http-api]] and
+  slot. The reservation row carries `lotSessionId`/code so cancellation works
+  for old open lots, not only the current active lot. Blocked under safe mode. See [[http-api]] and
   [[deferred-operator-features]] #16.
 
 The microphone flow uses Web Audio API and `web-ui/audio-processor.js` to
@@ -65,6 +68,8 @@ changes:
   Goes amber after 10 minutes as a hint to wrap up.
 - Stock pill text: `осталась последняя` (1), `осталось N` (≤2),
   `нет в наличии` (0). Coloring escalates amber → red.
+- `#openLotsList` — compact list of all open lots. The current `activeLot` is
+  highlighted; each row has a close button for that specific lot.
 
 ## Wishlist modal
 

@@ -34,9 +34,19 @@ variant.
 
 ## Active lot state
 
-`server/ws-server.js` owns the active lot, accepted users, primary reservation,
-waitlist event status, customer-order session version, and safe mode broadcasts.
-Before changing this flow, trace those values together.
+`server/ws-server.js` owns the active lot, the open-lot registry, accepted
+users, primary reservation, waitlist event status, customer-order session
+version, and safe mode broadcasts. Before changing this flow, trace those
+values together.
+
+The Phase 3 multi-lot path keeps `activeLot` as the current operator-facing lot
+for price, discount, and legacy UI actions, and adds `openLotsBySessionId` for
+all lots that remain open during the broadcast. One VK comment poller runs per
+WebSocket session and routes each reservation or wishlist comment to an open
+lot by product code. Naming a different code no longer closes the previous lot;
+bulk close happens on stream stop, stream error, stream end, or socket close.
+`logs/active-state.json` stores `openLots` so crash recovery can scan orphan
+reservation events across all open lots.
 
 ## Stock protection
 

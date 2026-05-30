@@ -14,6 +14,10 @@ const CARD_03199 = {
   id: "p-03199", name: "Кольцо янтарь", code: "03199",
   pathName: "Украшения/Кольца", salePrice: 3200, availableStock: 4,
 };
+const CARD_03204_ONE_IN_STOCK = {
+  id: "p-03204", name: "Серьги янтарь", code: "03204",
+  pathName: "Украшения/Серьги", salePrice: 4500, availableStock: 1,
+};
 // Карточка с НЕизвестным остатком (availableStock отсутствует) — для
 // проверки floor=1 на первой брони.
 const CARD_03204_NO_STOCK = {
@@ -25,6 +29,20 @@ const hasReserved = (m) =>
   m.type === "state"
   && Array.isArray(m.activeLot?.reservations?.events)
   && m.activeLot.reservations.events.some((e) => e.status === "reserved");
+
+const hasReservedInOpenLot = (code) => (m) =>
+  m.type === "state"
+  && Array.isArray(m.openLots)
+  && m.openLots.some((lot) => lot.code === code
+    && Array.isArray(lot.reservations?.events)
+    && lot.reservations.events.some((e) => e.status === "reserved" || e.status === "reserved_appended"));
+
+const hasReservationStatusInOpenLot = (code, status) => (m) =>
+  m.type === "state"
+  && Array.isArray(m.openLots)
+  && m.openLots.some((lot) => lot.code === code
+    && Array.isArray(lot.reservations?.events)
+    && lot.reservations.events.some((e) => e.status === status));
 
 // Запускает STT-стрим (без голосовой детекции) — ставит activeRunId.
 async function startStream(client, harness) {
@@ -205,7 +223,7 @@ test("#14: manualCode re-entry preserves an accepted reservation (no poison, no 
   }
 });
 
-test("#14: manualCode switching to a different code closes the previous lot", async () => {
+test("#14: manualCode switching to a different code keeps the previous lot open", async () => {
   const harness = await startHarness({
     cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
     knownCodes: ["03204", "03199"],
@@ -220,8 +238,73 @@ test("#14: manualCode switching to a different code closes the previous lot", as
     const switched = await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199");
 
     assert.equal(switched.activeLot.source, "manual");
+    assert.equal(switched.openLots.length, 2);
+    assert.deepEqual(switched.openLots.map((lot) => lot.code), ["03204", "03199"]);
     assert.equal(harness.vk.callsTo("publishLotCard").length, 2);
-    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("#14: one poller routes reservations to old and current open lots by code", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
+    knownCodes: ["03204", "03199"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03204", firstName: "Аня" });
+    await client.waitFor(hasReservedInOpenLot("03204"), { timeoutMs: 6000 });
+
+    harness.vk.pushComment({ id: 102, fromId: 5002, text: "03199", firstName: "Оля" });
+    const state = await client.waitFor(hasReservedInOpenLot("03199"), { timeoutMs: 6000 });
+
+    const oldLot = state.openLots.find((lot) => lot.code === "03204");
+    const currentLot = state.openLots.find((lot) => lot.code === "03199");
+    assert.equal(oldLot.reservations.committedReservationCount, 1);
+    assert.equal(currentLot.reservations.committedReservationCount, 1);
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("#14: overflow on an inactive open lot goes to wishlist", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204_ONE_IN_STOCK, "03199": CARD_03199 },
+    knownCodes: ["03204", "03199"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03204", firstName: "Аня" });
+    await client.waitFor(hasReservedInOpenLot("03204"), { timeoutMs: 6000 });
+
+    harness.vk.pushComment({ id: 102, fromId: 5002, text: "03204", firstName: "Оля" });
+    const state = await client.waitFor(hasReservationStatusInOpenLot("03204", "out_of_stock"), { timeoutMs: 6000 });
+
+    const oldLot = state.openLots.find((lot) => lot.code === "03204");
+    assert.equal(oldLot.reservations.committedReservationCount, 1);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(harness.wishlistStore.calls.length, 1);
+    assert.equal(harness.wishlistStore.calls[0].lot.code, "03204");
+    assert.equal(harness.wishlistStore.calls[0].event.viewerName, "Оля");
   } finally {
     await client.close();
     await harness.close();
