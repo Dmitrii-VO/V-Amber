@@ -85,11 +85,12 @@ export function getLotEffectivePrice(lot) {
 }
 
 export function getReservationReplyMessage(event) {
+  // W6 — ручной режим: переполнение по остатку тихо уходит в лист ожидания
+  // на стороне сервера (addWishlistFromComment), но покупателю публично
+  // НИЧЕГО не пишем. Оператор работает со списком вручную. См.
+  // knowledge/wiki/operator-feedback.md (W6).
   if (event.status === "out_of_stock") {
-    if (event.wishlistEntryId) {
-      return `${event.viewerName}, к сожалению, не успели забронировать. Добавили вас в список желающих с сохранением скидки.`;
-    }
-    return `${event.viewerName}, к сожалению, не успели забронировать. Вас добавить в список желающих с сохранением скидки? Напишите "СПИСОК ${event.lotCode || ""}" для подтверждения.`;
+    return "";
   }
 
   if (event.status === "product_not_found") {

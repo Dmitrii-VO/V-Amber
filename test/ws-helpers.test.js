@@ -148,20 +148,25 @@ test("getReservationReplyMessage produces status-specific text", () => {
   );
 });
 
-test("getReservationReplyMessage out_of_stock branches on wishlistEntryId", () => {
-  const withEntry = getReservationReplyMessage({
-    status: "out_of_stock",
-    viewerName: "Аня",
-    wishlistEntryId: "entry-1",
-  });
-  assert.match(withEntry, /Добавили вас в список/);
-
-  const withoutEntry = getReservationReplyMessage({
-    status: "out_of_stock",
-    viewerName: "Аня",
-    lotCode: "03204",
-  });
-  assert.match(withoutEntry, /СПИСОК 03204/);
+test("getReservationReplyMessage out_of_stock is silent (W6 manual mode)", () => {
+  // W6: переполнение тихо уходит в лист ожидания на сервере, покупателю
+  // публично ничего не пишем — независимо от wishlistEntryId.
+  assert.equal(
+    getReservationReplyMessage({
+      status: "out_of_stock",
+      viewerName: "Аня",
+      wishlistEntryId: "entry-1",
+    }),
+    "",
+  );
+  assert.equal(
+    getReservationReplyMessage({
+      status: "out_of_stock",
+      viewerName: "Аня",
+      lotCode: "03204",
+    }),
+    "",
+  );
 });
 
 test("getReservationReplyMessage returns empty for unknown status", () => {
