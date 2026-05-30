@@ -986,6 +986,23 @@ export function createMoySkladClient(config, options = {}) {
       counterpartyLocks.set(lockKey, promise);
       return promise;
     },
+    // Возвращает id первой позиции заказа отдельным GET. Нужен как фоллбэк для
+    // create-пути (#16): POST entity/customerorder отдаёт positions без rows.
+    // Ошибку глотаем — отсутствие positionId не должно ронять саму бронь, она
+    // лишь сделает её неотменяемой из UI (оператор удалит позицию в МойСкладе).
+    async resolveFirstOrderPositionId(orderId) {
+      try {
+        const payload = await requestJson(`entity/customerorder/${orderId}/positions`, { limit: 1 });
+        return payload.rows?.[0]?.id || null;
+      } catch (error) {
+        logger.warn("moysklad", "order_position_id_lookup_failed", {
+          orderId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    },
+
     async createCustomerOrderReservation({ activeLot, productCard, reservation, counterparty: preResolvedCounterparty, broadcastDate }) {
       if (!isEnabled || !activeLot?.product?.id || !reservation?.viewerId) {
         return null;
@@ -1021,9 +1038,14 @@ export function createMoySkladClient(config, options = {}) {
       const order = await postJson("entity/customerorder", payload);
       // Позиция, созданная вместе с заказом, нужна для адресной отмены брони
       // (#16): DELETE по точному positionId, а не «первую попавшуюся» позицию
-      // того же товара. У созданного заказа positions приходят как
-      // { meta, rows: [...] }.
-      const positionId = order.positions?.rows?.[0]?.id || null;
+      // того же товара. На POST entity/customerorder МойСклад возвращает
+      // positions как коллекцию { meta } БЕЗ rows (rows приходят только при
+      // expand), поэтому inline-чтение чаще всего даёт null — в этом случае
+      // дотягиваем позиции отдельным GET, иначе отмена брони не найдёт id.
+      let positionId = order.positions?.rows?.[0]?.id || null;
+      if (!positionId && order.id) {
+        positionId = await this.resolveFirstOrderPositionId(order.id);
+      }
       logger.info("moysklad", "customer_order_created", {
         lotSessionId: activeLot.lotSessionId,
         orderId: order.id,
