@@ -29,6 +29,8 @@ const elements = {
   lotArticleValue: $("lotArticleValue"),
   lotPrice: $("lotPrice"),
   lotStock: $("lotStock"),
+  openLotsWrap: $("openLotsWrap"),
+  openLotsList: $("openLotsList"),
 
   detectionInset: $("detectionInset"),
   detectionCode: $("detectionCode"),
@@ -137,6 +139,8 @@ const state = {
   eventsCount: 0,
   transcriptFinalCount: 0,
   lastDetection: null,
+  activeLot: null,
+  openLots: [],
   safeMode: false,
   startedAt: 0,
   uptimeTimer: null,
@@ -383,6 +387,13 @@ function trackSessionAggregates(lot) {
   state.reservationTotalsByLot.set(lot.lotSessionId, { totalQty, totalRub });
 }
 
+function getOpenLotsFromPayload(payload) {
+  if (Array.isArray(payload.openLots)) {
+    return payload.openLots;
+  }
+  return payload.activeLot ? [payload.activeLot] : [];
+}
+
 function aggregatePerViewer() {
   const map = new Map();
   for (const events of state.eventsByLot?.values() || []) {
@@ -439,7 +450,8 @@ function renderActiveLot(lot) {
     elements.lotEmpty.hidden = false;
     elements.lotArticle.textContent = "";
     clearChildren(elements.lotStockPill);
-    renderReservations(null);
+    renderReservationsForLots([]);
+    renderOpenLots([], null);
     state.activeLotOpenedAt = null;
     updateLotAge();
     if (closeBtn) closeBtn.hidden = true;
@@ -491,7 +503,49 @@ function renderActiveLot(lot) {
     elements.lotStockPill.append(pill);
   }
 
-  renderReservations(lot.reservations);
+  renderOpenLots(state.openLots, lot);
+}
+
+function renderOpenLots(lots, activeLot) {
+  const wrap = elements.openLotsWrap;
+  const list = elements.openLotsList;
+  if (!wrap || !list) return;
+  clearChildren(list);
+  const openLots = Array.isArray(lots) ? lots : [];
+  wrap.hidden = openLots.length <= 1;
+  for (const lot of openLots) {
+    const product = lot.product || {};
+    const code = lot.code || product.code || "—";
+    const row = document.createElement("div");
+    row.className = "open-lot";
+    if (activeLot?.lotSessionId === lot.lotSessionId) row.classList.add("open-lot--active");
+
+    const meta = document.createElement("div");
+    meta.className = "open-lot__meta";
+    const title = document.createElement("div");
+    title.className = "open-lot__code mono";
+    title.textContent = code;
+    const subtitle = document.createElement("div");
+    subtitle.className = "open-lot__name";
+    subtitle.textContent = product.name || "—";
+    meta.append(title, subtitle);
+
+    const stats = document.createElement("div");
+    stats.className = "open-lot__stats";
+    const events = Array.isArray(lot.reservations?.events) ? lot.reservations.events : [];
+    const reservedCount = events.filter((ev) => ev.status === "reserved" || ev.status === "reserved_appended").length;
+    stats.textContent = `${reservedCount} броней`;
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "open-lot__close";
+    closeBtn.textContent = "×";
+    closeBtn.title = `Закрыть лот ${code}`;
+    closeBtn.addEventListener("click", () => closeLot(lot));
+
+    row.append(meta, stats, closeBtn);
+    list.append(row);
+  }
 }
 
 function formatPrice(value) {
@@ -500,8 +554,14 @@ function formatPrice(value) {
   return new Intl.NumberFormat("ru-RU").format(n) + " ₽";
 }
 
-function renderReservations(reservations) {
-  const events = (reservations && Array.isArray(reservations.events)) ? reservations.events : [];
+function renderReservationsForLots(lots) {
+  const events = [];
+  for (const lot of Array.isArray(lots) ? lots : []) {
+    const lotEvents = Array.isArray(lot.reservations?.events) ? lot.reservations.events : [];
+    for (const ev of lotEvents) {
+      events.push({ ...ev, lotSessionId: lot.lotSessionId, lotCode: ev.lotCode || lot.code });
+    }
+  }
   clearChildren(elements.reservationList);
 
   if (events.length === 0) {
@@ -522,6 +582,11 @@ function renderReservations(reservations) {
   for (const ev of events.slice().reverse()) {
     const item = document.createElement("div");
     item.className = "res-item";
+    // Тегируем строку, чтобы голосовая отмена (voiceCancelMatch) могла найти
+    // и подсветить именно эту бронь. dataset хранит строки.
+    if (ev.viewerId != null) item.dataset.viewerId = String(ev.viewerId);
+    if (ev.commentId != null) item.dataset.commentId = String(ev.commentId);
+    if (ev.lotSessionId != null) item.dataset.lotSessionId = String(ev.lotSessionId);
 
     const avatar = document.createElement("div");
     avatar.className = "res-avatar";
@@ -547,7 +612,8 @@ function renderReservations(reservations) {
         ? ` · итого ${agg.count} брони, ${formatPrice(agg.sum)}`
         : ` · итого ${agg.count} брони`;
     }
-    detail.textContent = `${timeText}${totalText}`;
+    const lotText = ev.lotCode ? `лот ${ev.lotCode} · ` : "";
+    detail.textContent = `${lotText}${timeText}${totalText}`;
     meta.append(nameRow, detail);
 
     const right = document.createElement("span");
@@ -741,8 +807,12 @@ function handleServerMessage(payload) {
   }
 
   if (payload.type === "state") {
-    trackSessionAggregates(payload.activeLot || null);
-    renderActiveLot(payload.activeLot || null);
+    const openLots = getOpenLotsFromPayload(payload);
+    state.activeLot = payload.activeLot || null;
+    state.openLots = openLots;
+    for (const lot of openLots) trackSessionAggregates(lot);
+    renderActiveLot(state.activeLot);
+    renderReservationsForLots(openLots);
     renderDetection(payload.lastDetection || null);
     if (typeof payload.safeMode === "boolean") applySafeModeFromServer(payload.safeMode);
     return;
@@ -765,6 +835,14 @@ function handleServerMessage(payload) {
 
   if (payload.type === "wishlist_count_changed") {
     updateWishlistBadge(payload.count);
+    return;
+  }
+
+  if (payload.type === "voiceCancelMatch") {
+    // Голосовая отмена брони (W3): сервер нашёл бронь по произнесённому имени,
+    // но НЕ отменил её. Подсвечиваем строку и просим оператора подтвердить
+    // кнопкой «× отменить» — никаких авто-списаний в МойСкладе по ошибке речи.
+    highlightReservationForCancel(payload);
     return;
   }
 
@@ -1213,13 +1291,22 @@ elements.refreshDevicesButton.addEventListener("click", loadInputDevices);
 elements.startButton.addEventListener("click", startStreaming);
 elements.stopButton.addEventListener("click", stopStreaming);
 
-document.getElementById("closeLotButton")?.addEventListener("click", () => {
+function closeLot(lot = state.activeLot) {
   if (state.websocket && state.websocket.readyState === 1) {
-    state.websocket.send(JSON.stringify({ type: "closeLot" }));
-    logEvent("Лот закрыт вручную", "info");
+    const code = lot?.code || "";
+    state.websocket.send(JSON.stringify({
+      type: "closeLot",
+      lotSessionId: lot?.lotSessionId || undefined,
+      code: code || undefined,
+    }));
+    logEvent(`Лот ${code || ""} закрыт вручную`, "info");
   } else {
     logEvent("Связь с сервером не установлена — нельзя закрыть лот", "warn");
   }
+}
+
+document.getElementById("closeLotButton")?.addEventListener("click", () => {
+  closeLot(state.activeLot);
 });
 
 // Manual article entry (#14). Operator types the code SpeechKit misheard;
@@ -1245,6 +1332,30 @@ document.getElementById("manualCodeForm")?.addEventListener("submit", (event) =>
   }
 });
 
+// Голосовая отмена брони (W3). Сервер прислал voiceCancelMatch — найденную по
+// имени бронь. Подсвечиваем строку и прокручиваем к ней; оператор сам жмёт
+// «× отменить». Намеренно НЕ вызываем cancelReservation автоматически —
+// распознавание речи не должно само списывать позиции в МойСкладе.
+function highlightReservationForCancel(match) {
+  const list = elements.reservationList;
+  if (!list) return;
+  const selector = match.commentId != null
+    ? `.res-item[data-comment-id="${CSS.escape(String(match.commentId))}"]`
+    : `.res-item[data-viewer-id="${CSS.escape(String(match.viewerId))}"]`;
+  const row = list.querySelector(selector);
+  const shownName = match.viewerName || match.spokenName || "";
+  if (!row) {
+    logEvent(`Голосовая отмена: бронь «${shownName}» не видна в списке`, "warn");
+    return;
+  }
+  list.querySelectorAll(".res-item--cancel-target").forEach((el) => {
+    el.classList.remove("res-item--cancel-target");
+  });
+  row.classList.add("res-item--cancel-target");
+  row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  logEvent(`Голосовая отмена: подсвечена бронь «${shownName}» — подтвердите кнопкой «× отменить»`, "info");
+}
+
 // Cancel a confirmed reservation (#16) — removes the buyer's MoySklad position,
 // frees the stock slot, and lets them re-reserve. Sends cancelReservation over
 // the WS; the server re-validates and refuses under safe mode (replies with a
@@ -1261,6 +1372,8 @@ function cancelReservation(ev) {
   }
   state.websocket.send(JSON.stringify({
     type: "cancelReservation",
+    lotSessionId: ev.lotSessionId,
+    code: ev.lotCode,
     viewerId: ev.viewerId,
     commentId: ev.commentId,
   }));

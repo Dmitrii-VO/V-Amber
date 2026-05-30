@@ -76,3 +76,23 @@ MoySklad `removePositionFromOrder` (exact-id `DELETE`, safe-mode wrapped,
 design record), [[reservation-flow]] ("Cancelling a reservation"),
 [[http-api]], [[web-dashboard]], [[runbooks-and-troubleshooting]], and the
 wiki [[index]]. No deferred operator-audit items remain.
+
+## [2026-05-30] feature | Start Phase 3 multi-lot runtime
+
+Changed the runtime from a single active lot to a current `activeLot` plus an
+`openLotsBySessionId` registry. Opening a different code keeps previous lots
+open, one VK comment poller routes reservations by product code across open
+lots, `stale_detection` no longer auto-closes late detections, and
+`stream_stop`/`stream_end`/errors/socket close bulk-close all open lots.
+`logs/active-state.json` now persists `openLots` for crash-recovery orphan
+scans. Updated [[reservation-flow]] and `PLAN.md`; full `npm test` passes.
+
+Follow-up UI pass: `web-ui` now renders `#openLotsList`, marks the current
+active lot, lets the operator close a specific open lot by `lotSessionId`/code,
+and renders reservations from all open lots with lot-aware cancel actions.
+Updated [[web-dashboard]]. Full `npm test` passes.
+
+Final Phase 3 guard: added an integration test for overflow on an inactive
+open lot. With current `activeLot` on a different code, a previous open lot
+with stock 1 accepts the first buyer and sends the second buyer to
+`out_of_stock`/wishlist. Full `npm test` passes with 185 tests.

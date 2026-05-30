@@ -10,6 +10,8 @@ import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
+import { parseCancelCommand } from "./cancel-command-parser.js";
+import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
 import {
   sendJson,
@@ -51,6 +53,7 @@ export function attachWsServer(httpServer, config, services = {}) {
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
+  const nameCacheStore = services.nameCacheStore || null;
   const createSessionLogImpl = services.createSessionLog || createSessionLog;
   const saveActiveStateImpl = services.saveActiveState || saveActiveState;
   const clearActiveStateImpl = services.clearActiveState || clearActiveState;
@@ -135,6 +138,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     const sessionLog = createSessionLogImpl();
     let session = null;
     let activeLot = null;
+    const openLotsBySessionId = new Map();
     let lastDetection = null;
     let triggerActiveUntil = 0;
     let triggerSessionFinals = [];
@@ -155,6 +159,8 @@ export function attachWsServer(httpServer, config, services = {}) {
     let activeDetectionActionId = null;
     let commentPollingGeneration = 0;
     let commentPollingActive = false;
+    let commentPollingLastCommentId = 0;
+    const commentPollingSeenIds = createBoundedIdSet();
     let customerOrdersByViewerId = new Map();
     let customerOrderSessionVersion = 1;
     // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
@@ -202,6 +208,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       sendJson(websocket, {
         type: "state",
         activeLot,
+        openLots: [...openLotsBySessionId.values()],
         lastDetection,
         safeMode: isSafeMode(),
       });
@@ -211,6 +218,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (activeLot?.lotSessionId) {
         saveActiveStateImpl({
           activeLot,
+          openLots: getOpenLots(),
           sessionFilePath: sessionLog.getFilePath(),
           connectionId,
         });
@@ -257,10 +265,40 @@ export function attachWsServer(httpServer, config, services = {}) {
     function resetDetectionState() {
       commentPollingGeneration += 1;
       commentPollingActive = false;
+      commentPollingLastCommentId = 0;
+      commentPollingSeenIds.clear();
       activeLot = null;
+      openLotsBySessionId.clear();
       lastDetection = null;
       activeDetectionActionId = null;
       resetTriggerWindow("detection_state_reset");
+    }
+
+    function registerOpenLot(lot) {
+      if (lot?.lotSessionId) {
+        openLotsBySessionId.set(lot.lotSessionId, lot);
+      }
+    }
+
+    function unregisterOpenLot(lot) {
+      if (lot?.lotSessionId) {
+        openLotsBySessionId.delete(lot.lotSessionId);
+      }
+      if (activeLot?.lotSessionId === lot?.lotSessionId) {
+        const remainingLots = [...openLotsBySessionId.values()];
+        activeLot = remainingLots.at(-1) || null;
+      }
+    }
+
+    function getOpenLots() {
+      return [...openLotsBySessionId.values()];
+    }
+
+    async function publishAllLotsClosed(reason) {
+      const lots = getOpenLots();
+      await Promise.all(lots.map((lot) => publishLotClosed(lot, reason)));
+      openLotsBySessionId.clear();
+      activeLot = null;
     }
 
     function resetCustomerOrders() {
@@ -312,6 +350,87 @@ export function attachWsServer(httpServer, config, services = {}) {
       const state = ensureReservationState(lot);
       state.events.push(event);
       state.events = state.events.slice(-20);
+    }
+
+    // Голосовая отмена брони (W3). Находит подтверждённую бронь по имени и
+    // просит клиента подсветить строку. НИКОГДА не отменяет сама — реальное
+    // удаление позиции в МойСкладе делает оператор кнопкой «× отменить»
+    // (path cancelReservation, со своей safe-mode защитой). Неоднозначность
+    // имени → предупреждение, без подсветки наугад.
+    function handleVoiceCancelCommand(command, transcript) {
+      const spokenName = command.name;
+      const code = command.code;
+
+      const lot = getOpenLots().find((candidate) => String(candidate.code) === String(code)) || null;
+
+      if (!lot) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Нет открытого лота ${code} для отмены брони (${spokenName})`,
+        });
+        return;
+      }
+
+      const state = ensureReservationState(lot);
+      const events = Array.isArray(state?.events) ? state.events : [];
+      const confirmable = events.filter(
+        (e) => e.status === "reserved" || e.status === "reserved_appended",
+      );
+
+      const candidates = confirmable.map((e) => ({
+        viewerId: e.viewerId,
+        commentId: e.commentId,
+        name: e.viewerName || nameCacheStore?.getName?.(e.viewerId) || "",
+      }));
+      const matches = matchNameAgainst(spokenName, candidates);
+
+      logger.info("ws", "voice_cancel_command", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        spokenCode: code,
+        activeLotCode: activeLot?.code || null,
+        codeMatchesOpenLot: true,
+        spokenName,
+        transcript: typeof transcript === "string" ? transcript.slice(0, 200) : "",
+        candidateCount: candidates.length,
+        matchCount: matches.length,
+        topScore: matches[0]?.score ?? null,
+      });
+
+      if (confirmable.length === 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Нет подтверждённых броней для отмены (${spokenName})`,
+        });
+        return;
+      }
+      if (matches.length === 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Не нашёл бронь по имени «${spokenName}» — отмените вручную`,
+        });
+        return;
+      }
+      // Неоднозначность: первые два совпадения с равным счётом — не выбираем
+      // наугад, это риск отменить чужую бронь (реальные деньги).
+      if (matches.length > 1 && matches[0].score === matches[1].score) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Несколько броней похожи на «${spokenName}» — отмените нужную кнопкой «× отменить»`,
+        });
+        return;
+      }
+
+      const best = matches[0];
+      sendJson(websocket, {
+        type: "voiceCancelMatch",
+        viewerId: best.viewerId,
+        commentId: best.commentId,
+        viewerName: best.name,
+        spokenName,
+        code,
+        lotSessionId: lot.lotSessionId,
+      });
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
@@ -385,7 +504,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (isLotPoisoned(lot.lotSessionId)) return;
       try {
         const productCard = await moysklad.getProductCardByCode(lot.code);
-        if (activeLot !== lot) return;
+        if (openLotsBySessionId.get(lot.lotSessionId) !== lot) return;
         if (productCard && typeof productCard.availableStock === "number"
             && Number.isFinite(productCard.availableStock)) {
           lot.product = lot.product || {};
@@ -486,7 +605,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function isReservationSessionCurrent(lot, reservationSessionVersion) {
       return reservationSessionVersion === customerOrderSessionVersion
-        && activeLot?.lotSessionId === lot?.lotSessionId;
+        && openLotsBySessionId.get(lot?.lotSessionId) === lot;
     }
 
     async function processReservationEvent(lot, event) {
@@ -563,9 +682,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       // реальное число из MoySklad. Защищает от молчаливого over-sell в
       // случаях, когда стартовая карточка лота вернула null/0.
       await ensureStockKnownBeforeFirstReservation(lot, state);
-      if (activeLot !== lot) {
-        // Лот сменился, пока мы ждали MoySklad — выходим без побочных
-        // эффектов; processReservationEvent вызывался для устаревшего лота.
+      if (openLotsBySessionId.get(lot?.lotSessionId) !== lot) {
+        // Лот закрыли, пока мы ждали MoySklad — выходим без побочных
+        // эффектов; processReservationEvent вызывался для закрытого лота.
         return;
       }
 
@@ -766,7 +885,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         state.acceptedUserIds.delete(event.viewerId);
         // Roll back the counter increment from line ~302 so a later viewer
         // isn't blocked by this failed write.
-        state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - 1);
+        state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - needed);
         event.status = "order_failed";
         event.error = error instanceof Error ? error.message : String(error);
         logger.error("moysklad", "reservation_order_failed", {
@@ -802,7 +921,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       emitState();
 
-      if (nextWaitlistEvent && activeLot?.lotSessionId === lot.lotSessionId) {
+      if (nextWaitlistEvent && openLotsBySessionId.get(lot.lotSessionId) === lot) {
         nextWaitlistEvent.status = "pending_reservation";
         // Forensic: фиксируем переход «второй в очереди → первый», чтобы
         // в логе была видна полная судьба брони. Раньше можно было
@@ -827,9 +946,23 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     }
 
-    function startCommentPolling(lot) {
-      const lotSessionId = lot?.lotSessionId;
-      if (!lotSessionId) {
+    function findCommentTarget(text) {
+      for (const lot of getOpenLots()) {
+        const expectedCode = normalizeReservationCode(lot.code);
+        const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
+        if (reservationComment.code && reservationComment.code === expectedCode) {
+          return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
+        }
+        const wishlistComment = parseWishlistComment(text);
+        if (wishlistComment.code && wishlistComment.code === expectedCode) {
+          return { lot, reservationComment, wishlistComment, matchedReservation: false, matchedWishlist: true };
+        }
+      }
+      return null;
+    }
+
+    function startCommentPolling() {
+      if (commentPollingActive) {
         return;
       }
 
@@ -840,15 +973,13 @@ export function attachWsServer(httpServer, config, services = {}) {
         let initialized = false;
         let consecutiveFailures = 0;
 
-        while (generation === commentPollingGeneration && activeLot?.lotSessionId === lotSessionId) {
+        while (generation === commentPollingGeneration && openLotsBySessionId.size > 0) {
           try {
             const comments = await vk.getComments(100);
-            if (generation !== commentPollingGeneration || activeLot?.lotSessionId !== lotSessionId) {
+            if (generation !== commentPollingGeneration || openLotsBySessionId.size === 0) {
               break;
             }
 
-            const currentLot = activeLot;
-            const reservationState = ensureReservationState(currentLot);
             const profileMap = new Map((comments.profiles || []).map((profile) => [profile.id, profile]));
             const sortedItems = (comments.items || []).sort((left, right) => left.id - right.id);
 
@@ -856,8 +987,8 @@ export function attachWsServer(httpServer, config, services = {}) {
               initialized = true;
               consecutiveFailures = 0;
 
-              if (reservationState.lastCommentId <= 0) {
-                reservationState.lastCommentId = sortedItems.at(-1)?.id || reservationState.lastCommentId;
+              if (commentPollingLastCommentId <= 0) {
+                commentPollingLastCommentId = sortedItems.at(-1)?.id || commentPollingLastCommentId;
 
                 await new Promise((resolve) => {
                   setTimeout(resolve, 2000);
@@ -867,33 +998,36 @@ export function attachWsServer(httpServer, config, services = {}) {
             }
 
             const newItems = (comments.items || [])
-              .filter((item) => item.id > reservationState.lastCommentId && !hasSeenComment(reservationState, item.id))
+              .filter((item) => item.id > commentPollingLastCommentId && !commentPollingSeenIds.has(item.id))
               .sort((left, right) => left.id - right.id);
 
             for (const comment of newItems) {
+              commentPollingLastCommentId = Math.max(commentPollingLastCommentId, comment.id);
+              addBoundedId(commentPollingSeenIds, comment.id);
+
+              const target = findCommentTarget(comment.text);
+              if (!target) {
+                continue;
+              }
+              const { lot: currentLot, reservationComment, wishlistComment, matchedReservation, matchedWishlist } = target;
+              const reservationState = ensureReservationState(currentLot);
               reservationState.lastCommentId = Math.max(reservationState.lastCommentId, comment.id);
               rememberSeenComment(reservationState, comment.id);
 
               // Forensic: каждый новый комментарий в окне лота попадает в лог,
               // даже если не «бронь». Это позволяет позже увидеть пропущенные
               // брони (опечатки, «забронируй», эмодзи) и общий шум вокруг лота.
-              const expectedReservationCode = normalizeReservationCode(currentLot.code);
-              const reservationComment = parseReservationComment(comment.text, {
-                preferredCode: expectedReservationCode,
-              });
-              const wishlistComment = parseWishlistComment(comment.text);
-              const matchedReservation = Boolean(
-                reservationComment.code
-                && reservationComment.code === expectedReservationCode,
-              );
-              const matchedWishlist = Boolean(
-                wishlistComment.code
-                && wishlistComment.code === expectedReservationCode,
-              );
               const profileForLog = profileMap.get(comment.from_id);
               const viewerNameForLog = profileForLog
                 ? [profileForLog.first_name, profileForLog.last_name].filter(Boolean).join(" ")
                 : "";
+              // Персистентный кеш имён (W3): запоминаем КАЖДОГО комментатора с
+              // резолвнутым именем, не только бронирующих. Кеш переживает
+              // стоп/старт эфира и используется голосовой отменой брони для
+              // сопоставления произнесённого оператором имени с зрителем.
+              if (nameCacheStore && viewerNameForLog) {
+                nameCacheStore.remember(comment.from_id, viewerNameForLog);
+              }
               logger.info("vk", "comment_seen", {
                 connectionId,
                 lotSessionId: currentLot.lotSessionId,
@@ -1028,7 +1162,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             if (consecutiveFailures > 0) {
               logger.info("vk", "comment_poll_recovered", {
                 connectionId,
-                lotSessionId,
+                openLotCount: openLotsBySessionId.size,
                 afterFailures: consecutiveFailures,
               });
               sendJson(websocket, { type: "info", message: "VK комменты снова приходят" });
@@ -1039,7 +1173,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             const errorCode = getVkApiErrorCode(error);
             logger.warn("vk", "comment_poll_failed", {
               connectionId,
-              lotSessionId,
+              openLotCount: openLotsBySessionId.size,
               consecutiveFailures,
               errorCode,
               error,
@@ -1048,7 +1182,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             if (isFatalCommentReadError(error)) {
               logger.warn("vk", "comment_poll_stopped", {
                 connectionId,
-                lotSessionId,
+                openLotCount: openLotsBySessionId.size,
                 reason: "fatal_api_error",
                 errorCode,
               });
@@ -1331,6 +1465,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function activateConfirmedLot(detection, nextLot, source = "voice") {
       activeLot = nextLot;
+      registerOpenLot(nextLot);
       lastDetection = {
         ...detection,
         status: "confirmed",
@@ -1503,10 +1638,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       // 03212 переоткрывались 2–3 раза каждый). При том же коде, что и у
       // активного лота, не делаем close+reopen — только мерджим новые данные
       // (voicePrice, product card если был null) в существующий lotSessionId.
-      if (activeLot
-          && activeLot.code === selectedCode
-          && activeLot.lotSessionId
-          && !isLotPoisoned(activeLot.lotSessionId)) {
+      const sameCodeOpenLot = getOpenLots().find((lot) => lot.code === selectedCode) || null;
+      if (sameCodeOpenLot?.lotSessionId && !isLotPoisoned(sameCodeOpenLot.lotSessionId)) {
+        activeLot = sameCodeOpenLot;
         await mergeSameCodeRedetection(detection, source, voicePrice, {
           runId, enforceActiveRun, expectedDetectionId,
         });
@@ -1535,33 +1669,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
-      const previousLot = activeLot;
-
-      if (previousLot?.lotSessionId) {
-        // Оператор переключился на другой лот голосом — у предыдущего лота
-        // могла остаться очередь, и её надо явно зафиксировать как
-        // потерянную, чтобы оператор увидел в .md и поднял заказы вручную.
-        await flushOrphanWaitlist(previousLot, "lot_replaced_by_new_detection");
-      }
-
-      if (previousLot?.lotSessionId && !isLotPoisoned(previousLot.lotSessionId)) {
-        try {
-          await vk.publishLotClosed(previousLot);
-        } catch (error) {
-          handleVkPublishError(previousLot, error);
-          logger.error("vk", "lot_close_publish_failed", {
-            connectionId,
-            code: previousLot.code,
-            lotSessionId: previousLot.lotSessionId,
-            error,
-          });
-        }
-
-        if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
-          return;
-        }
-      }
-
       const confirmedLot = buildConfirmedLot(detection, selectedCode, source, productCard);
       let publicationCommentId = null;
 
@@ -1579,9 +1686,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
-        if (publicationCommentId !== null) {
-          await publishLotClosed(confirmedLot, "stale_detection");
-        }
         return;
       }
 
@@ -1604,7 +1708,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         transcript: confirmedLot.transcript,
         source: confirmedLot.source,
       });
-      startCommentPolling(confirmedLot);
+      startCommentPolling();
 
       resetTriggerWindow("confirmed_detection_completed");
     }
@@ -1677,6 +1781,19 @@ export function attachWsServer(httpServer, config, services = {}) {
               sessionLog.logTranscriptFinal({ text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
               rememberFinal(text);
+
+              // Голосовая отмена брони (W3): «<Имя Фамилия> отмена лота #код».
+              // НЕ исполняем отмену из речи — только находим бронь и просим
+              // клиента подсветить строку; оператор подтверждает кнопкой
+              // «× отменить». Это исключает авто-списание денег в МойСкладе по
+              // ошибке распознавания. Обрабатываем до article-детекции и
+              // выходим, чтобы «отмена лота 033322» не открыла лот 033322.
+              const cancelCommand = parseCancelCommand(text);
+              if (cancelCommand.matched) {
+                handleVoiceCancelCommand(cancelCommand, text);
+                return;
+              }
+
               const priceResult = detectPrice(text);
 
               const discountResult = detectDiscount(text, config.discount.triggers);
@@ -1840,7 +1957,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 return;
               }
 
-              await publishLotClosed(activeLot, "stream_error");
+              await publishAllLotsClosed("stream_error");
               await wishlistStore?.flush?.();
               logger.error("speechkit", "stream_error", { connectionId, error });
               sessionLog.logSessionEnd({ reason: "stream_error" });
@@ -1877,7 +1994,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
               } catch (error) {
                 logger.error("speechkit", "stream_auto_reconnect_failed", { connectionId, error });
-                await publishLotClosed(activeLot, "stream_end");
+                await publishAllLotsClosed("stream_end");
                 await wishlistStore?.flush?.();
                 sessionLog.logSessionEnd({ reason: "stream_end" });
                 await sessionLog.flush();
@@ -2026,16 +2143,22 @@ export function attachWsServer(httpServer, config, services = {}) {
           // Operator manually closes the active lot — same path as voice
           // re-detection / stream_stop, but without ending the session.
           // Useful when speech recognition missed the operator moving on.
-          if (activeLot) {
-            const closingLot = activeLot;
+          const closingLot = payload.lotSessionId
+            ? openLotsBySessionId.get(payload.lotSessionId)
+            : (payload.code
+              ? getOpenLots().find((candidate) => String(candidate.code) === String(payload.code))
+              : activeLot);
+          if (closingLot) {
             logger.info("ws", "lot_close_requested_by_operator", {
               connectionId,
               lotSessionId: closingLot.lotSessionId,
               code: closingLot.code,
             });
             await publishLotClosed(closingLot, "manual_close");
-            activeLot = null;
-            resetCustomerOrders();
+            unregisterOpenLot(closingLot);
+            if (openLotsBySessionId.size === 0) {
+              resetCustomerOrders();
+            }
             emitState();
           }
           return;
@@ -2048,7 +2171,11 @@ export function attachWsServer(httpServer, config, services = {}) {
           // Адресный DELETE по сохранённому positionId исключает удаление
           // соседней позиции того же товара (кейс reserved_appended).
           // См. knowledge/wiki/deferred-operator-features.md #16.
-          const lot = activeLot;
+          const lot = payload.lotSessionId
+            ? openLotsBySessionId.get(payload.lotSessionId)
+            : (payload.code
+              ? getOpenLots().find((candidate) => String(candidate.code) === String(payload.code))
+              : activeLot);
           if (!lot) {
             sendJson(websocket, { type: "warning", message: "Нет активного лота для отмены брони" });
             return;
@@ -2180,7 +2307,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         if (payload.type === "stop") {
           logger.info("ws", "stream_stop_requested", { connectionId });
-          await publishLotClosed(activeLot, "stream_stop");
+          await publishAllLotsClosed("stream_stop");
           await wishlistStore?.flush?.();
           sessionLog.logSessionEnd({ reason: "stream_stop" });
           await sessionLog.flush();
@@ -2203,7 +2330,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     websocket.on("close", async () => {
       logger.info("ws", "client_disconnected", { connectionId });
-      await publishLotClosed(activeLot, "socket_close");
+      await publishAllLotsClosed("socket_close");
       await wishlistStore?.flush?.();
       sessionLog.logSessionEnd({ reason: "socket_close" });
       await sessionLog.flush();

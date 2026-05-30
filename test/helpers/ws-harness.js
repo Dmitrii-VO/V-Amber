@@ -98,6 +98,20 @@ export function createProductCodeCacheMock(codes = []) {
   };
 }
 
+export function createWishlistStoreMock() {
+  const calls = [];
+  return {
+    addFromOutOfStock: async (entry) => {
+      calls.push(entry);
+      return { id: `wishlist-${calls.length}` };
+    },
+    flush: async () => {},
+    getActiveCount: () => calls.length,
+    subscribe: () => {},
+    calls,
+  };
+}
+
 function buildConfig(overrides = {}) {
   return {
     articleExtraction: {
@@ -149,6 +163,7 @@ export async function startHarness({
   knownCodes = [],
   moysklad: moyskladOverride,
   vk: vkOverride,
+  wishlistStore: wishlistStoreOverride,
   config: configOverride = {},
 } = {}) {
   __resetIdCountersForTests();
@@ -156,6 +171,7 @@ export async function startHarness({
   const vk = vkOverride || createVkMock();
   const moysklad = moyskladOverride || createMoyskladMock({ cardsByCode });
   const productCodeCache = createProductCodeCacheMock(knownCodes);
+  const wishlistStore = wishlistStoreOverride || createWishlistStoreMock();
 
   // Фейковая SpeechKit-сессия: захватывает handlers, отдаёт их тесту.
   const sessions = [];
@@ -176,6 +192,7 @@ export async function startHarness({
     vk,
     moysklad,
     productCodeCache,
+    wishlistStore,
     createSpeechKitSession,
     createSessionLog: createSessionLogMock,
     saveActiveState: () => {},
@@ -193,6 +210,7 @@ export async function startHarness({
     vk,
     moysklad,
     productCodeCache,
+    wishlistStore,
     getLastSpeechKitSession: () => sessions[sessions.length - 1] || null,
     // start обрабатывается асинхронно — ждём, пока фейковая сессия появится.
     async waitForSession({ timeoutMs = 2000 } = {}) {
