@@ -101,6 +101,69 @@ deferred for safety reasons.
 - Public wishlist hint: no auto-post of the `СПИСОК <код>` instruction
   during a broadcast.
 
+## Operator wishes 2026-05-30 (Roman — multi-lot + waiting list)
+
+Source: VK DM screenshots from Роман Васильев. Six requests, with the
+operator's clarifying answers captured in-session.
+
+- **W1 — lots stay open through the whole broadcast.** Today the model is
+  single-active-lot: naming a new code closes the previous lot via
+  `publishLotClosed(..., "stale_detection")` (`server/ws-server.js`
+  ~1549/1583) and dumps pending reservations to `orphan_waitlist`. The
+  operator wants every named lot to remain bookable by its code until the
+  broadcast ends. This is a model change (single `activeLot` → registry of
+  open lots), touching reservation routing (`preferredCode`), per-lot stock
+  / `committedReservationCount`, VK cards, and close paths. Overlaps
+  deferred #14 and needs WS-session integration tests.
+- **W2 — lots close only at end of broadcast.** Keep `stream_stop` /
+  `stream_end` mass close; remove the mid-air `stale_detection` auto-close.
+- **W3 — voice cancel.** Operator says e.g. "Галина Прокофьева отмена
+  лота #033322". Clarified: this cancels **that buyer's reservation**
+  (not the whole lot) — reuse the existing `cancelReservation` path
+  (`server/ws-server.js` ~2044), matching the event by viewer name + code.
+  Wants voice trigger **plus** a UI button (the `× закрыть лот` /
+  `cancelReservation` buttons already exist).
+  - **Persistent name cache (operator-requested).** Resolving the spoken
+    name needs a `viewerId → name` cache that survives stop/start of a
+    broadcast and process restart — the in-memory `customerOrdersByViewerId`
+    and lot state are wiped on socket close (`server/ws-server.js` ~623),
+    so after a restart they cannot resolve names. New
+    `server/name-cache-store.js`, append-only `logs/viewer-names.jsonl`,
+    modelled on `server/wishlist-store.js` (`load()` on start folds events
+    to last-name-per-viewerId). Records every VK name resolved at the
+    profile-resolution point (`server/ws-server.js` ~894), not only
+    reservers, so it accumulates across broadcasts and recognises repeat
+    buyers immediately. Store a normalised form (lowercase, ё→е, tokens)
+    for matching; matching logic in a small `server/name-matcher.js` like
+    `server/article-extractor.js`, tolerant of declensions ("Галину
+    Прокофьеву") and word order. Cancel flow: speech → normalise → match
+    cache → resolve viewerId → find reservation by code → **highlight the
+    row** → operator confirms with the button (no silent voice-triggered
+    money mutation). PII: keep `logs/viewer-names.jsonl` out of the
+    sendLogs bundle.
+- **W4 — bare code reserves.** Already satisfied; see [[reservation-flow]].
+- **W5 — overflow goes to the waiting list.** Partly done: the stock
+  guard already calls `addWishlistFromComment(lot, event,
+  "out_of_stock_reservation")` (`server/ws-server.js` ~589) with status
+  `out_of_stock`, so over-cap `бронь` lands in [[wishlist]] instead of
+  closing the lot.
+- **W6 — waiting-list columns + manual mode.** Wanted columns: Товар,
+  Кол-во, Поставщик, Человек заказавший — mostly present in wishlist
+  already. "В ручном режиме пока": do **not** auto-message overflow
+  buyers — verify `notifyReservationStatus` does not post a public VK
+  reply for `out_of_stock`.
+
+Operator's answers to open design questions:
+
+1. Voice "отмена лота #код" = cancel that buyer's reservation (option Б).
+2. Do not run a poller per lot. Hold open lots in an in-memory
+   cache/registry, keep a **single** comment poller (comments arrive on
+   the live video/post, not per-lot), and route each comment to the
+   matching open lot by code. Extra VK cost is the one-time lot-card
+   publish, not polling.
+3. A lot stays open until end of broadcast even at stock 0; further
+   `бронь` over the cap go to the waiting list.
+
 ## Related pages
 
 - [[live-commerce-flow]]

@@ -578,7 +578,7 @@ a { color: inherit; }
   padding: 0 var(--gap-2);
 }
 
-.wishlist-viewers {
+.wishlist-ordered-by {
   display: inline-block; max-width: 200px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: var(--font-mono); font-size: var(--fs-xs);

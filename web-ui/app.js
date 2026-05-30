@@ -1832,7 +1832,7 @@ function renderWishlistActive() {
         <table class="wishlist-table">
           <thead><tr>
             <th></th><th>Артикул</th><th>Товар</th><th>Кол-во</th>
-            <th>Закуп. цена</th><th>Зрители</th><th>Возраст</th><th></th>
+            <th>Закуп. цена</th><th>Заказавший</th><th>Возраст</th><th></th>
           </tr></thead>
           <tbody>
             ${g.entries.map((e) => renderWishlistRow(g, e)).join("")}
@@ -1980,7 +1980,9 @@ function renderWishlistRow(group, entry) {
          ${wishlistState.suppliers.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("")}
        </select>`
     : "";
-  const viewers = (entry.seenEvents || []).length > 1
+  // «Заказавший» — имя зрителя, оформившего предзаказ. Если тот же зритель
+  // повторно «засветился» по этому коду (seenEvents>1), показываем +N.
+  const orderedBy = (entry.seenEvents || []).length > 1
     ? `${entry.viewerName} +${(entry.seenEvents.length - 1)}`
     : (entry.viewerName || "—");
   const ageDays = Math.floor((Date.now() - new Date(entry.createdAt).getTime()) / 86400000);
@@ -2028,7 +2030,7 @@ function renderWishlistRow(group, entry) {
                placeholder="—"
                title="В рублях. На сервер уходит ×100 как копейки." />
       </td>
-      <td><span class="wishlist-viewers" title="${escapeHtml((entry.seenEvents || []).map((s) => s.ts).join("\n"))}">${escapeHtml(viewers)}</span></td>
+      <td><span class="wishlist-ordered-by" title="${escapeHtml((entry.seenEvents || []).map((s) => s.ts).join("\n"))}">${escapeHtml(orderedBy)}</span></td>
       <td class="mono dim">${ageStr}</td>
       <td><button class="wishlist-row-remove" data-remove="${entry.id}" title="Удалить из wish list">×</button></td>
     </tr>
