@@ -106,6 +106,7 @@ a { color: inherit; }
 .pill--amber { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-border); }
 .pill--red   { color: var(--red);   background: var(--red-bg);   border-color: var(--red-border); }
 .pill--blue  { color: var(--blue);  background: var(--blue-bg);  border-color: rgba(96,165,250,0.3); }
+.pill--muted { color: var(--text-dim); background: var(--surface-2); border-color: var(--border); text-decoration: line-through; }
 
 .btn {
   height: var(--control-h); padding: 0 var(--gap-4);
@@ -301,6 +302,14 @@ a { color: inherit; }
 .res-name { font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .res-detail { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); }
 .res-empty { padding: var(--gap-6) var(--gap-5); text-align: center; color: var(--text-dim); font-size: var(--fs-sm); }
+.res-cancel {
+  justify-self: end;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text-dim); border-radius: var(--radius);
+  padding: 2px 8px; font-size: var(--fs-xs); cursor: pointer;
+  white-space: nowrap;
+}
+.res-cancel:hover { border-color: var(--red-border); color: var(--red); }
 
 /* ===== Events ===== */
 .events { font-family: var(--font-mono); font-size: var(--fs-xs); display: flex; flex-direction: column; }

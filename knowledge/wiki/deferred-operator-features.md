@@ -10,7 +10,8 @@ could land safely.
 - **WebSocket integration test harness** — landed (`test/helpers/ws-harness.js`).
 - **#14 — manual code entry** — **landed.** Kept below as a design
   record; see the "Implemented" note in its section.
-- **#16 — cancel reservation** — still deferred. The only remaining item.
+- **#16 — cancel reservation** — **landed.** Kept below as a design record;
+  see the "Implemented" note in its section. No deferred items remain.
 
 ## WebSocket integration test harness (landed)
 
@@ -37,10 +38,11 @@ with mock services and a real `ws` client. What it provides today:
 - A sequential-cursor `client.waitFor(...)` over the server→client
   message stream.
 
-**What #16 will still need added to the harness:** a
-`removePositionFromOrder` mock (once that method exists on
-`server/moysklad.js`), `getReservationDigestForDate`, and a safe-mode
-toggle assertion path. See the #16 failure modes below.
+**What #16 added to the harness (landed):** a `removePositionFromOrder`
+mock on `createMoyskladMock`, and `createCustomerOrderReservation` /
+`appendPositionToCustomerOrder` mocks now return a `positionId` so the
+cancel path has an exact position to target. The safe-mode toggle is
+driven through the existing `setSafeMode` WS message.
 
 ## #14 — Manual code entry on the active lot (landed)
 
@@ -125,11 +127,45 @@ code with the keyboard" — is now closed by `manualCode`. The voice retry
 still works and remains the fastest fix when the mic is live; see the
 recipe in [[runbooks-and-troubleshooting]].
 
-## #16 — Cancel reservation from the UI
+## #16 — Cancel reservation from the UI (landed)
 
 What the operator expects: a button on each reservation row. Click
 → reservation removed from MoySklad, `committedReservationCount`
 decrements, stock frees up for the next buyer.
+
+> **Implemented.** WS message `cancelReservation { viewerId, commentId }`
+> in `server/ws-server.js` (next to `manualCode`/`setLotPrice`/`closeLot`),
+> a per-row `× отменить` button in `web-ui/`, and
+> `test/ws-server.cancel-reservation.test.js`. How each failure mode below
+> was resolved:
+> - **FM#1 (idempotency / wrong sibling)** — the created/appended MoySklad
+>   **position id** is captured at reservation time
+>   (`createCustomerOrderReservation` / `appendPositionToCustomerOrder` now
+>   return `positionId`) and stored on the event as
+>   `customerOrder.positionId`. Cancel issues
+>   `DELETE entity/customerorder/{orderId}/positions/{positionId}` — an exact
+>   id, so a retry can never delete a *sibling* position of the same product.
+>   `deleteJson` treats a `404` as success (`alreadyGone`) → idempotent.
+> - **FM#2 (safe mode)** — `removePositionFromOrder` is in the
+>   `wrapWithSafeMode` write-method list in `server/index.js`; the WS handler
+>   also re-checks `isSafeMode()` up front and replies with a `warning`
+>   ("Отмена брони недоступна в safe-mode") without touching any state.
+> - **FM#3 (counter / acceptedUserIds)** — on a confirmed delete the handler
+>   decrements `committedReservationCount` by `event.quantity` (floored at 0),
+>   removes `viewerId` from `acceptedUserIds` (so the buyer can re-reserve),
+>   drops the `customerOrdersByViewerId` day entry, and sets
+>   `event.status = "cancelled"`.
+> - **FM#4 (stale digest DM)** — left self-healing, no new log contract:
+>   `getReservationDigestForDate` reads MoySklad live and
+>   `enrichDigestWithSendState` keys "already sent" on a `digestHash` of the
+>   client's items. After a cancel the items change → the hash changes →
+>   the operator can re-send the corrected digest. Nothing is written to
+>   `reservation-digest-log.jsonl`.
+> - **FM#5 (empty order)** — left in place by design: the code never deletes
+>   whole customer orders. An order with zero positions stays in MoySklad
+>   (visible, unused), same as the operator deleting the last line manually.
+> - **No public VK reply on cancel** in v1 — avoids the error-801 →
+>   `markLotPoisoned` risk; cancel is operator-initiated and silent to buyers.
 
 ### Failure modes
 
@@ -188,8 +224,11 @@ acceptable until cancellation can be done without risk to money flow.
 - #14 runbook recipe ("SpeechKit misheard the article code") landed in
   [[runbooks-and-troubleshooting]]; the WS contract is in
   [[http-api#Operator WS messages]] and the UI in [[web-dashboard]].
-- When #16 lands, add its operator-driven fix recipe to
-  [[runbooks-and-troubleshooting]] the same way.
+- #16 runbook recipe ("Cancel a wrong reservation") landed in
+  [[runbooks-and-troubleshooting]]; the WS contract is in
+  [[http-api#Operator WS messages]] and the UI in [[web-dashboard]]. The
+  cancel path is also covered in [[reservation-flow]] ("Cancelling a
+  reservation").
 
 ## Related pages
 

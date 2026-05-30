@@ -36,9 +36,10 @@ change.
 - [[testing-guide]] — Current Node test entry point and focused test files.
 - [[documentation-drift]] — Places where README, AGENTS, or other docs need to
   be synchronized with the current tree.
-- [[deferred-operator-features]] — Operator-audit items that need WS
-  integration test scaffolding before they can land safely (#14
-  manual code entry, #16 cancel reservation).
+- [[deferred-operator-features]] — Design records for the operator-audit
+  items that needed WS integration test scaffolding before landing (#14
+  manual code entry, #16 cancel reservation). Both have landed; no deferred
+  items remain.
 
 ## Product and business flows
 

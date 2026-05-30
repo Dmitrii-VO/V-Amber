@@ -87,6 +87,16 @@ Browser → server message types (in addition to `start`, `stop`,
 - `closeLot` — manually close the active lot. Backend calls
   `publishLotClosed(activeLot, "manual_close")`, resets `activeLot`,
   and emits a fresh state. The session continues.
+- `cancelReservation` `{ viewerId, commentId }` — operator cancels a
+  confirmed reservation. Backend finds the matching `reserved` /
+  `reserved_appended` event, removes its MoySklad position by exact
+  `positionId` (`removePositionFromOrder`), decrements
+  `committedReservationCount` by the event quantity, removes the viewer
+  from `acceptedUserIds`, drops the `customerOrdersByViewerId` day entry,
+  and marks the event `cancelled`. Blocked under safe mode (replies with a
+  `warning`, no state change). A missing/already-cancelled reservation or a
+  missing stored position also replies with a `warning`. See
+  [[deferred-operator-features]] #16.
 - `setLotPrice` — override the active lot's price. Backend overwrites
   both `voicePrice` and `salePrice` on the active product, sets
   `priceSource: "manual"`, and republishes the VK card if comments are

@@ -554,9 +554,25 @@ function renderReservations(reservations) {
     right.className = "pill";
     if (ev.status === "accepted" || ev.accepted) right.classList.add("pill--green");
     else if (ev.status === "rejected") right.classList.add("pill--red");
+    else if (ev.status === "cancelled") right.classList.add("pill--muted");
     right.textContent = ev.status || "бронь";
 
     item.append(avatar, meta, right);
+
+    // Кнопка отмены брони (#16) — только для подтверждённых броней. Шлёт
+    // cancelReservation по WS; сервер удаляет позицию из МойСклада, снимает
+    // слот стока и помечает бронь cancelled. Безопасно для safe-mode —
+    // сервер ответит warning и состояние не изменит.
+    if (ev.status === "reserved" || ev.status === "reserved_appended") {
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "res-cancel";
+      cancelBtn.title = "Отменить бронь";
+      cancelBtn.textContent = "× отменить";
+      cancelBtn.addEventListener("click", () => cancelReservation(ev));
+      item.append(cancelBtn);
+    }
+
     elements.reservationList.append(item);
   }
 }
@@ -1228,6 +1244,28 @@ document.getElementById("manualCodeForm")?.addEventListener("submit", (event) =>
     logEvent("Связь с сервером не установлена — нельзя применить код", "warn");
   }
 });
+
+// Cancel a confirmed reservation (#16) — removes the buyer's MoySklad position,
+// frees the stock slot, and lets them re-reserve. Sends cancelReservation over
+// the WS; the server re-validates and refuses under safe mode (replies with a
+// warning). Wired from the per-row "× отменить" button in renderReservations.
+function cancelReservation(ev) {
+  if (!ev || ev.viewerId == null) return;
+  if (!(state.websocket && state.websocket.readyState === 1)) {
+    logEvent("Связь с сервером не установлена — нельзя отменить бронь", "warn");
+    return;
+  }
+  const name = ev.viewerName || ev.viewerId;
+  if (!window.confirm(`Отменить бронь: ${name}? Позиция будет удалена из заказа МойСклад.`)) {
+    return;
+  }
+  state.websocket.send(JSON.stringify({
+    type: "cancelReservation",
+    viewerId: ev.viewerId,
+    commentId: ev.commentId,
+  }));
+  logEvent(`Запрошена отмена брони: ${name}`, "info");
+}
 
 // Click-to-edit on the lot price field. Replaces the rendered price with a
 // small inline number input; Enter applies, Escape cancels. Server hops the
