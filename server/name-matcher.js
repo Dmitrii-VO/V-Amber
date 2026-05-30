@@ -22,6 +22,11 @@ const CASE_ENDINGS = [
   "а", "у", "е", "ы", "и", "о", "ю", "я", "й",
 ];
 
+// Короткие имена вроде «Оля»/«Олю» состоят из 3 букв. Общий лимит основы
+// ниже не даёт резать их обычным путём, поэтому разрешаем только мягкий
+// 3-буквенный срез типичных именных окончаний до двухбуквенной основы.
+const SHORT_NAME_ENDINGS = new Set(["а", "у", "е", "и", "ю", "я"]);
+
 const STEM_MIN_LENGTH = 3;
 
 export function normalizeName(value) {
@@ -44,6 +49,7 @@ export function tokenizeName(value) {
 // короче STEM_MIN_LENGTH. «прокофьева» → «прокофь», «галину» → «галин».
 export function stemToken(token) {
   const t = String(token || "");
+  if (t.length === STEM_MIN_LENGTH && SHORT_NAME_ENDINGS.has(t.at(-1))) return t.slice(0, -1);
   if (t.length <= STEM_MIN_LENGTH) return t;
   let best = t;
   for (const ending of CASE_ENDINGS) {

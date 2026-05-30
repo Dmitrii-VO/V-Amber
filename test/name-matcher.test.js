@@ -22,6 +22,7 @@ test("tokenizeName splits into clean tokens", () => {
 
 test("stemToken trims case endings but keeps a minimum stem", () => {
   assert.equal(stemToken("галину"), stemToken("галина"));
+  assert.equal(stemToken("олю"), stemToken("оля"));
   assert.equal(stemToken("ян"), "ян"); // too short to trim
 });
 
@@ -85,6 +86,15 @@ test("matchNameAgainst with 2+ spoken tokens requires ALL tokens (no half match)
     { id: 3, name: "Галина Сидорова" },
   ]);
   assert.equal(matches.length, 0);
+});
+
+test("matchNameAgainst tolerates short declined first names", () => {
+  const matches = matchNameAgainst("Олю Иванову", [
+    { id: 4, name: "Оля Иванова" },
+  ]);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].id, 4);
+  assert.equal(matches[0].score, 1);
 });
 
 test("matchNameAgainst single spoken token still matches at 0.5 threshold", () => {
