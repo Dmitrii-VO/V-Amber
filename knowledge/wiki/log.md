@@ -65,3 +65,14 @@ calendar broadcast day per buyer. The first reservation for a buyer creates an
 order with a daily `#Эфир YYYY-MM-DD` marker; later reservations from the same
 day may append only to an order with that marker. Older open or unpaid orders
 without the marker stay separate.
+
+## [2026-05-30] feature | Cancel reservation from the dashboard (#16)
+
+Landed the last deferred operator-audit item. WS `cancelReservation`,
+MoySklad `removePositionFromOrder` (exact-id `DELETE`, safe-mode wrapped,
+404 = idempotent), per-row `× отменить` button, and
+`test/ws-server.cancel-reservation.test.js`. Updated
+[[deferred-operator-features]] (moved #16 to landed with the failure-mode
+design record), [[reservation-flow]] ("Cancelling a reservation"),
+[[http-api]], [[web-dashboard]], [[runbooks-and-troubleshooting]], and the
+wiki [[index]]. No deferred operator-audit items remain.
