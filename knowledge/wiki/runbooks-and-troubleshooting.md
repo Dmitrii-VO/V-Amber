@@ -31,7 +31,10 @@ container through localhost port mapping.
 ## VK writes or MoySklad writes should be avoided
 
 Use safe mode from the Web UI or `POST /api/safe-mode`. Safe mode blocks
-external write actions while preserving recognition and logs.
+external write actions (MoySklad `createCustomerOrderReservation`,
+`appendPositionToCustomerOrder`, `removePositionFromOrder`,
+`createPurchaseOrder`, and VK publishes) while preserving recognition and
+logs.
 
 ## Need diagnostic evidence
 
@@ -59,6 +62,29 @@ origins. Look for `WARN ws origin_rejected` in `logs/server.log`.
 integration plus the safe-mode flag, and switches to `503` when MoySklad
 has a `lastError` or when core credentials are missing. See
 [[http-api#Core routes]].
+
+## Cancel a wrong reservation
+
+A buyer reserved the wrong item, double-booked, or backed out. Click
+`× отменить` on that reservation row in the dashboard and confirm. The
+backend removes exactly that buyer's MoySklad position (by stored
+`positionId`, so a sibling line of the same product is never touched),
+decrements the reservation counter, frees the stock slot for the next
+buyer, and lets the same buyer reserve again. The row flips to
+`cancelled`. Notes:
+
+- **Safe mode blocks it** — you get a warning and nothing is deleted.
+  Turn safe mode off to cancel for real.
+- **Already-sent digest** — if you already DM'd the daily digest to that
+  client, re-open the digest modal and re-send: the preview is rebuilt
+  live from MoySklad, so it reflects the cancellation and the client gets
+  a corrected summary.
+- **Empty order** — if that was the buyer's only line, MoySklad keeps an
+  empty customer order (visible, unused). Delete it manually in MoySklad
+  if you want it gone.
+
+See [[reservation-flow]] "Cancelling a reservation" and
+[[deferred-operator-features]] #16.
 
 ## SpeechKit misheard the article code
 

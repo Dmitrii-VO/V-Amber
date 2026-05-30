@@ -221,6 +221,60 @@ export function createMoySkladClient(config, options = {}) {
     }
   }
 
+  // DELETE-запрос. Используется для отмены брони (удаление позиции из
+  // customerorder). Идемпотентность: MoySklad на повторное удаление уже
+  // удалённой позиции отвечает 404 — трактуем как успех (alreadyGone:true),
+  // чтобы ретрай оператора не приводил к ошибке. 200/204 без тела — тоже ок.
+  async function deleteJson(path, options = {}) {
+    const startedAt = Date.now();
+    const callSource = options.source || undefined;
+    let httpStatus = 0;
+    let ok = false;
+    let errorMessage = null;
+    try {
+      const response = await fetchWithTimeout(
+        buildApiUrl(config.baseUrl, path),
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json;charset=utf-8",
+          },
+        },
+        `DELETE ${path}`,
+      );
+      httpStatus = response.status;
+
+      if (response.status === 404) {
+        ok = true;
+        return { ok: true, alreadyGone: true };
+      }
+
+      if (!response.ok) {
+        errorMessage = `MoySklad HTTP ${response.status}`;
+        throw new Error(errorMessage);
+      }
+
+      ok = true;
+      return { ok: true };
+    } catch (error) {
+      errorMessage = errorMessage || (error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      emitCall({
+        op: "DELETE",
+        method: "DELETE",
+        path,
+        durationMs: Date.now() - startedAt,
+        ok,
+        httpStatus,
+        idsExtracted: [],
+        errorMessage: ok ? null : errorMessage,
+        source: callSource,
+      });
+    }
+  }
+
   let cachedDefaults = null;
 
   async function resolveDefaults() {
@@ -932,6 +986,23 @@ export function createMoySkladClient(config, options = {}) {
       counterpartyLocks.set(lockKey, promise);
       return promise;
     },
+    // Возвращает id первой позиции заказа отдельным GET. Нужен как фоллбэк для
+    // create-пути (#16): POST entity/customerorder отдаёт positions без rows.
+    // Ошибку глотаем — отсутствие positionId не должно ронять саму бронь, она
+    // лишь сделает её неотменяемой из UI (оператор удалит позицию в МойСкладе).
+    async resolveFirstOrderPositionId(orderId) {
+      try {
+        const payload = await requestJson(`entity/customerorder/${orderId}/positions`, { limit: 1 });
+        return payload.rows?.[0]?.id || null;
+      } catch (error) {
+        logger.warn("moysklad", "order_position_id_lookup_failed", {
+          orderId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    },
+
     async createCustomerOrderReservation({ activeLot, productCard, reservation, counterparty: preResolvedCounterparty, broadcastDate }) {
       if (!isEnabled || !activeLot?.product?.id || !reservation?.viewerId) {
         return null;
@@ -965,9 +1036,20 @@ export function createMoySkladClient(config, options = {}) {
       };
 
       const order = await postJson("entity/customerorder", payload);
+      // Позиция, созданная вместе с заказом, нужна для адресной отмены брони
+      // (#16): DELETE по точному positionId, а не «первую попавшуюся» позицию
+      // того же товара. На POST entity/customerorder МойСклад возвращает
+      // positions как коллекцию { meta } БЕЗ rows (rows приходят только при
+      // expand), поэтому inline-чтение чаще всего даёт null — в этом случае
+      // дотягиваем позиции отдельным GET, иначе отмена брони не найдёт id.
+      let positionId = order.positions?.rows?.[0]?.id || null;
+      if (!positionId && order.id) {
+        positionId = await this.resolveFirstOrderPositionId(order.id);
+      }
       logger.info("moysklad", "customer_order_created", {
         lotSessionId: activeLot.lotSessionId,
         orderId: order.id,
+        positionId,
         counterpartyId: counterparty.id,
         viewerId: reservation.viewerId,
       });
@@ -975,6 +1057,7 @@ export function createMoySkladClient(config, options = {}) {
       return {
         id: order.id,
         name: order.name,
+        positionId,
         counterpartyId: counterparty.id,
       };
     },
@@ -995,8 +1078,15 @@ export function createMoySkladClient(config, options = {}) {
       ];
 
       const positions = await postJson(`entity/customerorder/${orderId}/positions`, payload);
+      // POST /positions возвращает массив созданных позиций (иногда обёрнутый
+      // в { rows }). Берём id первой — он понадобится для адресной отмены (#16).
+      const createdRows = Array.isArray(positions)
+        ? positions
+        : (Array.isArray(positions?.rows) ? positions.rows : []);
+      const positionId = createdRows[0]?.id || null;
       logger.info("moysklad", "customer_order_position_added", {
         orderId,
+        positionId,
         lotSessionId: activeLot.lotSessionId,
         viewerId: reservation.viewerId,
         productId: activeLot.product.id,
@@ -1004,8 +1094,31 @@ export function createMoySkladClient(config, options = {}) {
 
       return {
         orderId,
-        positionsAdded: Array.isArray(positions.rows) ? positions.rows.length : 1,
+        positionId,
+        positionsAdded: createdRows.length || 1,
       };
+    },
+
+    // Удаляет одну позицию из customerorder. Используется отменой брони (#16):
+    // адресный DELETE по точному positionId исключает удаление «соседней»
+    // позиции того же товара (кейс reserved_appended). 404 → already gone,
+    // идемпотентно. Метод обёрнут wrapWithSafeMode в index.js — в safe-mode
+    // вернётся { skipped:true, safeMode:true } и реального удаления не будет.
+    async removePositionFromOrder({ orderId, positionId, source } = {}) {
+      if (!isEnabled || !orderId || !positionId) {
+        return null;
+      }
+
+      const result = await deleteJson(
+        `entity/customerorder/${orderId}/positions/${positionId}`,
+        { source },
+      );
+      logger.info("moysklad", "customer_order_position_removed", {
+        orderId,
+        positionId,
+        alreadyGone: Boolean(result?.alreadyGone),
+      });
+      return { ok: true, alreadyGone: Boolean(result?.alreadyGone) };
     },
 
     // Bulk-выгрузка обогащённой информации по товарам: id, имя, поставщик

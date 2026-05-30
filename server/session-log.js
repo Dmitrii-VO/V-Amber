@@ -187,6 +187,11 @@ export function createSessionLog() {
       jsonlEvent("customer_order_created", { viewerName, viewerId, orderId, lotCode, appended });
     },
 
+    logOrderCancelled({ viewerName, viewerId, orderId, lotCode } = {}) {
+      append(`- ${nowTime()} **Бронь отменена** оператором для ${viewerName || `id${viewerId}`} (лот ${lotCode}, заказ \`${orderId || "—"}\`)`);
+      jsonlEvent("customer_order_cancelled", { viewerName, viewerId, orderId, lotCode });
+    },
+
     logDiscount({ amount, originalPrice, newPrice, code, lotSessionId, descriptor, transcript } = {}) {
       append(`- ${nowTime()} **Скидка** −${amount} ₽ на лот ${code}: ${originalPrice} ₽ → ${newPrice} ₽`);
       jsonlEvent("discount_applied", { amount, originalPrice, newPrice, code, lotSessionId, descriptor, transcript });

@@ -73,9 +73,13 @@ export function createMoyskladMock({ cardsByCode = {}, overrides = {} } = {}) {
     findBroadcastCustomerOrderForCounterparty: wrap("findBroadcastCustomerOrderForCounterparty",
       overrides.findBroadcastCustomerOrderForCounterparty || (async () => null)),
     appendPositionToCustomerOrder: wrap("appendPositionToCustomerOrder",
-      overrides.appendPositionToCustomerOrder || (async () => null)),
+      overrides.appendPositionToCustomerOrder
+      || (async () => ({ orderId: "co-test-1", positionId: "pos-appended-1" }))),
     createCustomerOrderReservation: wrap("createCustomerOrderReservation",
-      overrides.createCustomerOrderReservation || (async () => ({ id: "co-test-1" }))),
+      overrides.createCustomerOrderReservation
+      || (async () => ({ id: "co-test-1", positionId: "pos-created-1" }))),
+    removePositionFromOrder: wrap("removePositionFromOrder",
+      overrides.removePositionFromOrder || (async () => ({ ok: true }))),
   };
   moysklad.calls = calls;
   moysklad.callsTo = (name) => calls.filter((c) => c.name === name);
@@ -122,6 +126,7 @@ function createSessionLogMock() {
     logReservationWaitlist: noop,
     logReservationOutOfStock: noop,
     logOrderCreated: noop,
+    logOrderCancelled: noop,
     logWaitlistPromoted: noop,
     logVkComment: noop,
     logReservation: noop,

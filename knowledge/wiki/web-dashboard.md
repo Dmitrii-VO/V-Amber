@@ -26,6 +26,11 @@ stream.
   for when SpeechKit misheard the code. The field only shows while the
   stream is running, and the server rejects codes not in the MoySklad
   catalog. See [[http-api]] and [[deferred-operator-features]] #14.
+- cancel a confirmed reservation via the `× отменить` button on each
+  reservation row (sends `cancelReservation` WS message after a confirm
+  prompt) — removes the buyer's MoySklad position and frees the stock
+  slot. Blocked under safe mode. See [[http-api]] and
+  [[deferred-operator-features]] #16.
 
 The microphone flow uses Web Audio API and `web-ui/audio-processor.js` to
 capture PCM, downsample to 16 kHz, and send frames over WebSocket.

@@ -675,9 +675,12 @@ export function attachWsServer(httpServer, config, services = {}) {
             reservation: event,
             broadcastDate,
           });
+          // Несём positionId добавленной позиции на объекте заказа — он нужен
+          // отмене брони (#16) для адресного DELETE именно этой позиции, а не
+          // соседней позиции того же товара в этом же заказе.
           order = (appendResult && appendResult.skipped === true && appendResult.safeMode === true)
             ? appendResult
-            : existingOrder;
+            : { ...existingOrder, positionId: appendResult?.positionId || null };
         } else {
           order = await moysklad.createCustomerOrderReservation({
             activeLot: lot,
@@ -2035,6 +2038,130 @@ export function attachWsServer(httpServer, config, services = {}) {
             resetCustomerOrders();
             emitState();
           }
+          return;
+        }
+
+        if (payload.type === "cancelReservation") {
+          // Отмена брони оператором (#16). Удаляет позицию покупателя из
+          // customerorder в МойСкладе, освобождает слот стока для следующего
+          // покупателя и позволяет тому же зрителю забронировать снова.
+          // Адресный DELETE по сохранённому positionId исключает удаление
+          // соседней позиции того же товара (кейс reserved_appended).
+          // См. knowledge/wiki/deferred-operator-features.md #16.
+          const lot = activeLot;
+          if (!lot) {
+            sendJson(websocket, { type: "warning", message: "Нет активного лота для отмены брони" });
+            return;
+          }
+
+          const state = ensureReservationState(lot);
+          const events = Array.isArray(state.events) ? state.events : [];
+          const targetViewerId = payload.viewerId;
+          const targetCommentId = payload.commentId;
+          const event = events.find((candidate) =>
+            String(candidate.viewerId) === String(targetViewerId)
+            && (targetCommentId == null || candidate.commentId === targetCommentId)
+            && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
+
+          if (!event) {
+            sendJson(websocket, { type: "warning", message: "Бронь не найдена или уже отменена" });
+            return;
+          }
+
+          const orderId = event.customerOrder?.id;
+          const positionId = event.customerOrder?.positionId;
+          if (!orderId || !positionId) {
+            logger.warn("ws", "reservation_cancel_no_position", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              commentId: event.commentId,
+              viewerId: event.viewerId,
+              orderId: orderId || null,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: "Нет связанной позиции МойСклад — отмените заказ вручную",
+            });
+            return;
+          }
+
+          // Safe-mode: явная проверка ДО вызова (в обвязке wrapWithSafeMode
+          // дублируется ниже на случай флипа в полёте). Никаких реальных
+          // удалений и мутаций состояния в safe-mode — только warning.
+          if (isSafeMode()) {
+            logger.warn("safe-mode", "reservation_cancel_blocked", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              commentId: event.commentId,
+              viewerId: event.viewerId,
+            });
+            sendJson(websocket, { type: "warning", message: "Отмена брони недоступна в safe-mode" });
+            return;
+          }
+
+          let result;
+          try {
+            result = await moysklad.removePositionFromOrder({ orderId, positionId });
+          } catch (error) {
+            logger.error("moysklad", "reservation_cancel_failed", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              commentId: event.commentId,
+              viewerId: event.viewerId,
+              orderId,
+              positionId,
+              error,
+            });
+            sendJson(websocket, { type: "warning", message: "Не удалось отменить бронь — попробуйте ещё раз" });
+            return;
+          }
+
+          // safe-mode: wrapWithSafeMode вернул {skipped, safeMode} — реального
+          // удаления не было, состояние не трогаем.
+          if (result && result.skipped === true && result.safeMode === true) {
+            logger.warn("safe-mode", "reservation_cancel_blocked", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              commentId: event.commentId,
+              viewerId: event.viewerId,
+            });
+            sendJson(websocket, { type: "warning", message: "Отмена брони недоступна в safe-mode" });
+            return;
+          }
+
+          const released = Math.max(1, Number(event.quantity) || 1);
+          state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - released);
+          // Снимаем зрителя из принятых, чтобы тот же покупатель мог
+          // забронировать заново (или поллер VK принял его новый комментарий).
+          state.acceptedUserIds.delete(event.viewerId);
+          // Сбрасываем in-memory маппинг заказа на день, чтобы следующая бронь
+          // этого зрителя переразрешилась через МойСклад, а не дописала позицию
+          // в заказ, из которого мы только что удалили позицию.
+          const broadcastDate = formatBroadcastDate(new Date(event.createdAt || Date.now()));
+          customerOrdersByViewerId.delete(`${broadcastDate}:${event.viewerId}`);
+          const previousStatus = event.status;
+          event.status = "cancelled";
+
+          logger.info("ws", "reservation_cancelled", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            viewerName: event.viewerName,
+            orderId,
+            positionId,
+            previousStatus,
+            quantityReleased: released,
+            alreadyGone: Boolean(result?.alreadyGone),
+          });
+          sessionLog.logOrderCancelled({
+            viewerName: event.viewerName,
+            viewerId: event.viewerId,
+            lotCode: lot.code,
+            orderId,
+          });
+          emitState();
           return;
         }
 

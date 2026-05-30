@@ -104,6 +104,30 @@ booked. The internal `voicePrice` is still updated; only the public
 card update is dropped. Logged as
 `redetection_price_update_skipped_due_to_reservations`.
 
+## Cancelling a reservation
+
+The operator can cancel a confirmed reservation from the dashboard
+(`× отменить` on the reservation row → `cancelReservation { viewerId,
+commentId }` WS message). The backend removes the buyer's MoySklad
+position with an **exact-id** `DELETE` on the position
+(`moysklad.removePositionFromOrder`), so a retry can never delete a
+sibling position of the same product. The position id is captured at
+reservation time — `createCustomerOrderReservation` /
+`appendPositionToCustomerOrder` return `positionId`, stored on the event
+as `customerOrder.positionId`.
+
+On a confirmed delete the handler decrements `committedReservationCount`
+by `event.quantity`, removes the viewer from `acceptedUserIds` (so the
+same buyer can reserve again), drops the `customerOrdersByViewerId` day
+entry, and sets `event.status = "cancelled"`. The freed slot is available
+to the next buyer immediately. Safe mode blocks the delete: the handler
+re-checks `isSafeMode()` and replies with a warning without touching
+state, and `removePositionFromOrder` is also in the `wrapWithSafeMode`
+list. The cancel is silent to buyers (no public VK reply) to avoid the
+error-801 → `markLotPoisoned` risk. Empty orders are left in MoySklad —
+the code never deletes whole customer orders. See
+[[deferred-operator-features]] #16.
+
 ## Waitlist and recovery
 
 While one reservation is being processed, later comments can wait. Startup
