@@ -2,38 +2,71 @@
 
 Two operator-audit items were intentionally **not** landed in commit
 `f5c3bde`. They touch the live-commerce critical path (voice pipeline,
-real money flow) and need integration test scaffolding before they can
-land safely. This page captures the failure modes so we don't lose the
-context when the test work begins.
+real money flow) and needed integration test scaffolding before they
+could land safely.
 
-## Prerequisite — WebSocket integration tests
+**Status:**
 
-Both deferred items need the same scaffolding. Estimated 1–2 days of
-work, separate PR:
+- **WebSocket integration test harness** — landed (`test/helpers/ws-harness.js`).
+- **#14 — manual code entry** — **landed.** Kept below as a design
+  record; see the "Implemented" note in its section.
+- **#16 — cancel reservation** — still deferred. The only remaining item.
 
-- Mock `WebSocket` server-side: feed it scripted message sequences and
-  binary audio frames; assert on outgoing JSON payloads.
-- Mock the VK client (`server/vk.js`): record `publishLotCard`,
+## WebSocket integration test harness (landed)
+
+`test/helpers/ws-harness.js` boots a real `http.Server` + `attachWsServer`
+with mock services and a real `ws` client. What it provides today:
+
+- **Fake SpeechKit session** via the `services.createSpeechKitSession`
+  seam — scripted transcripts are fed through `session.handlers.onFinal`,
+  no network to Yandex.
+- **Recording VK mock** (`createVkMock`): records `publishLotCard`,
   `publishLotClosed`, `publishPriceUpdate`, `publishReservationReply`,
-  `sendDirectMessage` calls and their order.
-- Mock the MoySklad client (`server/moysklad.js`): fixture-based
-  responses for `getProductCardByCode`, `ensureCounterparty`,
-  `createCustomerOrderReservation`, `appendPositionToCustomerOrder`,
-  `getReservationDigestForDate`, plus a new `removePositionFromOrder`
-  once it exists.
-- Reset helpers for module-level singletons: `nextConnectionId`,
-  `nextLotSessionId`, `nextDetectionId` so test order doesn't leak.
-- Helper to drive the trigger window: assert that
-  `triggerActiveUntil` and `resetTriggerWindow` paths behave
-  identically for `voice` and (new) `manual` sources.
+  `publishDiscountUpdate` calls and their order; `vk.pushComment(...)`
+  queues comments that `getComments` returns, so the reservation poller
+  can be driven without the VK API.
+- **MoySklad mock** (`createMoyskladMock`): fixture cards by code plus
+  `ensureCounterparty`, `findBroadcastCustomerOrderForCounterparty`,
+  `appendPositionToCustomerOrder`, `createCustomerOrderReservation`.
+- **Module-singleton reset** via the exported `__resetIdCountersForTests`
+  (`nextConnectionId`, `nextLotSessionId`, `nextDetectionId`), so test
+  order doesn't leak.
+- **Persistence isolation** via the `services.createSessionLog`,
+  `services.saveActiveState`, `services.clearActiveState` seams — tests
+  never touch the session-log files or `logs/active-state.json`.
+- A sequential-cursor `client.waitFor(...)` over the server→client
+  message stream.
 
-Once those exist, the two items below land in dedicated PRs with
-scenario tests.
+**What #16 will still need added to the harness:** a
+`removePositionFromOrder` mock (once that method exists on
+`server/moysklad.js`), `getReservationDigestForDate`, and a safe-mode
+toggle assertion path. See the #16 failure modes below.
 
-## #14 — Manual code entry on the active lot
+## #14 — Manual code entry on the active lot (landed)
 
 What the operator expects: a text field on the active-lot card. Type
 `03204` → backend behaves as if speech recognition just confirmed it.
+
+> **Implemented.** WS message `manualCode { code }` in `server/ws-server.js`
+> (next to `setLotPrice`/`closeLot`), UI form `#manualCodeForm` in
+> `web-ui/`, scenarios in `test/ws-server.manual-code.test.js`. Design
+> decisions that resolved the failure modes below:
+> - **Variant A** — manual entry requires an active STT stream
+>   (`activeRunId != null`); the UI form is hidden otherwise and the
+>   server re-checks. Lot lifecycle (VK poller, session log, close) is
+>   only wired while a stream runs.
+> - **Catalog-gated** — the code must be in `productCodeCache`; an
+>   unknown code or unloaded catalog is rejected with a `warning`
+>   ("all products must be in the MoySklad DB").
+> - The handler builds a synthetic `confirmed` detection and calls
+>   `handleConfirmedDetection` directly, **bypassing `detectArticle`** —
+>   so FM#4 (LLM fallback) is unreachable by construction, not by a flag.
+> - No `source === "manual"` branch was added to
+>   `mergeSameCodeRedetection` (FM#1): with `voicePrice: null` the merge
+>   is already a no-op for price/VK and preserves reservations.
+> - `ensureStockKnownBeforeFirstReservation` (FM#3) and
+>   `resetTriggerWindow` (FM#2) are inherited unchanged via
+>   `handleConfirmedDetection`.
 
 ### Failure modes
 
@@ -74,14 +107,23 @@ What the operator expects: a text field on the active-lot card. Type
 - Manual code with `lot.acceptedReservations > 0` → must not poison
   the lot or skip `publishPriceUpdate`.
 
-### Partial workaround already in place
+All covered in `test/ws-server.manual-code.test.js`: Variant-A gate,
+catalog rejection (unknown code + unloaded catalog), idle open with
+`source: "manual"`, same-code merge, manual→voice→manual single lot,
+different-code close+reopen, unknown-stock first reservation at `floor=1`,
+and same-code re-entry preserving an accepted reservation (no poison, no
+close). The reservation scenarios drive the comment poller via
+`vk.pushComment` in the harness.
 
-`#13` (close lot) + `#15` (edit price) cover the most common operator
-misery: SpeechKit confirmed the wrong code, or voice-price detection
-misfired. The operator closes the lot, retries verbally with the right
-code, or edits the price inline. The gap is "fully type the code with
-the keyboard" — rare enough that operator-feedback hasn't flagged it
-as a blocker yet.
+### History — the workaround this replaced
+
+Before #14, `#13` (close lot) + `#15` (edit price) covered the most common
+operator misery: SpeechKit confirmed the wrong code, or voice-price
+detection misfired. The operator closed the lot, retried verbally with the
+right code, or edited the price inline. The remaining gap — "fully type the
+code with the keyboard" — is now closed by `manualCode`. The voice retry
+still works and remains the fastest fix when the mic is live; see the
+recipe in [[runbooks-and-troubleshooting]].
 
 ## #16 — Cancel reservation from the UI
 
@@ -143,9 +185,11 @@ acceptable until cancellation can be done without risk to money flow.
   (2026-05-29)]].
 - Test gap context: see [[documentation-drift#Operator-audit pass
   (2026-05-29)]].
-- Related runbook entries when these land: update
-  [[runbooks-and-troubleshooting]] with operator-driven fix
-  recipes.
+- #14 runbook recipe ("SpeechKit misheard the article code") landed in
+  [[runbooks-and-troubleshooting]]; the WS contract is in
+  [[http-api#Operator WS messages]] and the UI in [[web-dashboard]].
+- When #16 lands, add its operator-driven fix recipe to
+  [[runbooks-and-troubleshooting]] the same way.
 
 ## Related pages
 

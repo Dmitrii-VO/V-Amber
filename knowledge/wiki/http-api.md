@@ -92,6 +92,16 @@ Browser → server message types (in addition to `start`, `stop`,
   `priceSource: "manual"`, and republishes the VK card if comments are
   open. Bypasses the `applyVoicePrice` guard that ignores voice prices
   when a sale price is already set, because manual intent is explicit.
+- `manualCode` `{ code }` — operator types the article SpeechKit
+  misheard. Backend builds a synthetic `confirmed` detection
+  (`source: "manual"`) and runs it through `handleConfirmedDetection`,
+  so it follows the exact voice path: same code merges into the active
+  lot, a different code closes the old lot and opens a new one. It does
+  NOT call `detectArticle`, so the YandexGPT fallback is unreachable.
+  Guarded two ways: requires an active STT stream (`activeRunId != null`,
+  "Variant A"), and the code must exist in the `productCodeCache`
+  catalog — an unknown code or an unloaded catalog replies with a
+  `warning` and opens nothing. See [[deferred-operator-features]] #14.
 
 ## Related pages
 

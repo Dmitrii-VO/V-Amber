@@ -20,7 +20,12 @@ stream.
   `closeLot` WS message);
 - override the active lot price by clicking the price field (sends
   `setLotPrice` WS message, salePrice and voicePrice both updated, VK
-  card refreshed).
+  card refreshed);
+- enter an article code manually via the `код вручную` field on the
+  active-lot panel (`#manualCodeForm`, sends `manualCode` WS message) —
+  for when SpeechKit misheard the code. The field only shows while the
+  stream is running, and the server rejects codes not in the MoySklad
+  catalog. See [[http-api]] and [[deferred-operator-features]] #14.
 
 The microphone flow uses Web Audio API and `web-ui/audio-processor.js` to
 capture PCM, downsample to 16 kHz, and send frames over WebSocket.

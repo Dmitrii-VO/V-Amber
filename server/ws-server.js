@@ -31,6 +31,15 @@ let nextConnectionId = 1;
 let nextLotSessionId = 1;
 let nextDetectionId = 1;
 
+// Сброс модульных счётчиков id между тестами: иначе порядок прогона течёт
+// в lotSessionId/detectionId и снапшоты становятся хрупкими. Прод-код это
+// не вызывает (счётчики живут весь процесс).
+export function __resetIdCountersForTests() {
+  nextConnectionId = 1;
+  nextLotSessionId = 1;
+  nextDetectionId = 1;
+}
+
 export function attachWsServer(httpServer, config, services = {}) {
   const wsServer = new WebSocketServer({ noServer: true });
   // moysklad/vk должны быть уже обёрнуты wrapWithSafeMode в server/index.js,
@@ -42,6 +51,15 @@ export function attachWsServer(httpServer, config, services = {}) {
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
+  const createSessionLogImpl = services.createSessionLog || createSessionLog;
+  const saveActiveStateImpl = services.saveActiveState || saveActiveState;
+  const clearActiveStateImpl = services.clearActiveState || clearActiveState;
+  // Seam для тестов: позволяет подменить реальную gRPC-сессию SpeechKit
+  // фейком, который скармливает скриптовые транскрипты через onFinal без
+  // сети. Прод всегда идёт дефолтным путём (new SpeechKitStreamingSession).
+  const createSpeechKitSession = services.createSpeechKitSession
+    || ((speechkitConfig, handlers, meta) =>
+      new SpeechKitStreamingSession(speechkitConfig, handlers, meta));
 
   function broadcastWishlistCount(count) {
     const payload = JSON.stringify({ type: "wishlist_count_changed", count });
@@ -114,7 +132,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
   wsServer.on("connection", (websocket) => {
     const connectionId = `ws-${nextConnectionId++}`;
-    const sessionLog = createSessionLog();
+    const sessionLog = createSessionLogImpl();
     let session = null;
     let activeLot = null;
     let lastDetection = null;
@@ -191,7 +209,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // время эфира не «терял» очередь брони. Запись атомарна (tmp+rename)
       // и дебаунсится внутри state-store. На graceful shutdown файл удаляется.
       if (activeLot?.lotSessionId) {
-        saveActiveState({
+        saveActiveStateImpl({
           activeLot,
           sessionFilePath: sessionLog.getFilePath(),
           connectionId,
@@ -251,7 +269,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // Граcеful shutdown — стирать persisted state, чтобы следующий старт
       // не подхватил его как «брошенный после краша». Fire-and-forget:
       // ошибка disk-IO не должна блокировать остановку сессии.
-      clearActiveState().catch(() => {});
+      clearActiveStateImpl().catch(() => {});
     }
 
     function ensureReservationState(lot) {
@@ -1851,7 +1869,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               logger.info("speechkit", "stream_ended", { connectionId, autoReconnect: true });
               session?.close();
               try {
-                session = new SpeechKitStreamingSession(config.speechkit, speechKitHandlers, { connectionId });
+                session = createSpeechKitSession(config.speechkit, speechKitHandlers, { connectionId });
                 logger.info("speechkit", "stream_auto_reconnected", { connectionId });
                 sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
               } catch (error) {
@@ -1870,7 +1888,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
             },
           };
-          session = new SpeechKitStreamingSession(config.speechkit, speechKitHandlers, { connectionId });
+          session = createSpeechKitSession(config.speechkit, speechKitHandlers, { connectionId });
 
           resetDetectionState();
           emitState();
@@ -1910,6 +1928,94 @@ export function attachWsServer(httpServer, config, services = {}) {
             });
           }
           emitState();
+          return;
+        }
+
+        if (payload.type === "manualCode") {
+          // Ручной ввод артикула на активном лоте (#14). Закрывает разрыв,
+          // когда SpeechKit подтвердил НЕ тот код: оператор добивает код с
+          // клавиатуры, а бэкенд ведёт себя как при голосовом подтверждении.
+          // Конструируем detection напрямую и идём через
+          // handleConfirmedDetection — НЕ через detectArticle, поэтому
+          // YandexGPT-фоллбек физически недостижим (см.
+          // knowledge/wiki/deferred-operator-features.md #14, FM#4).
+          //
+          // Вариант А: ручной ввод доступен ТОЛЬКО при активном STT-стриме.
+          // Без него весь жизненный цикл лота (поллер VK, журнал сессии,
+          // закрытие) не на месте — кнопка в UI заблокирована, но дублируем
+          // проверку на сервере.
+          if (activeRunId === null) {
+            sendJson(websocket, {
+              type: "warning",
+              message: "Запустите распознавание перед ручным вводом кода",
+            });
+            return;
+          }
+
+          const code = String(payload.code ?? "").trim();
+          if (!code) {
+            sendJson(websocket, {
+              type: "warning",
+              message: "Введите код товара",
+            });
+            return;
+          }
+
+          // Валидация по каталогу: все товары обязаны быть в базе МойСклад.
+          // Если кэш кодов недоступен/пуст — блокируем, иначе по
+          // непроверенному коду откроется лот и создастся ошибочная бронь.
+          const knownCodes = productCodeCache?.getCodes?.() || null;
+          if (!knownCodes || knownCodes.size === 0) {
+            logger.warn("article", "manual_code_rejected_no_catalog", {
+              connectionId,
+              code,
+              catalogSize: knownCodes?.size ?? null,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: "Каталог товаров не загружен — ручной ввод недоступен",
+            });
+            return;
+          }
+          if (!knownCodes.has(code)) {
+            logger.warn("article", "manual_code_rejected_unknown", {
+              connectionId,
+              code,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: `Код ${code} не найден в каталоге МойСклад`,
+            });
+            return;
+          }
+
+          const detectionId = `det-manual-${activeRunId}-${nextDetectionId++}`;
+          const detection = {
+            transcript: `manual:${code}`,
+            matchedTrigger: false,
+            status: "confirmed",
+            candidates: [{ code, source: "manual", confidence: 1, knownCode: true }],
+            chosen: { code, source: "manual", confidence: 1 },
+            detectionId,
+          };
+
+          logger.info("article", "manual_code_submitted", {
+            connectionId,
+            code,
+            detectionId,
+            activeLotCode: activeLot?.code || null,
+          });
+
+          // Помечаем как активную детекцию — поздний голосовой final с другим
+          // кодом инвалидирует этот manual через expectedDetectionId, и
+          // наоборот (см. concurrency-gate в handleConfirmedDetection).
+          activeDetectionActionId = detectionId;
+          await handleConfirmedDetection(detection, code, "manual", {
+            runId: activeRunId,
+            enforceActiveRun: true,
+            expectedDetectionId: detectionId,
+            voicePrice: null,
+          });
           return;
         }
 

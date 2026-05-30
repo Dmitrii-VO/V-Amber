@@ -60,6 +60,23 @@ integration plus the safe-mode flag, and switches to `503` when MoySklad
 has a `lastError` or when core credentials are missing. See
 [[http-api#Core routes]].
 
+## SpeechKit misheard the article code
+
+The operator said `03204` but SpeechKit confirmed a different code (or
+none). Fastest fixes, in order:
+
+1. **Say it again** — a same-code voice re-detection merges into the
+   active lot without losing reservations.
+2. **Type it** — use the `код вручную` field on the active-lot panel
+   (sends `manualCode`). Same effect as a voice confirmation: a matching
+   code merges, a different code opens a new lot. The field is only
+   visible while the stream runs, and the code must exist in the
+   MoySklad catalog (otherwise you get a `warning` in the event log).
+3. If a **wrong lot already opened**, `× закрыть лот` first, then retry.
+4. If only the **price** is wrong, click the price field (`setLotPrice`).
+
+See [[deferred-operator-features]] #14 and [[http-api#Operator WS messages]].
+
 ## Related pages
 
 - [[logging-and-diagnostics]]

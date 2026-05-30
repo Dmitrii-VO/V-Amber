@@ -279,6 +279,13 @@ function setLifecycle(next) {
   elements.stopButton.disabled = next === "idle";
   elements.microphoneSelect.disabled = isActive;
 
+  // Ручной ввод кода доступен только при активном STT-стриме (Вариант А) —
+  // тот же гейт, что и у inline-редактора цены (arePriceEditsAllowed).
+  const manualCodeForm = document.getElementById("manualCodeForm");
+  if (manualCodeForm) {
+    manualCodeForm.hidden = !(next === "streaming" || next === "starting");
+  }
+
   if (next === "streaming") {
     setSessionPill("live", "Live");
     state.startedAt = Date.now();
@@ -1196,6 +1203,29 @@ document.getElementById("closeLotButton")?.addEventListener("click", () => {
     logEvent("Лот закрыт вручную", "info");
   } else {
     logEvent("Связь с сервером не установлена — нельзя закрыть лот", "warn");
+  }
+});
+
+// Manual article entry (#14). Operator types the code SpeechKit misheard;
+// server treats it like a voice-confirmed detection (see ws-server.js
+// "manualCode"). Gated by the active STT stream (Variant A) — the form is
+// hidden otherwise, and the server re-checks. Server validates the code
+// against the MoySklad catalog and replies with a warning if it is unknown.
+document.getElementById("manualCodeForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.getElementById("manualCodeInput");
+  const code = (input?.value || "").trim();
+  if (!code) return;
+  if (!(state.lifecycle === "streaming" || state.lifecycle === "starting")) {
+    logEvent("Запустите распознавание перед ручным вводом кода", "warn");
+    return;
+  }
+  if (state.websocket && state.websocket.readyState === 1) {
+    state.websocket.send(JSON.stringify({ type: "manualCode", code }));
+    logEvent(`Код введён вручную: ${code}`, "info");
+    if (input) input.value = "";
+  } else {
+    logEvent("Связь с сервером не установлена — нельзя применить код", "warn");
   }
 });
 

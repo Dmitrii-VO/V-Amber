@@ -108,6 +108,10 @@
                 <span id="lotAgePill" class="lot-age" hidden></span>
               </div>
               <div style="display:flex; align-items:center; gap:var(--gap-2);">
+                <form id="manualCodeForm" class="manual-code" hidden title="Открыть лот по коду, набранному вручную">
+                  <input id="manualCodeInput" class="manual-code__input mono" type="text" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="код вручную" />
+                  <button id="manualCodeButton" class="btn btn--ghost" type="submit">→ применить</button>
+                </form>
                 <button id="closeLotButton" class="btn btn--ghost" type="button" hidden title="Закрыть активный лот">× закрыть лот</button>
                 <div id="lotStockPill"></div>
               </div>
