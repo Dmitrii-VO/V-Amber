@@ -149,11 +149,13 @@ async function main() {
   // и идемпотентность PO были корректны с первого запроса.
   const wishlistSubmissions = createWishlistSubmissions();
   const wishlistStore = createWishlistStore();
+  const nameCacheStore = createNameCacheStore();
   const settingsStore = createSettingsStore({ fallbacks: config.wishlist });
 
   await Promise.all([
     wishlistSubmissions.load(),
     wishlistStore.load(),
+    nameCacheStore.load(),
     settingsStore.load(),
   ]);
 
@@ -220,6 +222,7 @@ async function main() {
     moysklad,
     productCodeCache,
     wishlistStore,
+    nameCacheStore,
     diagnosticRouter,
     packageVersion,
   });

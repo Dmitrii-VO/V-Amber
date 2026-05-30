@@ -291,6 +291,17 @@ a { color: inherit; }
 }
 .res-item:hover { background: var(--surface); }
 .res-item:last-child { border-bottom: 0; }
+/* Голосовая отмена брони (W3): сервер нашёл бронь по имени, оператор
+   подтверждает кнопкой. Подсветка тянет внимание к нужной строке. */
+.res-item--cancel-target {
+  background: var(--amber-bg);
+  box-shadow: inset 3px 0 0 0 var(--amber);
+  animation: cancel-target-flash 1.2s ease-out 1;
+}
+@keyframes cancel-target-flash {
+  0% { background: var(--amber); }
+  100% { background: var(--amber-bg); }
+}
 .res-avatar {
   width: 28px; height: 28px; border-radius: 50%;
   background: var(--surface-2); border: 1px solid var(--border);

@@ -128,6 +128,38 @@ error-801 → `markLotPoisoned` risk. Empty orders are left in MoySklad —
 the code never deletes whole customer orders. See
 [[deferred-operator-features]] #16.
 
+### Voice cancel (W3, Phase 2)
+
+The operator can also trigger a cancel by voice: «<Имя Фамилия> отмена
+лота #<код>» (variants: снять/убрать бронь, отмена брони, code with or
+without `#`). The voice path **never** performs the MoySklad delete
+itself — it only **finds and highlights** the matching reservation row so
+the operator confirms with the same `× отменить` button. This keeps a
+speech-recognition error from auto-deleting a position (real money).
+
+Pieces:
+
+- `server/cancel-command-parser.js` — pure parser of the spoken phrase →
+  `{ matched, name, code }`.
+- `server/name-matcher.js` — pure name matcher tolerant of declensions
+  («Галину Прокофьеву») and word order; `matchNameAgainst` returns scored
+  matches and never auto-picks on ambiguity.
+- `server/name-cache-store.js` — persistent `viewerId → name` cache,
+  append-only `logs/viewer-names.jsonl`, `load()` folds to
+  last-name-per-viewer. Records **every** commenter with a resolved VK
+  name (not just reservers), so it survives stop/start of a broadcast and
+  process restart — the in-memory lot state and `customerOrdersByViewerId`
+  are wiped on socket close. Excluded from the sendLogs bundle (the bundle
+  is an allowlist in `server/log-bundle.js`; this file is not on it).
+- `ws-server.js`: name recorded at the VK profile-resolution point;
+  `handleVoiceCancelCommand` runs in `onFinal` **before** article
+  detection (returns early so «отмена лота 033322» does not open lot
+  033322), matches against the active lot's confirmed reservations, and
+  sends a `voiceCancelMatch` WS message. Ambiguous match (equal top
+  scores) → a warning, no highlight.
+- UI: `voiceCancelMatch` → `highlightReservationForCancel` adds
+  `res-item--cancel-target` and scrolls to the row. Operator confirms.
+
 ## Waitlist and recovery
 
 While one reservation is being processed, later comments can wait. Startup

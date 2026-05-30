@@ -522,6 +522,10 @@ function renderReservations(reservations) {
   for (const ev of events.slice().reverse()) {
     const item = document.createElement("div");
     item.className = "res-item";
+    // Тегируем строку, чтобы голосовая отмена (voiceCancelMatch) могла найти
+    // и подсветить именно эту бронь. dataset хранит строки.
+    if (ev.viewerId != null) item.dataset.viewerId = String(ev.viewerId);
+    if (ev.commentId != null) item.dataset.commentId = String(ev.commentId);
 
     const avatar = document.createElement("div");
     avatar.className = "res-avatar";
@@ -765,6 +769,14 @@ function handleServerMessage(payload) {
 
   if (payload.type === "wishlist_count_changed") {
     updateWishlistBadge(payload.count);
+    return;
+  }
+
+  if (payload.type === "voiceCancelMatch") {
+    // Голосовая отмена брони (W3): сервер нашёл бронь по произнесённому имени,
+    // но НЕ отменил её. Подсвечиваем строку и просим оператора подтвердить
+    // кнопкой «× отменить» — никаких авто-списаний в МойСкладе по ошибке речи.
+    highlightReservationForCancel(payload);
     return;
   }
 
@@ -1244,6 +1256,30 @@ document.getElementById("manualCodeForm")?.addEventListener("submit", (event) =>
     logEvent("Связь с сервером не установлена — нельзя применить код", "warn");
   }
 });
+
+// Голосовая отмена брони (W3). Сервер прислал voiceCancelMatch — найденную по
+// имени бронь. Подсвечиваем строку и прокручиваем к ней; оператор сам жмёт
+// «× отменить». Намеренно НЕ вызываем cancelReservation автоматически —
+// распознавание речи не должно само списывать позиции в МойСкладе.
+function highlightReservationForCancel(match) {
+  const list = elements.reservationList;
+  if (!list) return;
+  const selector = match.commentId != null
+    ? `.res-item[data-comment-id="${CSS.escape(String(match.commentId))}"]`
+    : `.res-item[data-viewer-id="${CSS.escape(String(match.viewerId))}"]`;
+  const row = list.querySelector(selector);
+  const shownName = match.viewerName || match.spokenName || "";
+  if (!row) {
+    logEvent(`Голосовая отмена: бронь «${shownName}» не видна в списке`, "warn");
+    return;
+  }
+  list.querySelectorAll(".res-item--cancel-target").forEach((el) => {
+    el.classList.remove("res-item--cancel-target");
+  });
+  row.classList.add("res-item--cancel-target");
+  row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  logEvent(`Голосовая отмена: подсвечена бронь «${shownName}» — подтвердите кнопкой «× отменить»`, "info");
+}
 
 // Cancel a confirmed reservation (#16) — removes the buyer's MoySklad position,
 // frees the stock slot, and lets them re-reserve. Sends cancelReservation over

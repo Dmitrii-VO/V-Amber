@@ -10,6 +10,8 @@ import { createVkPublisher } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
+import { parseCancelCommand } from "./cancel-command-parser.js";
+import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
 import {
   sendJson,
@@ -51,6 +53,7 @@ export function attachWsServer(httpServer, config, services = {}) {
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
+  const nameCacheStore = services.nameCacheStore || null;
   const createSessionLogImpl = services.createSessionLog || createSessionLog;
   const saveActiveStateImpl = services.saveActiveState || saveActiveState;
   const clearActiveStateImpl = services.clearActiveState || clearActiveState;
@@ -312,6 +315,84 @@ export function attachWsServer(httpServer, config, services = {}) {
       const state = ensureReservationState(lot);
       state.events.push(event);
       state.events = state.events.slice(-20);
+    }
+
+    // Голосовая отмена брони (W3). Находит подтверждённую бронь по имени и
+    // просит клиента подсветить строку. НИКОГДА не отменяет сама — реальное
+    // удаление позиции в МойСкладе делает оператор кнопкой «× отменить»
+    // (path cancelReservation, со своей safe-mode защитой). Неоднозначность
+    // имени → предупреждение, без подсветки наугад.
+    function handleVoiceCancelCommand(command, transcript) {
+      const spokenName = command.name;
+      const code = command.code;
+
+      if (!activeLot) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Нет активного лота для отмены брони (${spokenName})`,
+        });
+        return;
+      }
+
+      const state = ensureReservationState(activeLot);
+      const events = Array.isArray(state?.events) ? state.events : [];
+      const confirmable = events.filter(
+        (e) => e.status === "reserved" || e.status === "reserved_appended",
+      );
+
+      const candidates = confirmable.map((e) => ({
+        viewerId: e.viewerId,
+        commentId: e.commentId,
+        name: e.viewerName || nameCacheStore?.getName?.(e.viewerId) || "",
+      }));
+      const matches = matchNameAgainst(spokenName, candidates);
+
+      logger.info("ws", "voice_cancel_command", {
+        connectionId,
+        lotSessionId: activeLot.lotSessionId,
+        spokenCode: code,
+        activeLotCode: activeLot.code,
+        codeMatchesActiveLot: String(code) === String(activeLot.code),
+        spokenName,
+        transcript: typeof transcript === "string" ? transcript.slice(0, 200) : "",
+        candidateCount: candidates.length,
+        matchCount: matches.length,
+        topScore: matches[0]?.score ?? null,
+      });
+
+      if (confirmable.length === 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Нет подтверждённых броней для отмены (${spokenName})`,
+        });
+        return;
+      }
+      if (matches.length === 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Не нашёл бронь по имени «${spokenName}» — отмените вручную`,
+        });
+        return;
+      }
+      // Неоднозначность: первые два совпадения с равным счётом — не выбираем
+      // наугад, это риск отменить чужую бронь (реальные деньги).
+      if (matches.length > 1 && matches[0].score === matches[1].score) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Несколько броней похожи на «${spokenName}» — отмените нужную кнопкой «× отменить»`,
+        });
+        return;
+      }
+
+      const best = matches[0];
+      sendJson(websocket, {
+        type: "voiceCancelMatch",
+        viewerId: best.viewerId,
+        commentId: best.commentId,
+        viewerName: best.name,
+        spokenName,
+        code,
+      });
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
@@ -894,6 +975,13 @@ export function attachWsServer(httpServer, config, services = {}) {
               const viewerNameForLog = profileForLog
                 ? [profileForLog.first_name, profileForLog.last_name].filter(Boolean).join(" ")
                 : "";
+              // Персистентный кеш имён (W3): запоминаем КАЖДОГО комментатора с
+              // резолвнутым именем, не только бронирующих. Кеш переживает
+              // стоп/старт эфира и используется голосовой отменой брони для
+              // сопоставления произнесённого оператором имени с зрителем.
+              if (nameCacheStore && viewerNameForLog) {
+                nameCacheStore.remember(comment.from_id, viewerNameForLog);
+              }
               logger.info("vk", "comment_seen", {
                 connectionId,
                 lotSessionId: currentLot.lotSessionId,
@@ -1677,6 +1765,19 @@ export function attachWsServer(httpServer, config, services = {}) {
               sessionLog.logTranscriptFinal({ text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
               rememberFinal(text);
+
+              // Голосовая отмена брони (W3): «<Имя Фамилия> отмена лота #код».
+              // НЕ исполняем отмену из речи — только находим бронь и просим
+              // клиента подсветить строку; оператор подтверждает кнопкой
+              // «× отменить». Это исключает авто-списание денег в МойСкладе по
+              // ошибке распознавания. Обрабатываем до article-детекции и
+              // выходим, чтобы «отмена лота 033322» не открыла лот 033322.
+              const cancelCommand = parseCancelCommand(text);
+              if (cancelCommand.matched) {
+                handleVoiceCancelCommand(cancelCommand, text);
+                return;
+              }
+
               const priceResult = detectPrice(text);
 
               const discountResult = detectDiscount(text, config.discount.triggers);
