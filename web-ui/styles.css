@@ -522,11 +522,11 @@ a { color: inherit; }
 }
 .wishlist-table th:nth-child(1), .wishlist-table td:nth-child(1) { width: 34px; }
 .wishlist-table th:nth-child(2), .wishlist-table td:nth-child(2) { width: 88px; }
-.wishlist-table th:nth-child(4), .wishlist-table td:nth-child(4) { width: 96px; }
-.wishlist-table th:nth-child(5), .wishlist-table td:nth-child(5) { width: 116px; }
-.wishlist-table th:nth-child(6), .wishlist-table td:nth-child(6) { width: 88px; }
-.wishlist-table th:nth-child(7), .wishlist-table td:nth-child(7) { width: 76px; }
-.wishlist-table th:nth-child(8), .wishlist-table td:nth-child(8) { width: 42px; text-align: right; }
+.wishlist-table th:nth-child(4), .wishlist-table td:nth-child(4) { width: 88px; }
+.wishlist-table th:nth-child(5), .wishlist-table td:nth-child(5) { width: 108px; }
+.wishlist-table th:nth-child(6), .wishlist-table td:nth-child(6) { width: 76px; }
+.wishlist-table th:nth-child(7), .wishlist-table td:nth-child(7) { width: 68px; }
+.wishlist-table th:nth-child(8), .wishlist-table td:nth-child(8) { width: 180px; text-align: right; }
 .wishlist-table th:nth-child(3), .wishlist-table td:nth-child(3) { min-width: 0; }
 .wishlist-table th, .wishlist-table td {
   padding: var(--gap-2) var(--gap-3);
@@ -565,8 +565,18 @@ a { color: inherit; }
 .wishlist-table .wishlist-row-remove {
   background: transparent; border: 0; color: var(--text-dim);
   cursor: pointer; padding: 4px 6px; border-radius: 4px;
+  min-width: 28px;
 }
 .wishlist-table .wishlist-row-remove:hover { color: var(--red); background: var(--red-bg); }
+
+.wishlist-table .inline-confirm {
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+.wishlist-table .inline-confirm .btn {
+  height: 26px;
+  padding: 0 var(--gap-2);
+}
 
 .wishlist-viewers {
   display: inline-block; max-width: 200px;
