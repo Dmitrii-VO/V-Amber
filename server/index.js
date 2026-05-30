@@ -13,6 +13,7 @@ import { createMoySkladClient } from "./moysklad.js";
 import { createProductCodeCache } from "./product-code-cache.js";
 import { loadActiveState, clearActiveState, extractOrphans } from "./state-store.js";
 import { createWishlistStore } from "./wishlist-store.js";
+import { createNameCacheStore } from "./name-cache-store.js";
 import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";

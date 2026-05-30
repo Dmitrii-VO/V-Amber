@@ -94,17 +94,25 @@ export function scoreNameMatch(spoken, candidate) {
 const DEFAULT_MIN_SCORE = 0.5;
 
 // Ищем кандидатов по списку { id, name }. Возвращаем отсортированный по
-// убыванию score список совпадений с score >= minScore. НИКОГДА не выбираем
-// «самого похожего» автоматически — это решает вызывающий код, потому что
-// неоднозначность тут = риск отменить чужую бронь (реальные деньги).
+// убыванию score список совпадений. НИКОГДА не выбираем «самого похожего»
+// автоматически — это решает вызывающий код, потому что неоднозначность тут =
+// риск отменить чужую бронь (реальные деньги).
+//
+// Порог: для имени из ОДНОГО токена допускаем minScore (короткое «Галина»).
+// Для имени из 2+ токенов требуем ПОЛНОЕ совпадение всех токенов (score=1):
+// иначе «Галина Прокофьева» матчила бы «Галина Сидорова» со score 0.5 по
+// одному общему имени — и при отсутствии лучшего кандидата отменилась бы
+// чужая бронь. Чем больше оператор сказал, тем строже сверяем.
 export function matchNameAgainst(spoken, candidates, { minScore = DEFAULT_MIN_SCORE } = {}) {
   const list = Array.isArray(candidates) ? candidates : [];
+  const spokenTokenCount = tokenizeName(spoken).length;
+  const requiredScore = spokenTokenCount >= 2 ? 1 : minScore;
   const scored = [];
   for (const candidate of list) {
     if (!candidate) continue;
     const name = candidate.name ?? candidate.viewerName ?? "";
     const score = scoreNameMatch(spoken, name);
-    if (score >= minScore) {
+    if (score >= requiredScore) {
       scored.push({ ...candidate, name, score });
     }
   }

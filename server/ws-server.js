@@ -334,6 +334,25 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      // Код в команде должен совпадать с активным лотом. Иначе оператор имел
+      // в виду другой лот (в однолотовой модели — уже закрытый), и подсветка
+      // брони текущего лота отменила бы НЕ ту позицию. До многолотовости
+      // (Фаза 3) безопаснее предупредить, чем угадать.
+      if (String(code) !== String(activeLot.code)) {
+        logger.info("ws", "voice_cancel_code_mismatch", {
+          connectionId,
+          lotSessionId: activeLot.lotSessionId,
+          spokenCode: code,
+          activeLotCode: activeLot.code,
+          spokenName,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Код ${code} не относится к активному лоту ${activeLot.code} — отмените бронь вручную`,
+        });
+        return;
+      }
+
       const state = ensureReservationState(activeLot);
       const events = Array.isArray(state?.events) ? state.events : [];
       const confirmable = events.filter(

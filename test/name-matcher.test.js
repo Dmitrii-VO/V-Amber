@@ -76,3 +76,19 @@ test("matchNameAgainst accepts viewerName field too", () => {
   assert.equal(matches.length, 1);
   assert.equal(matches[0].viewerId, 9);
 });
+
+test("matchNameAgainst with 2+ spoken tokens requires ALL tokens (no half match)", () => {
+  // «Галина Прокофьева» must NOT match «Галина Сидорова» on the shared first
+  // name alone — otherwise, with no better candidate, a wrong buyer's
+  // reservation would be cancelled (real money).
+  const matches = matchNameAgainst("Галина Прокофьева", [
+    { id: 3, name: "Галина Сидорова" },
+  ]);
+  assert.equal(matches.length, 0);
+});
+
+test("matchNameAgainst single spoken token still matches at 0.5 threshold", () => {
+  const matches = matchNameAgainst("Галина", [{ id: 3, name: "Галина Сидорова" }]);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].id, 3);
+});
