@@ -514,7 +514,7 @@ a { color: inherit; }
 }
 .wishlist-table .wishlist-row-remove:hover { color: var(--red); background: var(--red-bg); }
 
-.wishlist-viewers {
+.wishlist-ordered-by {
   display: inline-block; max-width: 200px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: var(--font-mono); font-size: var(--fs-xs);
