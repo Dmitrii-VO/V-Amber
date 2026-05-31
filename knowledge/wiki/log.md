@@ -221,6 +221,18 @@ catalog is loaded and the chosen code is not in it, the lot is not
 opened, the operator sees "Код N не найден в каталоге МойСклад", and the
 event is logged as `voice_code_rejected_unknown`.
 
+## [2026-05-31] identity | VK service replies go through community token
+
+Stage 5: routed all live-video `video.createComment` writes and the
+matching `photos.getWallUploadServer` / `photos.saveWallPhoto` uploads
+through a derived `commentToken = VK_GROUP_TOKEN || VK_ACCESS_TOKEN
+|| VK_USER_TOKEN`. Operator confirmed `VK_ACCESS_TOKEN` is a community
+access token, so the fallback chain lets the existing .env produce
+group-identity comments without renaming the variable. Reservation
+reply text now embeds the lot code, e.g. «Аня, бронь подтверждена (код
+03204).», so buyers can tell which article the service reply confirms
+when multiple lots are open. See [[vk-comments]].
+
 Variant/modification ambiguity still open. `moysklad.getProductCardByCode`
 queries only `entity/product?filter=code=...`. A code that lives on a
 variant (modification) currently returns null and trips the unknown-code

@@ -572,7 +572,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     function notifyReservationStatus(lot, event) {
-      const message = getReservationReplyMessage(event);
+      const message = getReservationReplyMessage(event, { code: lot?.code || null });
       if (!message) {
         return;
       }

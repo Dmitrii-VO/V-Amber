@@ -160,12 +160,19 @@ export function buildVideoCommentParams({ ownerId, videoId, message, attachments
 export function createVkPublisher(config) {
   const userToken = config?.userToken || "";
   const groupToken = config?.groupToken || "";
+  const accessToken = config?.accessToken || "";
+  // Этап 5: токен, под которым публикуем комментарии и грузим фото к
+  // live-видео. Должен принадлежать сообществу (Amberry), иначе reply-
+  // комментарии пойдут от user identity оператора. Допускаем оба имени —
+  // VK_GROUP_TOKEN или VK_ACCESS_TOKEN. userToken оставляем как
+  // back-compat fallback для старых конфигов.
+  const commentToken = groupToken || accessToken || userToken;
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
   let liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
   let liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
-  const isEnabled = Boolean(userToken);
+  const isEnabled = Boolean(commentToken);
   const minApiIntervalMs = parsePositiveInt(config?.apiMinIntervalMs, 1100);
   const rateLimitBackoffMs = parsePositiveInt(config?.apiRateLimitBackoffMs, 1500);
   // Адаптивный backoff: при каждой ошибке 6 удваиваем «штраф» к интервалу,
@@ -240,7 +247,7 @@ export function createVkPublisher(config) {
     const groupId = String(config?.groupId || "").replace(/^-/, "");
     const uploadServer = await callVkApi("photos.getWallUploadServer", {
       group_id: groupId || undefined,
-    });
+    }, commentToken);
 
     const formData = new FormData();
     formData.set("photo", new Blob([photo.buffer], { type: photo.contentType }), photo.filename);
@@ -260,7 +267,7 @@ export function createVkPublisher(config) {
       photo: uploadPayload.photo,
       server: String(uploadPayload.server),
       hash: uploadPayload.hash,
-    });
+    }, commentToken);
 
     const photoItem = Array.isArray(savedPhoto) ? savedPhoto[0] : null;
     if (!photoItem?.owner_id || !photoItem?.id) {
@@ -281,7 +288,7 @@ export function createVkPublisher(config) {
       count: Math.min(Math.max(count, 1), 100),
       extended: 1,
       sort: "desc",
-    });
+    }, commentToken);
 
     return {
       items: response?.items || [],
@@ -403,7 +410,7 @@ export function createVkPublisher(config) {
           videoId: liveVideoId,
           message,
           attachments,
-        }));
+        }), commentToken);
       }, meta);
     },
     async publishLotClosed(activeLot) {
@@ -429,7 +436,7 @@ export function createVkPublisher(config) {
           ownerId: liveOwnerId,
           videoId: liveVideoId,
           message,
-        })),
+        }), commentToken),
         {
           kind: "lot_closed",
           code: activeLot.code,
@@ -461,7 +468,7 @@ export function createVkPublisher(config) {
           videoId: liveVideoId,
           message,
           replyToComment: commentId,
-        })),
+        }), commentToken),
         {
           kind: "reservation_reply",
           commentId,
@@ -500,7 +507,7 @@ export function createVkPublisher(config) {
           ownerId: liveOwnerId,
           videoId: liveVideoId,
           message,
-        })),
+        }), commentToken),
         {
           kind: "discount_update",
           code: activeLot.code,
@@ -535,7 +542,7 @@ export function createVkPublisher(config) {
           ownerId: liveOwnerId,
           videoId: liveVideoId,
           message,
-        })),
+        }), commentToken),
         {
           kind: "price_update",
           code: activeLot.code,

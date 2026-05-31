@@ -84,7 +84,7 @@ export function getLotEffectivePrice(lot) {
     : lot?.product?.salePrice;
 }
 
-export function getReservationReplyMessage(event) {
+export function getReservationReplyMessage(event, options = {}) {
   // W6 — ручной режим: переполнение по остатку тихо уходит в лист ожидания
   // на стороне сервера (addWishlistFromComment), но покупателю публично
   // НИЧЕГО не пишем. Оператор работает со списком вручную. См.
@@ -101,12 +101,18 @@ export function getReservationReplyMessage(event) {
     return "Бронь принята. Вы в очереди, подтвердим следующим сообщением.";
   }
 
+  // Этап 5: явно указываем код лота, чтобы покупатель видел, какой
+  // именно артикул мы за ним закрепили — иначе при нескольких открытых
+  // лотах непонятно, к чему относится reply.
+  const code = options?.code || event?.lotCode || null;
+  const codeSuffix = code ? ` (код ${code})` : "";
+
   if (event.status === "reserved") {
-    return `${event.viewerName}, бронь подтверждена.`;
+    return `${event.viewerName}, бронь подтверждена${codeSuffix}.`;
   }
 
   if (event.status === "reserved_appended") {
-    return `${event.viewerName}, бронь подтверждена. Товар добавлен в ваш заказ.`;
+    return `${event.viewerName}, бронь подтверждена${codeSuffix}. Товар добавлен в ваш заказ.`;
   }
 
   if (event.status === "order_failed") {
