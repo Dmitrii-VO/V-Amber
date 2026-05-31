@@ -6,6 +6,8 @@ const UNIT_WORDS = new Map([
   ["девять", 9],
 ]);
 
+const ZERO_WORDS = new Set(["ноль", "нуль"]);
+
 const TEEN_WORDS = new Map([
   ["десять", 10], ["одиннадцать", 11], ["двенадцать", 12],
   ["тринадцать", 13], ["четырнадцать", 14], ["пятнадцать", 15],
@@ -42,6 +44,29 @@ function tokenize(text) {
   return String(text || "").toLowerCase().replace(/ё/g, "е").match(/[a-zа-я0-9]+/gi) || [];
 }
 
+// Посимвольное чтение цифр: «два пять пять ноль» → 2550.
+// Требуем минимум 3 цифр-слова, чтобы «два пять» не превращалось в 25
+// (оператор сказал бы «двадцать пять»). Верхняя граница 6 — артикулы и
+// длинные последовательности в цены не пускаем.
+function parseSpokenDigits(words) {
+  const norm = words.map(normalizeWord);
+  if (norm.length < 3 || norm.length > 6) return null;
+  let result = "";
+  for (const w of norm) {
+    if (/^\d+$/.test(w)) {
+      result += w;
+    } else if (UNIT_WORDS.has(w)) {
+      result += UNIT_WORDS.get(w);
+    } else if (ZERO_WORDS.has(w)) {
+      result += "0";
+    } else {
+      return null;
+    }
+  }
+  const value = Number.parseInt(result, 10);
+  return value > 0 ? value : null;
+}
+
 function parseMonetaryWords(words) {
   const norm = words.map(normalizeWord);
   let value = 0;
@@ -55,10 +80,10 @@ function parseMonetaryWords(words) {
     return UNIT_WORDS.get(norm[0]) * 1000 + HUNDREDS_WORDS.get(norm[1]);
   }
 
-  if (i < norm.length && /^тысяч[аи]?$/.test(norm[i])) {
+  if (i < norm.length && /^тысяч[ауи]?$/.test(norm[i])) {
     value += 1000;
     i += 1;
-  } else if (i + 1 < norm.length && /^тысяч[аи]?$/.test(norm[i + 1])) {
+  } else if (i + 1 < norm.length && /^тысяч[ауи]?$/.test(norm[i + 1])) {
     const mult = THOUSANDS_MULTIPLIERS.get(norm[i]);
     if (mult !== undefined) {
       value += mult * 1000;
@@ -106,6 +131,18 @@ export function detectPrice(text) {
         return { value: digitValue, trigger: tokens[i] };
       }
 
+      // Пробуем сначала «цифровой» разбор (два пять пять ноль), он жаднее
+      // и точнее для длинных последовательностей.
+      for (let len = Math.min(6, tokens.length - j); len >= 3; len -= 1) {
+        const words = tokens.slice(j, j + len);
+        if (words.some((word) => FILLER_WORDS.has(word))) continue;
+        const value = parseSpokenDigits(words);
+        if (value && value > 0) {
+          return { value, trigger: tokens[i] };
+        }
+      }
+
+      // Стандартный разбор (тысяча пятьсот пятьдесят).
       for (let len = Math.min(4, tokens.length - j); len >= 1; len -= 1) {
         const words = tokens.slice(j, j + len);
         if (words.some((word) => FILLER_WORDS.has(word))) continue;
@@ -119,3 +156,4 @@ export function detectPrice(text) {
 
   return null;
 }
+

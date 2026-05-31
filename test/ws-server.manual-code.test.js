@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startHarness } from "./helpers/ws-harness.js";
+import { createVkMock, startHarness } from "./helpers/ws-harness.js";
 
 // Сценарии ручного ввода кода на активном лоте (#14). Вариант А: ручной ввод
 // разрешён только при активном STT-стриме; код обязан быть в каталоге.
@@ -195,6 +195,38 @@ test("#14: manualCode with unknown stock — first reservation falls back to flo
   }
 });
 
+// Этап 4: unknown stock после refresh → лот помечается stockUnknown, оператор
+// получает явный warning «риск перепродажи». UI рисует amber pill по флагу.
+test("unknown stock surfaces a stockUnknown flag and a warning to the operator", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204_NO_STOCK },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 201, fromId: 6001, text: "03204", firstName: "Оля" });
+
+    const warning = await client.waitFor(
+      (m) => m.type === "warning" && /Остаток.*неизвестен/.test(m.message || ""),
+      { timeoutMs: 6000 },
+    );
+    assert.match(warning.message, /03204/);
+
+    const flagged = await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.product?.stockUnknown === true,
+      { timeoutMs: 6000 },
+    );
+    assert.equal(flagged.activeLot.product.availableStock, null);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("#14: manualCode re-entry preserves an accepted reservation (no poison, no close)", async () => {
   const harness = await startHarness({
     cardsByCode: { "03204": CARD_03204 },
@@ -305,6 +337,105 @@ test("#14: overflow on an inactive open lot goes to wishlist", async () => {
     assert.equal(harness.wishlistStore.calls.length, 1);
     assert.equal(harness.wishlistStore.calls[0].lot.code, "03204");
     assert.equal(harness.wishlistStore.calls[0].event.viewerName, "Оля");
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// Этап 6: покупатель пишет «бронь 0588» вместо «бронь 00588». Раньше
+// exact-match терял такую бронь; теперь padding из ведущих нулей
+// маршрутизирует комментарий в правильный лот.
+test("buyer comment with missing leading zero matches an open lot by zero-padding", async () => {
+  const CARD_00588 = {
+    id: "p-00588",
+    name: "Кулон янтарь",
+    code: "00588",
+    pathName: "Украшения/Кулоны",
+    salePrice: 1800,
+    availableStock: 3,
+  };
+  const harness = await startHarness({
+    cardsByCode: { "00588": CARD_00588 },
+    knownCodes: ["00588"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "00588" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "00588");
+
+    harness.vk.pushComment({ id: 301, fromId: 7001, text: "бронь 0588", firstName: "Лена" });
+
+    await client.waitFor(hasReserved, { timeoutMs: 6000 });
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("stream stop skips remaining lot-close publishes when VK video is gone", async () => {
+  const videoGoneError = new Error("VK API 15: Access denied: video not found");
+  videoGoneError.vkErrorCode = 15;
+  const vk = createVkMock({
+    publishLotClosed: async () => {
+      throw videoGoneError;
+    },
+  });
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
+    knownCodes: ["03204", "03199"],
+    vk,
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+
+    client.send({ type: "stop", stoppedAt: new Date().toISOString() });
+    await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
+
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// Этап 7 (post-review): остальные stream-fatal коды VK (100 — bad params,
+// 801 — комментарии закрыты) тоже видео-уровневые. Раньше только код 15
+// пропускал оставшиеся лоты — остальные ушли бы серией error-логов.
+test("stream stop also skips remaining publishes for other stream-fatal VK errors", async () => {
+  const commentsClosed = new Error("VK API 801: Comments are disabled for this video");
+  commentsClosed.vkErrorCode = 801;
+  const vk = createVkMock({
+    publishLotClosed: async () => {
+      throw commentsClosed;
+    },
+  });
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
+    knownCodes: ["03204", "03199"],
+    vk,
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+
+    client.send({ type: "stop", stoppedAt: new Date().toISOString() });
+    await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
+
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
   } finally {
     await client.close();
     await harness.close();

@@ -57,10 +57,18 @@ creating and confirmed reservation events before writing to MoySklad. Later
 If stock is unknown when the first reservation arrives,
 `ensureStockKnownBeforeFirstReservation` makes a one-shot
 `moysklad.getProductCardByCode` call to backfill `availableStock`
-before the guard runs. If MoySklad still returns no number, the floor=1
-default applies and the event is logged as
-`stock_unknown_first_reservation` so the case is greppable in
-`server.log`. See [[stock-synchronization]] and [[operator-feedback]].
+before the guard runs. If MoySklad still returns no number, the policy
+is **"first slot + explicit warning"** (chosen 2026-05-31): floor=1
+allows exactly one reservation, the lot is marked
+`product.stockUnknown = true` in the state payload, the operator gets
+a `warning` toast "Остаток для лота … неизвестен — разрешён только
+1 slot, риск перепродажи", and the case is logged as
+`stock_unknown_first_reservation` for grep. The UI renders an amber
+pill "остаток неизвестен · риск перепродажи" on the active lot card.
+Subsequent reservations on the same lot hit
+`committedReservationCount > 0` and are rejected as `out_of_stock`,
+unless a follow-up moment lands a real stock number that lifts the
+flag. See [[stock-synchronization]] and [[operator-feedback]].
 
 The guard now also respects per-event `quantity`: the request is rejected
 when `remainingStock < event.quantity`, and `committedReservationCount`

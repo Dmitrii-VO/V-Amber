@@ -173,6 +173,26 @@ test("getReservationReplyMessage returns empty for unknown status", () => {
   assert.equal(getReservationReplyMessage({ status: "weird" }), "");
 });
 
+// Этап 5: явно указываем код лота, чтобы покупатель понял, какой
+// артикул мы за ним закрепили (особенно при нескольких открытых лотах).
+test("getReservationReplyMessage includes lot code when provided via options.code", () => {
+  assert.match(
+    getReservationReplyMessage({ status: "reserved", viewerName: "Аня" }, { code: "03204" }),
+    /код 03204/,
+  );
+  assert.match(
+    getReservationReplyMessage({ status: "reserved_appended", viewerName: "Боб" }, { code: "03199" }),
+    /код 03199/,
+  );
+});
+
+test("getReservationReplyMessage falls back to event.lotCode when options.code is missing", () => {
+  assert.match(
+    getReservationReplyMessage({ status: "reserved", viewerName: "Аня", lotCode: "03204" }),
+    /код 03204/,
+  );
+});
+
 test("getCommittedReservationCount clamps negative / missing to 0", () => {
   assert.equal(getCommittedReservationCount({ committedReservationCount: 5 }), 5);
   assert.equal(getCommittedReservationCount({ committedReservationCount: -3 }), 0);

@@ -24,8 +24,13 @@ block server startup.
 ## Operator update path
 
 `update.command` downloads the latest GitHub Release, applies files over the
-current folder, preserves `.env`, `logs/`, and `node_modules/`, then runs
-`npm install`.
+current folder, preserves `.env`, `logs/`, `node_modules/`, and `.git`, then
+runs `npm install`.
+
+On macOS, release archives should be extracted with `ditto` before falling back
+to `bsdtar` or `unzip`; this keeps updates working when the archive contains
+UTF-8 filenames. An operator update from `0.1.26` to `0.1.33` confirmed the
+fixed flow after the old `unzip` path failed on `Добро пожаловать.md`.
 
 ## Related pages
 

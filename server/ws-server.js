@@ -6,7 +6,7 @@ import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount } from "./discount-detector.js";
 import { detectPrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
-import { createVkPublisher } from "./vk.js";
+import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
@@ -28,6 +28,7 @@ import {
   isFatalCommentReadError,
   RESERVATION_HISTORY_LIMIT,
 } from "./ws-helpers.js";
+import { createVoicePipeline } from "./domain/voice-pipeline.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -140,20 +141,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     let activeLot = null;
     const openLotsBySessionId = new Map();
     let lastDetection = null;
-    let triggerActiveUntil = 0;
-    let triggerSessionFinals = [];
-
-    // Сброс окна голосовых триггеров. Точка отказа: если когда-нибудь
-    // привяжем авто-таймауты к моменту первого детекта, надо будет
-    // централизованно решить, что делать здесь. Reason оставляется в
-    // логах warn-уровня только при DEBUG_TRIGGER_WINDOW=1.
-    function resetTriggerWindow(reason) {
-      triggerActiveUntil = 0;
-      triggerSessionFinals = [];
-      if (process.env.DEBUG_TRIGGER_WINDOW === "1") {
-        logger.debug("article", "trigger_window_reset", { connectionId, reason });
-      }
-    }
+    const voicePipeline = createVoicePipeline({
+      connectionId,
+      detectionConfig,
+    });
     let nextRunId = 1;
     let activeRunId = null;
     let activeDetectionActionId = null;
@@ -271,7 +262,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       openLotsBySessionId.clear();
       lastDetection = null;
       activeDetectionActionId = null;
-      resetTriggerWindow("detection_state_reset");
+      voicePipeline.resetTriggerWindow("detection_state_reset");
     }
 
     function registerOpenLot(lot) {
@@ -296,7 +287,44 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     async function publishAllLotsClosed(reason) {
       const lots = getOpenLots();
-      await Promise.all(lots.map((lot) => publishLotClosed(lot, reason)));
+      // Последовательно, чтобы при «video not found» на конце эфира можно
+      // было записать ровно один warning и пропустить публикацию закрытия
+      // оставшихся лотов вместо серии error publish failures в логе.
+      let vkStreamUnavailable = false;
+      for (const lot of lots) {
+        await flushOrphanWaitlist(lot, reason);
+        if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
+          continue;
+        }
+        try {
+          await vk.publishLotClosed(lot);
+        } catch (error) {
+          // Расширили классификатор: stream-fatal означает «дальше публикация
+          // под этим видео не пройдёт» (видео удалено/недоступно/комментарии
+          // закрыты/некорректные параметры) — для массового закрытия лотов
+          // условия видео-уровневые, поэтому останавливаем дальнейшие попытки.
+          if (isVkStreamFatalError(error)) {
+            vkStreamUnavailable = true;
+            logger.warn("vk", "lot_close_skipped_video_unavailable", {
+              connectionId,
+              code: lot.code,
+              lotSessionId: lot.lotSessionId,
+              reason,
+              vkErrorCode: error?.vkErrorCode ?? null,
+              error,
+            });
+          } else {
+            handleVkPublishError(lot, error);
+            logger.error("vk", "lot_close_publish_failed", {
+              connectionId,
+              code: lot.code,
+              lotSessionId: lot.lotSessionId,
+              reason,
+              error,
+            });
+          }
+        }
+      }
       openLotsBySessionId.clear();
       activeLot = null;
     }
@@ -509,6 +537,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             && Number.isFinite(productCard.availableStock)) {
           lot.product = lot.product || {};
           lot.product.availableStock = productCard.availableStock;
+          lot.product.stockUnknown = false;
           logger.info("moysklad", "stock_refreshed_before_first_reservation", {
             connectionId,
             code: lot.code,
@@ -516,26 +545,39 @@ export function attachWsServer(httpServer, config, services = {}) {
             availableStock: productCard.availableStock,
           });
         } else {
-          logger.warn("moysklad", "stock_unknown_first_reservation", {
-            connectionId,
-            code: lot.code,
-            lotSessionId: lot.lotSessionId,
-            reason: "card_returned_no_stock",
-          });
+          markLotStockUnknown(lot, "card_returned_no_stock");
         }
       } catch (error) {
-        logger.warn("moysklad", "stock_unknown_first_reservation", {
-          connectionId,
-          code: lot.code,
-          lotSessionId: lot.lotSessionId,
-          reason: "card_lookup_failed",
-          error,
+        markLotStockUnknown(lot, "card_lookup_failed", error);
+      }
+    }
+
+    // Бизнес-правило (этап 4 PLAN.md): unknown stock → разрешаем один slot
+    // (через floor=1 в getRemainingAvailableStock), но обязаны явно показать
+    // оператору риск перепродажи. Метим лот флагом stockUnknown, шлём toast
+    // и оставляем один greppable warning в логах.
+    function markLotStockUnknown(lot, reason, error = null) {
+      if (!lot?.code) return;
+      lot.product = lot.product || {};
+      const alreadyMarked = lot.product.stockUnknown === true;
+      lot.product.stockUnknown = true;
+      logger.warn("moysklad", "stock_unknown_first_reservation", {
+        connectionId,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        reason,
+        ...(error ? { error } : {}),
+      });
+      if (!alreadyMarked) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Остаток для лота ${lot.code} неизвестен — разрешён только 1 slot, риск перепродажи`,
         });
       }
     }
 
     function notifyReservationStatus(lot, event) {
-      const message = getReservationReplyMessage(event);
+      const message = getReservationReplyMessage(event, { code: lot?.code || null });
       if (!message) {
         return;
       }
@@ -946,8 +988,24 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     }
 
+    // Этап 6: толерантность к ведущим нулям в коде покупателя. Оператор
+     // говорит «00588», но покупатель пишет «бронь 0588» — старый exact-match
+    // терял такую бронь. Pad только добавляет ведущие нули и только если код
+    // лота длиннее: «10588» нельзя достичь pad'ом из «0588», поэтому
+    // ложноположительных матчей не появится.
+    function codesEquivalent(buyerCode, lotCode) {
+      if (!buyerCode || !lotCode) return false;
+      if (buyerCode === lotCode) return true;
+      if (buyerCode.length >= lotCode.length) return false;
+      if (!/^\d+$/.test(buyerCode) || !/^\d+$/.test(lotCode)) return false;
+      return buyerCode.padStart(lotCode.length, "0") === lotCode;
+    }
+
     function findCommentTarget(text) {
-      for (const lot of getOpenLots()) {
+      const openLots = getOpenLots();
+      // Сначала проходим по всем открытым лотам с exact-сравнением (и
+      // wishlist), exact всегда побеждает padded.
+      for (const lot of openLots) {
         const expectedCode = normalizeReservationCode(lot.code);
         const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
         if (reservationComment.code && reservationComment.code === expectedCode) {
@@ -957,6 +1015,30 @@ export function attachWsServer(httpServer, config, services = {}) {
         if (wishlistComment.code && wishlistComment.code === expectedCode) {
           return { lot, reservationComment, wishlistComment, matchedReservation: false, matchedWishlist: true };
         }
+      }
+      // Второй проход — zero-padding. Собираем все лоты, в которые код
+      // покупателя ложится pad'ом из нулей, и используем только если
+      // подошёл ровно один. Иначе ambiguous → возвращаем null, чтобы не
+      // отправить бронь не на тот лот (например, если открыты «00588» и
+      // «000588», buyer «588» подходит обоим).
+      const paddedMatches = [];
+      for (const lot of openLots) {
+        const expectedCode = normalizeReservationCode(lot.code);
+        const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
+        if (reservationComment.code && codesEquivalent(reservationComment.code, expectedCode)) {
+          paddedMatches.push({ lot, reservationComment });
+        }
+      }
+      if (paddedMatches.length === 1) {
+        const { lot, reservationComment } = paddedMatches[0];
+        return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
+      }
+      if (paddedMatches.length > 1) {
+        logger.warn("vk", "padded_match_ambiguous", {
+          connectionId,
+          text,
+          lotCodes: paddedMatches.map(({ lot }) => lot.code),
+        });
       }
       return null;
     }
@@ -1386,33 +1468,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       emitState();
     }
 
-    function rememberFinal(text) {
-      if (transcriptHasTrigger(text, detectionConfig.triggers)) {
-        triggerActiveUntil = Date.now() + detectionConfig.triggerWindowMs;
-        triggerSessionFinals = [{ text, ts: Date.now() }];
-        return;
-      }
-
-      if (Date.now() <= triggerActiveUntil) {
-        triggerSessionFinals.push({ text, ts: Date.now() });
-        triggerSessionFinals = triggerSessionFinals.slice(-Math.max(1, detectionConfig.finalBufferSize));
-      }
-    }
-
-    function buildDetectionInputs(text) {
-      const inputs = [text];
-
-      if (Date.now() > triggerActiveUntil || triggerSessionFinals.length === 0) {
-        return inputs;
-      }
-
-      for (let size = 1; size <= triggerSessionFinals.length; size += 1) {
-        inputs.unshift(triggerSessionFinals.slice(-size).map((entry) => entry.text).join(" "));
-      }
-
-      return [...new Set(inputs.filter(Boolean))];
-    }
-
     function isDetectionStillActive({ runId = null, enforceActiveRun = false, expectedDetectionId = null } = {}) {
       if (enforceActiveRun && runId !== activeRunId) {
         return false;
@@ -1509,7 +1564,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         allCandidates,
       });
 
-      resetTriggerWindow("lot_opened");
+      voicePipeline.resetTriggerWindow("lot_opened");
       emitState();
       return nextLot;
     }
@@ -1614,7 +1669,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         }
       }
 
-      resetTriggerWindow("redetection_merged");
+      voicePipeline.resetTriggerWindow("redetection_merged");
       emitState();
     }
 
@@ -1627,6 +1682,25 @@ export function attachWsServer(httpServer, config, services = {}) {
       } = options;
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
+        return;
+      }
+
+      // Этап 4: если каталог загружен — пропускаем только коды, известные
+      // МойСкладу. Иначе голосовой путь молча открывал лот для «00011» с
+      // null-карточкой и оператор узнавал о промахе только по логам.
+      // Параллель с ручным вводом (manualCode rejection above).
+      const knownCodesForGate = productCodeCache?.getCodes?.() || null;
+      if (knownCodesForGate && knownCodesForGate.size > 0 && !knownCodesForGate.has(selectedCode)) {
+        logger.warn("article", "voice_code_rejected_unknown", {
+          connectionId,
+          code: selectedCode,
+          source,
+          transcript: detection?.transcript ?? null,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Код ${selectedCode} не найден в каталоге МойСклад`,
+        });
         return;
       }
 
@@ -1710,7 +1784,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
       startCommentPolling();
 
-      resetTriggerWindow("confirmed_detection_completed");
+      voicePipeline.resetTriggerWindow("confirmed_detection_completed");
     }
 
     logger.info("ws", "client_connected", { connectionId });
@@ -1780,7 +1854,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs });
               sessionLog.logTranscriptFinal({ text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
-              rememberFinal(text);
+              voicePipeline.rememberFinal(text);
 
               // Голосовая отмена брони (W3): «<Имя Фамилия> отмена лота #код».
               // НЕ исполняем отмену из речи — только находим бронь и просим
@@ -1832,7 +1906,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               void (async () => {
-                const detectionInputs = buildDetectionInputs(text);
+                const detectionInputs = voicePipeline.buildDetectionInputs(text);
                 let detection = null;
 
                 for (const input of detectionInputs) {

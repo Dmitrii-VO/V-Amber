@@ -67,6 +67,31 @@ test("harness: setLotPrice overrides price on the active lot (priceSource=manual
   }
 });
 
+// Этап 4: голосовой путь должен молча отклонять коды, отсутствующие в
+// каталоге МойСклад (раньше открывался лот с null-карточкой).
+test("voice: unknown code is rejected with an operator warning, no lot opened", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204 },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    const session = await harness.waitForSession();
+    session.handlers.onFinal({ text: "код товара 00011", latencyMs: 10 });
+
+    const warning = await client.waitFor(
+      (m) => m.type === "warning" && /00011/.test(m.message || "") && /каталог/i.test(m.message || ""),
+      { timeoutMs: 4000 },
+    );
+    assert.match(warning.message, /не найден/);
+    assert.equal(harness.vk.callsTo("publishLotCard").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("harness: closeLot clears the active lot and publishes lot-closed", async () => {
   const harness = await startHarness({
     cardsByCode: { "03204": CARD_03204 },

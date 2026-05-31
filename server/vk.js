@@ -138,15 +138,48 @@ function isVkFatalError(error) {
   return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
 }
 
+export function isVkStreamFatalError(error) {
+  // Условие «дальше публиковать под этим видео бесполезно»: видео скрыто/
+  // удалено/без прав/комментарии закрыты — все эти кейсы одинаково ломают
+  // массовое закрытие лотов на конце эфира.
+  return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
+}
+
+export function isUsableCommentPhoto(photo) {
+  return Boolean(photo?.buffer && photo?.contentType && photo?.filename);
+}
+
+export function buildVideoCommentParams({ ownerId, videoId, message, attachments, replyToComment }) {
+  const params = {
+    owner_id: ownerId,
+    video_id: videoId,
+    message,
+  };
+  if (attachments) {
+    params.attachments = attachments;
+  }
+  if (replyToComment) {
+    params.reply_to_comment = replyToComment;
+  }
+  return params;
+}
+
 export function createVkPublisher(config) {
   const userToken = config?.userToken || "";
   const groupToken = config?.groupToken || "";
+  const accessToken = config?.accessToken || "";
+  // Этап 5: токен, под которым публикуем комментарии и грузим фото к
+  // live-видео. Должен принадлежать сообществу (Amberry), иначе reply-
+  // комментарии пойдут от user identity оператора. Допускаем оба имени —
+  // VK_GROUP_TOKEN или VK_ACCESS_TOKEN. userToken оставляем как
+  // back-compat fallback для старых конфигов.
+  const commentToken = groupToken || accessToken || userToken;
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
   let liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
   let liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
-  const isEnabled = Boolean(userToken);
+  const isEnabled = Boolean(commentToken);
   const minApiIntervalMs = parsePositiveInt(config?.apiMinIntervalMs, 1100);
   const rateLimitBackoffMs = parsePositiveInt(config?.apiRateLimitBackoffMs, 1500);
   // Адаптивный backoff: при каждой ошибке 6 удваиваем «штраф» к интервалу,
@@ -221,7 +254,7 @@ export function createVkPublisher(config) {
     const groupId = String(config?.groupId || "").replace(/^-/, "");
     const uploadServer = await callVkApi("photos.getWallUploadServer", {
       group_id: groupId || undefined,
-    });
+    }, commentToken);
 
     const formData = new FormData();
     formData.set("photo", new Blob([photo.buffer], { type: photo.contentType }), photo.filename);
@@ -241,7 +274,7 @@ export function createVkPublisher(config) {
       photo: uploadPayload.photo,
       server: String(uploadPayload.server),
       hash: uploadPayload.hash,
-    });
+    }, commentToken);
 
     const photoItem = Array.isArray(savedPhoto) ? savedPhoto[0] : null;
     if (!photoItem?.owner_id || !photoItem?.id) {
@@ -262,7 +295,7 @@ export function createVkPublisher(config) {
       count: Math.min(Math.max(count, 1), 100),
       extended: 1,
       sort: "desc",
-    });
+    }, commentToken);
 
     return {
       items: response?.items || [],
@@ -375,16 +408,16 @@ export function createVkPublisher(config) {
       };
 
       return sendWithRetry(async () => {
-        const attachments = productCard?.photo
+        const attachments = isUsableCommentPhoto(productCard?.photo)
           ? await uploadCommentPhoto(productCard.photo)
           : undefined;
 
-        return callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        return callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
           attachments,
-        });
+        }), commentToken);
       }, meta);
     },
     async publishLotClosed(activeLot) {
@@ -406,11 +439,11 @@ export function createVkPublisher(config) {
       ].join("\n");
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-        }),
+        }), commentToken),
         {
           kind: "lot_closed",
           code: activeLot.code,
@@ -437,12 +470,12 @@ export function createVkPublisher(config) {
       }
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-          reply_to_comment: commentId,
-        }),
+          replyToComment: commentId,
+        }), commentToken),
         {
           kind: "reservation_reply",
           commentId,
@@ -477,11 +510,11 @@ export function createVkPublisher(config) {
       ].join("\n");
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-        }),
+        }), commentToken),
         {
           kind: "discount_update",
           code: activeLot.code,
@@ -512,11 +545,11 @@ export function createVkPublisher(config) {
       ].join("\n");
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-        }),
+        }), commentToken),
         {
           kind: "price_update",
           code: activeLot.code,
@@ -581,7 +614,7 @@ export function createVkPublisher(config) {
 
     async validateLiveVideoUrl(url) {
       if (!isEnabled) {
-        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_USER_TOKEN)" };
+        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_GROUP_TOKEN / VK_ACCESS_TOKEN / VK_USER_TOKEN)" };
       }
 
       const trimmed = String(url || "").trim();
@@ -601,11 +634,15 @@ export function createVkPublisher(config) {
       }
 
       try {
+        // Этап 5: validateLiveVideoUrl должен использовать тот же токен,
+        // под которым потом публикуются комментарии. Иначе при community-
+        // only конфиге (нет VK_USER_TOKEN) валидация падает auth_failed,
+        // хотя реальная публикация под commentToken работала бы.
         const response = await callVkApi("video.get", {
           owner_id: ownerId,
           videos: `${ownerId}_${videoId}`,
           extended: 1,
-        });
+        }, commentToken);
         const video = response?.items?.[0];
         if (!video) {
           return {

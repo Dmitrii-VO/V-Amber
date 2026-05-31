@@ -29,6 +29,9 @@ The dashboard can:
 - show active wishlist count and old-entry badge;
 - create a server-side draft with `/api/wishlist/draft`;
 - edit quantities, buy prices, suppliers, and selection state inline;
+- type supplier names for `Без поставщика` rows through a browser typeahead
+  backed by cached MoySklad suppliers; the selected name resolves to
+  `supplierId` before saving;
 - save compatible draft edits in `localStorage` with the `wishlist_draft_`
   prefix;
 - check whether selected entries already exist in open customer orders;
@@ -46,10 +49,22 @@ duplicates.
 The intended explicit command is `список <код>`. [[operator-feedback]] records
 that the system needs clearer buyer-facing explanation for this command.
 
+Out-of-stock reservation attempts also create wishlist entries automatically:
+when a buyer writes a valid reservation for a lot whose known stock is already
+fully committed, `server/ws-server.js` calls `addWishlistFromComment` with
+trigger `out_of_stock_reservation`. This is W5 from the 2026-05-30 operator
+wishes: overflow demand should stay visible to the operator instead of being
+lost.
+
+W6 manual mode is intentionally silent for buyers. `out_of_stock` entries go
+to the wishlist without a public VK reply; the operator handles follow-up
+manually from the wishlist modal.
+
 ## Open UX requests
 
 - Explain how to enter the waiting list.
-- Avoid public comment noise for wishlist confirmations.
+- Keep waiting-list overflow quiet in VK comments; public `out_of_stock`
+  replies are intentionally disabled for manual mode.
 - Prefer VK direct messages when possible.
 
 ## Related pages
