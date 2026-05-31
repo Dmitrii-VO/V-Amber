@@ -40,6 +40,9 @@ const elements = {
   transcriptCount: $("transcriptCount"),
   transcriptStatus: $("transcriptStatus"),
   transcriptOutput: $("transcriptOutput"),
+  micMeter: $("micMeter"),
+  micMeterBar: $("micMeterBar"),
+  micSilence: $("micSilence"),
 
   reservationList: $("reservationList"),
   reservationEmpty: $("reservationEmpty"),
@@ -145,6 +148,9 @@ const state = {
   safeMode: false,
   startedAt: 0,
   uptimeTimer: null,
+  lastVoiceAt: 0,
+  micCheckTimer: null,
+  micSilent: false,
 };
 
 const digestState = {
@@ -157,6 +163,12 @@ const digestState = {
 };
 
 const TARGET_SAMPLE_RATE = 16000;
+
+// Индикатор микрофона. RMS ниже порога ≈ тишина; если тихо дольше
+// MIC_SILENCE_MS во время эфира — предупреждаем оператора (микрофон замьючен,
+// не то устройство или низкий уровень).
+const MIC_SILENCE_RMS = 0.008;
+const MIC_SILENCE_MS = 4000;
 
 async function requestDeviceLabels() {
   const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -692,7 +704,68 @@ function setTranscriptStatus(text) {
     : (elements.transcriptStatus.textContent = text);
 }
 
+function computeRms(samples) {
+  if (!samples || samples.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    sum += samples[i] * samples[i];
+  }
+  return Math.sqrt(sum / samples.length);
+}
+
+// Обновляет полоску уровня по RMS аудиокадра и запоминает момент последнего
+// «звука» — отсюда таймер вычисляет длительность тишины.
+function updateMicLevel(rms) {
+  if (rms >= MIC_SILENCE_RMS) {
+    state.lastVoiceAt = Date.now();
+  }
+  // Речь обычно даёт RMS ~0.02..0.3; sqrt-шкала делает тихую речь заметной.
+  const pct = Math.min(100, Math.round(Math.sqrt(rms) * 180));
+  if (elements.micMeterBar) {
+    elements.micMeterBar.style.width = `${pct}%`;
+  }
+}
+
+function setMicSilent(silent) {
+  if (silent === state.micSilent) return;
+  state.micSilent = silent;
+  if (elements.micSilence) {
+    elements.micSilence.hidden = !silent;
+  }
+  elements.micMeterBar?.classList.toggle("mic-meter__bar--low", silent);
+  if (silent) {
+    logEvent("Микрофон молчит — проверьте устройство и уровень громкости", "warn");
+  }
+}
+
+function startMicMonitor() {
+  state.lastVoiceAt = Date.now();
+  state.micSilent = false;
+  if (elements.micMeter) elements.micMeter.hidden = false;
+  if (elements.micSilence) elements.micSilence.hidden = true;
+  clearInterval(state.micCheckTimer);
+  // Отдельный таймер: предупреждение появится, даже если аудио-колбэки совсем
+  // прекратились (например, контекст приостановлен), а не только при тихих кадрах.
+  state.micCheckTimer = setInterval(() => {
+    if (state.lifecycle !== "streaming") return;
+    setMicSilent(Date.now() - state.lastVoiceAt >= MIC_SILENCE_MS);
+  }, 1000);
+}
+
+function stopMicMonitor() {
+  clearInterval(state.micCheckTimer);
+  state.micCheckTimer = null;
+  state.micSilent = false;
+  if (elements.micMeter) elements.micMeter.hidden = true;
+  if (elements.micSilence) elements.micSilence.hidden = true;
+  if (elements.micMeterBar) {
+    elements.micMeterBar.style.width = "0%";
+    elements.micMeterBar.classList.remove("mic-meter__bar--low");
+  }
+}
+
 async function cleanupStreamingResources() {
+  stopMicMonitor();
   state.monitorGain?.disconnect();
   state.workletNode?.disconnect();
   state.sourceNode?.disconnect();
@@ -1043,6 +1116,7 @@ async function startStreaming() {
 
     workletNode.port.onmessage = (event) => {
       if (state.lifecycle !== "streaming" || !state.websocket || state.websocket.readyState !== WebSocket.OPEN) return;
+      updateMicLevel(computeRms(event.data));
       const pcmChunk = downsampleToInt16(event.data, audioContext.sampleRate, TARGET_SAMPLE_RATE);
       state.websocket.send(pcmChunk.buffer);
       state.chunksSent += 1;
@@ -1062,6 +1136,7 @@ async function startStreaming() {
 
     setLifecycle("streaming");
     setTranscriptStatus("listening");
+    startMicMonitor();
     logEvent("Эфир запущен. Можно называть код товара или цену.", "ok");
   } catch (error) {
     handleError(error, "Не удалось запустить стриминг");

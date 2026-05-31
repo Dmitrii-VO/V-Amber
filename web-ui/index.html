@@ -191,6 +191,10 @@
               </div>
               <div id="transcriptStatus" style="display:flex; align-items:center; gap:var(--gap-3); font-size:var(--fs-xs); color:var(--text-dim); font-family:var(--font-mono);">
                 <span>idle</span>
+                <span id="micMeter" class="mic-meter" hidden title="Уровень микрофона">
+                  <span id="micMeterBar" class="mic-meter__bar"></span>
+                </span>
+                <span id="micSilence" class="mic-silence" hidden>🔇 тишина</span>
               </div>
             </div>
             <div class="panel-body panel-body--flush" style="display:flex; flex-direction:column;">

@@ -38,6 +38,18 @@ See [[live-commerce-flow]].
   guard makes the retired session's `onEnd`/`onError` no-ops (no double
   reconnect). Covered by `test/ws-server.reconnect.test.js`. The reactive
   `onEnd` path remains a safety net if the proactive timer is missed.
+- **Microphone level indicator** — `web-ui/` shows a VU meter in the transcript
+  panel header (`#micMeter`), fed by the per-chunk RMS computed in the worklet
+  `onmessage` handler (`updateMicLevel` / `computeRms` in `web-ui/app.js`). A
+  1 s timer (`startMicMonitor`) flags `🔇 тишина` and logs a warning when the
+  RMS stays below `MIC_SILENCE_RMS` for `MIC_SILENCE_MS` (4 s) — so a muted or
+  wrong mic is visible without waiting for empty transcripts.
+- **Shared numeral dictionaries** — `UNIT_WORDS`/`TEEN_WORDS`/`TENS_WORDS`/
+  `HUNDREDS_WORDS`/`THOUSANDS_MULTIPLIERS` now live in `server/ru-numerals.js`
+  and are imported by `article-extractor.js`, `price-detector.js`,
+  `discount-detector.js`. `article-extractor` extends the base `UNIT_WORDS`
+  with zero and derives its string `DIGIT_WORDS` from it; `price-detector`
+  keeps its own `ZERO_WORDS`. Behavior is unchanged (38 detector tests green).
 
 ## Backlog / TODO
 
@@ -49,14 +61,6 @@ pass (in rough priority order):
   44.1 кГц → 16 кГц (ratio 2.75) the averaging window drifts via `Math.round`.
   Try requesting `new AudioContext({ sampleRate: 16000 })` to avoid resampling
   where the browser supports it; otherwise add a real low-pass.
-- [ ] **Microphone level indicator.** `monitorGain` is muted and no VU meter
-  is shown — the operator only learns the mic is dead/muted by the absence of
-  transcripts. Add a level meter + "silence for N seconds" warning.
-- [ ] **De-duplicate Russian numeral dictionaries.** `UNIT_WORDS`/`TEEN_WORDS`/
-  `TENS_WORDS`/`HUNDREDS_WORDS` are copied across `article-extractor.js`,
-  `price-detector.js`, `discount-detector.js`. Extract a shared
-  `server/ru-numerals.js` so a fix in one place can't be forgotten in the
-  others.
 - [ ] **Use SpeechKit confidence.** `speechkit-stream.js` takes
   `alternatives[0]` blind to confidence; low-quality finals enter article
   detection on equal footing with confident ones. Pass confidence through and
