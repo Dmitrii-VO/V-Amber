@@ -148,6 +148,60 @@ export function attachWsServer(httpServer, config, services = {}) {
     let nextRunId = 1;
     let activeRunId = null;
     let activeDetectionActionId = null;
+    // Проактивный реконнект SpeechKit. `speechKitEpoch` растёт при каждом
+    // открытии gRPC-сессии; обработчики onEnd/onError игнорируют события
+    // от устаревшей (заменённой при ротации) сессии, сравнивая свой epoch
+    // с текущим. Так закрытие старого стрима во время ротации не запускает
+    // повторный реактивный реконнект.
+    let proactiveReconnectTimer = null;
+    let speechKitEpoch = 0;
+
+    function clearProactiveReconnect() {
+      if (proactiveReconnectTimer) {
+        clearTimeout(proactiveReconnectTimer);
+        proactiveReconnectTimer = null;
+      }
+    }
+
+    // Открывает gRPC-сессию SpeechKit и планирует её проактивную замену
+    // ДО ~10-минутного лимита Yandex. На ротации новая сессия создаётся
+    // первой и подменяет `session` атомарно, затем старая закрывается —
+    // поэтому аудио из websocket-обработчика всегда попадает в живой стрим
+    // (раньше чанки в окне close→create молча терялись).
+    function openSpeechKitSession(runId, makeHandlers) {
+      // Epoch повышаем ТОЛЬКО после успешного создания. Иначе при падении
+      // createSpeechKitSession старая живая сессия осталась бы с устаревшим
+      // epoch — её реактивный onEnd на жёстком лимите замолчал бы и STT
+      // тихо умер. Так старая сессия сохраняет валидный epoch и переоткроется.
+      const epoch = speechKitEpoch + 1;
+      const created = createSpeechKitSession(config.speechkit, makeHandlers(epoch), { connectionId });
+      speechKitEpoch = epoch;
+
+      clearProactiveReconnect();
+      const intervalMs = config.speechkit.reconnectIntervalMs;
+      if (intervalMs > 0) {
+        proactiveReconnectTimer = setTimeout(() => {
+          if (runId !== activeRunId) {
+            return;
+          }
+          try {
+            const replacement = openSpeechKitSession(runId, makeHandlers);
+            const old = session;
+            session = replacement;
+            // onEnd старой сессии увидит epoch !== speechKitEpoch и выйдет.
+            old?.close();
+            logger.info("speechkit", "stream_proactive_reconnected", { connectionId });
+            sendJson(websocket, { type: "info", message: "STT-поток обновлён" });
+          } catch (error) {
+            // Оставляем текущую сессию; жёсткий лимит подхватит реактивный
+            // onEnd. Лишь логируем, чтобы не уронить эфир.
+            logger.error("speechkit", "stream_proactive_reconnect_failed", { connectionId, error });
+          }
+        }, intervalMs);
+      }
+
+      return created;
+    }
     let commentPollingGeneration = 0;
     let commentPollingActive = false;
     let commentPollingLastCommentId = 0;
@@ -1806,6 +1860,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           const runId = nextRunId++;
 
           activeRunId = null;
+          clearProactiveReconnect();
           session?.close();
           session = null;
 
@@ -1838,7 +1893,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           // теперь падает в .jsonl этой сессии (а не в server.log как unrouted).
           services.diagnosticRouter?.setActiveWriter?.(sessionLog.getJsonl());
           activeRunId = runId;
-          const speechKitHandlers = {
+          const makeHandlers = (epoch) => ({
             onPartial: ({ text, latencyMs }) => {
               if (runId !== activeRunId) {
                 return;
@@ -2012,7 +2067,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
             },
             onStatus: ({ message: statusMessage, codeType }) => {
-              if (runId !== activeRunId) {
+              if (runId !== activeRunId || epoch !== speechKitEpoch) {
                 return;
               }
 
@@ -2027,15 +2082,24 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
             },
             onError: async (error) => {
-              if (runId !== activeRunId) {
+              // epoch-гард: ошибка от устаревшей (заменённой при ротации)
+              // сессии не должна валить активный эфир.
+              if (runId !== activeRunId || epoch !== speechKitEpoch) {
                 return;
               }
 
+              clearProactiveReconnect();
               await publishAllLotsClosed("stream_error");
               await wishlistStore?.flush?.();
               logger.error("speechkit", "stream_error", { connectionId, error });
               sessionLog.logSessionEnd({ reason: "stream_error" });
               await sessionLog.flush();
+              // Пока шли await-ы выше, оператор мог перезапустить эфир (новый
+              // runId/epoch и свежая session). Не трогаем общий стейт, если нас
+              // уже сменили — иначе обнулим activeRunId и закроем чужую сессию.
+              if (runId !== activeRunId || epoch !== speechKitEpoch) {
+                return;
+              }
               services.diagnosticRouter?.setActiveWriter?.(null);
               activeRunId = null;
               session?.close();
@@ -2054,24 +2118,35 @@ export function attachWsServer(httpServer, config, services = {}) {
             onEnd: async () => {
               // On manual stop the handler clears activeRunId before close(),
               // so guard below skips reconnect for operator-initiated stops.
-              if (runId !== activeRunId) {
+              // epoch-гард пропускает событие end от сессии, уже заменённой
+              // проактивной ротацией (её закрытие — штатное, не повод
+              // реактивно реконнектиться).
+              if (runId !== activeRunId || epoch !== speechKitEpoch) {
                 return;
               }
 
               // Yandex SpeechKit closes a streaming gRPC session after ~10 min.
-              // Re-open transparently so the operator does not have to restart.
+              // Жёсткий лимит сработал раньше проактивной ротации (например,
+              // её таймер был сдвинут) — реактивно переоткрываем, чтобы
+              // оператор не перезапускал эфир вручную.
               logger.info("speechkit", "stream_ended", { connectionId, autoReconnect: true });
               session?.close();
               try {
-                session = createSpeechKitSession(config.speechkit, speechKitHandlers, { connectionId });
+                session = openSpeechKitSession(runId, makeHandlers);
                 logger.info("speechkit", "stream_auto_reconnected", { connectionId });
                 sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
               } catch (error) {
                 logger.error("speechkit", "stream_auto_reconnect_failed", { connectionId, error });
+                clearProactiveReconnect();
                 await publishAllLotsClosed("stream_end");
                 await wishlistStore?.flush?.();
                 sessionLog.logSessionEnd({ reason: "stream_end" });
                 await sessionLog.flush();
+                // Как в onError: оператор мог перезапустить эфир за время
+                // await-ов — не затираем общий стейт чужого, более свежего run.
+                if (runId !== activeRunId || epoch !== speechKitEpoch) {
+                  return;
+                }
                 services.diagnosticRouter?.setActiveWriter?.(null);
                 activeRunId = null;
                 session = null;
@@ -2081,8 +2156,8 @@ export function attachWsServer(httpServer, config, services = {}) {
                 sendJson(websocket, { type: "error", message: "STT-поток оборвался и не удалось перезапустить" });
               }
             },
-          };
-          session = createSpeechKitSession(config.speechkit, speechKitHandlers, { connectionId });
+          });
+          session = openSpeechKitSession(runId, makeHandlers);
 
           resetDetectionState();
           emitState();
@@ -2387,6 +2462,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           await sessionLog.flush();
           services.diagnosticRouter?.setActiveWriter?.(null);
           activeRunId = null;
+          clearProactiveReconnect();
           session?.close();
           session = null;
           resetCustomerOrders();
@@ -2410,6 +2486,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       await sessionLog.flush();
       services.diagnosticRouter?.setActiveWriter?.(null);
       activeRunId = null;
+      clearProactiveReconnect();
       session?.close();
       session = null;
       resetCustomerOrders();

@@ -106,6 +106,10 @@ export const config = {
     model: process.env.YANDEX_SPEECHKIT_MODEL?.trim() || "general",
     sampleRate: 16000,
     endpoint: "stt.api.cloud.yandex.net:443",
+    // Yandex закрывает streaming-сессию через ~10 мин. Переподключаемся
+    // ПРОАКТИВНО чуть раньше, чтобы не терять аудио в окне реактивного
+    // реконнекта по событию stream end.
+    reconnectIntervalMs: parseIntEnv(process.env.YANDEX_SPEECHKIT_RECONNECT_MS, 9 * 60 * 1000),
   },
 };
 
