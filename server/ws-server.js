@@ -6,7 +6,7 @@ import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount } from "./discount-detector.js";
 import { detectPrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
-import { createVkPublisher } from "./vk.js";
+import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
@@ -299,13 +299,18 @@ export function attachWsServer(httpServer, config, services = {}) {
         try {
           await vk.publishLotClosed(lot);
         } catch (error) {
-          if (error?.vkErrorCode === 15) {
+          // Расширили классификатор: stream-fatal означает «дальше публикация
+          // под этим видео не пройдёт» (видео удалено/недоступно/комментарии
+          // закрыты/некорректные параметры) — для массового закрытия лотов
+          // условия видео-уровневые, поэтому останавливаем дальнейшие попытки.
+          if (isVkStreamFatalError(error)) {
             vkStreamUnavailable = true;
             logger.warn("vk", "lot_close_skipped_video_unavailable", {
               connectionId,
               code: lot.code,
               lotSessionId: lot.lotSessionId,
               reason,
+              vkErrorCode: error?.vkErrorCode ?? null,
               error,
             });
           } else {
@@ -998,26 +1003,42 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function findCommentTarget(text) {
       const openLots = getOpenLots();
-      // Сначала ищем точное совпадение по любому лоту — exact wins over pad.
-      // Иначе при двух открытых лотах «0588» и «00588» голый «0588» уехал бы
-      // в первый по итерации лот, теряя реальное точное совпадение.
-      for (const pass of ["exact", "padded"]) {
-        for (const lot of openLots) {
-          const expectedCode = normalizeReservationCode(lot.code);
-          const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
-          const isMatch = pass === "exact"
-            ? reservationComment.code === expectedCode
-            : codesEquivalent(reservationComment.code, expectedCode);
-          if (reservationComment.code && isMatch) {
-            return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
-          }
-          if (pass === "exact") {
-            const wishlistComment = parseWishlistComment(text);
-            if (wishlistComment.code && wishlistComment.code === expectedCode) {
-              return { lot, reservationComment, wishlistComment, matchedReservation: false, matchedWishlist: true };
-            }
-          }
+      // Сначала проходим по всем открытым лотам с exact-сравнением (и
+      // wishlist), exact всегда побеждает padded.
+      for (const lot of openLots) {
+        const expectedCode = normalizeReservationCode(lot.code);
+        const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
+        if (reservationComment.code && reservationComment.code === expectedCode) {
+          return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
         }
+        const wishlistComment = parseWishlistComment(text);
+        if (wishlistComment.code && wishlistComment.code === expectedCode) {
+          return { lot, reservationComment, wishlistComment, matchedReservation: false, matchedWishlist: true };
+        }
+      }
+      // Второй проход — zero-padding. Собираем все лоты, в которые код
+      // покупателя ложится pad'ом из нулей, и используем только если
+      // подошёл ровно один. Иначе ambiguous → возвращаем null, чтобы не
+      // отправить бронь не на тот лот (например, если открыты «00588» и
+      // «000588», buyer «588» подходит обоим).
+      const paddedMatches = [];
+      for (const lot of openLots) {
+        const expectedCode = normalizeReservationCode(lot.code);
+        const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
+        if (reservationComment.code && codesEquivalent(reservationComment.code, expectedCode)) {
+          paddedMatches.push({ lot, reservationComment });
+        }
+      }
+      if (paddedMatches.length === 1) {
+        const { lot, reservationComment } = paddedMatches[0];
+        return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
+      }
+      if (paddedMatches.length > 1) {
+        logger.warn("vk", "padded_match_ambiguous", {
+          connectionId,
+          text,
+          lotCodes: paddedMatches.map(({ lot }) => lot.code),
+        });
       }
       return null;
     }

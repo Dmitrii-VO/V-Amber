@@ -138,6 +138,13 @@ function isVkFatalError(error) {
   return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
 }
 
+export function isVkStreamFatalError(error) {
+  // Условие «дальше публиковать под этим видео бесполезно»: видео скрыто/
+  // удалено/без прав/комментарии закрыты — все эти кейсы одинаково ломают
+  // массовое закрытие лотов на конце эфира.
+  return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
+}
+
 export function isUsableCommentPhoto(photo) {
   return Boolean(photo?.buffer && photo?.contentType && photo?.filename);
 }
@@ -607,7 +614,7 @@ export function createVkPublisher(config) {
 
     async validateLiveVideoUrl(url) {
       if (!isEnabled) {
-        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_USER_TOKEN)" };
+        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_GROUP_TOKEN / VK_ACCESS_TOKEN / VK_USER_TOKEN)" };
       }
 
       const trimmed = String(url || "").trim();
@@ -627,11 +634,15 @@ export function createVkPublisher(config) {
       }
 
       try {
+        // Этап 5: validateLiveVideoUrl должен использовать тот же токен,
+        // под которым потом публикуются комментарии. Иначе при community-
+        // only конфиге (нет VK_USER_TOKEN) валидация падает auth_failed,
+        // хотя реальная публикация под commentToken работала бы.
         const response = await callVkApi("video.get", {
           owner_id: ownerId,
           videos: `${ownerId}_${videoId}`,
           extended: 1,
-        });
+        }, commentToken);
         const video = response?.items?.[0];
         if (!video) {
           return {

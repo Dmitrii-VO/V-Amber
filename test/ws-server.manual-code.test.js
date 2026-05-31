@@ -406,3 +406,38 @@ test("stream stop skips remaining lot-close publishes when VK video is gone", as
     await harness.close();
   }
 });
+
+// Этап 7 (post-review): остальные stream-fatal коды VK (100 — bad params,
+// 801 — комментарии закрыты) тоже видео-уровневые. Раньше только код 15
+// пропускал оставшиеся лоты — остальные ушли бы серией error-логов.
+test("stream stop also skips remaining publishes for other stream-fatal VK errors", async () => {
+  const commentsClosed = new Error("VK API 801: Comments are disabled for this video");
+  commentsClosed.vkErrorCode = 801;
+  const vk = createVkMock({
+    publishLotClosed: async () => {
+      throw commentsClosed;
+    },
+  });
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
+    knownCodes: ["03204", "03199"],
+    vk,
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+
+    client.send({ type: "stop", stoppedAt: new Date().toISOString() });
+    await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
+
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
