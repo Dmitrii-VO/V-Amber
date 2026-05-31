@@ -2,6 +2,8 @@
 # V-Amber updater: скачивает свежий релиз с GitHub, накатывает поверх,
 # сохраняя .env и logs/. Двойной клик в Finder, либо запуск в терминале.
 set -e
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 # При двойном клике рабочая папка может быть домашняя — встаём рядом с этим
 # скриптом.
@@ -45,7 +47,15 @@ ZIP_PATH="${TMPDIR}/v-amber.zip"
 curl -fsSL -o "$ZIP_PATH" "$ZIP_URL" || fail "Не удалось скачать ${ZIP_URL}"
 
 say "Распаковываю..."
-unzip -q "$ZIP_PATH" -d "$TMPDIR" || fail "ZIP повреждён."
+if command -v ditto >/dev/null 2>&1; then
+  ditto -x -k "$ZIP_PATH" "$TMPDIR" || fail "ZIP повреждён или не удалось распаковать."
+elif command -v bsdtar >/dev/null 2>&1; then
+  bsdtar -xf "$ZIP_PATH" -C "$TMPDIR" || fail "ZIP повреждён или не удалось распаковать."
+elif command -v unzip >/dev/null 2>&1; then
+  unzip -q "$ZIP_PATH" -d "$TMPDIR" || fail "ZIP повреждён или не удалось распаковать."
+else
+  fail "Не найден распаковщик ZIP. Нужен ditto, bsdtar или unzip."
+fi
 NEW_DIR="$(ls -1d "$TMPDIR"/V-Amber-*/ 2>/dev/null | head -n1)"
 [ -n "$NEW_DIR" ] && [ -d "$NEW_DIR" ] || fail "Не нашёл папку проекта в архиве."
 
@@ -66,6 +76,7 @@ KEEP=(
   ".env"
   "logs"
   "node_modules"
+  ".git"
   ".DS_Store"
 )
 KEEP_EXCLUDES=""
