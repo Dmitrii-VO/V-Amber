@@ -18,6 +18,11 @@ lot cards, price updates, reservation replies, and wishlist activity.
 - Service `order_failed` reply now shows the buyer concrete formats
   (`"03204"`, `"бр 03204"`, `"беру 03204"`, `"+03204"`) instead of only
   `"Бронь"`.
+- `out_of_stock` reservation overflow is silent in public VK comments. The
+  server still adds the buyer to [[wishlist]] via
+  `out_of_stock_reservation`, but `getReservationReplyMessage` returns an
+  empty string for that status so the operator can run W6 manual follow-up
+  without public comment noise.
 
 ## Runtime files
 

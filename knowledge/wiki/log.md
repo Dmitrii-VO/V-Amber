@@ -66,6 +66,31 @@ order with a daily `#Эфир YYYY-MM-DD` marker; later reservations from the sa
 day may append only to an order with that marker. Older open or unpaid orders
 without the marker stay separate.
 
+## [2026-05-29] maintenance | Operator audit pass
+
+Recorded the operator-audit pass that landed UI and backend improvements:
+inline product-code cache banner, non-blocking wishlist delete confirm,
+visible VK live URL field, connection-drop restart banner, persisted microphone
+selection, keyboard shortcuts, low-stock and lot-age indicators, digest quick
+buttons and post-stop summary, API-token `/login`, single-WS guard, manual lot
+close, manual price override, and per-buyer running totals.
+
+The durable details live in [[operator-feedback]], [[web-dashboard]],
+[[http-api]], [[runbooks-and-troubleshooting]], and [[testing-guide]].
+Deferred backend-risk items were split into [[deferred-operator-features]]:
+#14 manual code entry and #16 cancel reservation.
+
+## [2026-05-30] feature | Manual article code entry (#14)
+
+Landed operator manual code entry for active streams. The dashboard shows the
+`код вручную` field while streaming; it sends the `manualCode` WS message, and
+the server rejects codes not found in the MoySklad catalog. Integration tests
+cover the active-lot scenarios, including floor=1 reservation behaviour and
+same-code merge stability.
+
+Updated [[deferred-operator-features]], [[http-api]], [[web-dashboard]], and
+[[runbooks-and-troubleshooting]] for #14.
+
 ## [2026-05-30] feature | Cancel reservation from the dashboard (#16)
 
 Landed the last deferred operator-audit item. WS `cancelReservation`,
@@ -96,3 +121,83 @@ Final Phase 3 guard: added an integration test for overflow on an inactive
 open lot. With current `activeLot` on a different code, a previous open lot
 with stock 1 accepts the first buyer and sends the second buyer to
 `out_of_stock`/wishlist. Full `npm test` passes with 185 tests.
+
+## [2026-05-30] feature | Waiting-list manual mode (W5/W6)
+
+Landed the first phase of Roman's 2026-05-30 waiting-list requests. When stock
+is exhausted, valid reservation overflow continues to create a wishlist entry
+through `addWishlistFromComment(..., "out_of_stock_reservation")`, but
+`out_of_stock` no longer publishes a public VK reply. This keeps the list
+available to the operator while avoiding noisy buyer-facing comments during
+manual mode.
+
+The wishlist UI renamed the old `Зрители` column to `Заказавший` and now shows
+the buyer name (`viewerName`, with `+N` for repeated seen-events). Updated
+[[operator-feedback]], [[wishlist]], [[web-dashboard]], and [[vk-comments]].
+
+## [2026-05-30] maintenance | Harden macOS updater
+
+Investigated an operator macOS update failure from `0.1.26` to `0.1.33`.
+The old updater downloaded the GitHub release but failed during `unzip` on the
+Cyrillic file `Добро пожаловать.md`, showing a misleading `disk full?` message
+and a mangled `????.md` filename.
+
+Updated `update.command` to prefer macOS `ditto` for ZIP extraction, then
+fallback to `bsdtar` and `unzip`, and to preserve `.git` during rsync-based
+replacement. Recorded the one-time launcher permission repair:
+
+```bash
+chmod +x *.command
+xattr -d com.apple.quarantine *.command 2>/dev/null || true
+```
+
+The operator reran the updater successfully and reached version `0.1.33`.
+Updated [[macos-launchers]] and [[release-process]].
+
+## [2026-05-31] analysis | Review 2026-05-30 diagnostic bundle
+
+Reviewed `logs/v-amber-logs-2026-05-30T21-02-01-424Z.zip`: five sessions,
+79 lots, 42 accepted reservations, 325 MoySklad calls, and one fresh `0.1.33`
+session with 17 lots / 11 reservations / 0 MoySklad errors.
+
+Recorded the main problems and operator wishes in
+[[../raw/log-review-2026-05-30-21-02|log-review-2026-05-30-21-02]] and
+summarized them in [[operator-feedback]]. The highest-signal items are VK
+publish failures at stream close, `photo is undefined` on a lot card,
+safe-mode visibility, stock-unknown reservations, variant-code confusion,
+manual code entry as a primary workflow, faster cancellation search/voice
+assist, official group identity for buyer replies, quiet DM/hidden service
+notifications, quantity phrases, and continued price/discount parser work.
+
+## [2026-05-31] ux | Type supplier names in wishlist
+
+Changed the active wishlist `Без поставщика` row control from a native supplier
+dropdown to a text input with browser suggestions from cached MoySklad
+suppliers. Operators can type part of the supplier name, select the matching
+suggestion, and the UI still patches the entry with the resolved `supplierId`
+and `supplierName`.
+
+Updated [[web-dashboard]] and [[wishlist]].
+
+## [2026-05-31] maintenance | Close operator-wishes ctx session
+
+Closed the active session plan for Roman's 2026-05-30 operator wishes. The
+implementation phases are recorded as complete in the handoff, with manual
+browser smoke testing for two open lots and a fresh full `npm test` left as
+explicit follow-ups before release or commit.
+
+## [2026-05-31] reliability | Fix VK close/photo and safe-mode visibility
+
+Addressed the highest-priority runtime issues from the 2026-05-30 diagnostic
+bundle review. VK lot-card publishing now uploads only complete photo objects
+and omits empty attachments from `video.createComment`, preventing the
+`photo is undefined` failure for products without usable images.
+
+Stream-end lot closing now treats fatal/video-unavailable VK errors, such as
+`VK API 15: video not found`, as an ended-video condition: it logs one warning
+and skips close-comment publishing for the remaining open lots instead of
+emitting repeated publish failures. The operator dashboard also shows a
+pre-stream safe-mode banner when external writes and VK publishing are blocked.
+
+Added `test/vk.test.js` and a WebSocket harness case for stream-stop close
+publishing. Full `npm test` passes with 190 tests.

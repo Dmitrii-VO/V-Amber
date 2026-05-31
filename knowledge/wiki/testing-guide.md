@@ -26,15 +26,27 @@ node --test "test/**/*.test.js"
   `server/moysklad-helpers.js` (auth header, URL building, money /
   quantity normalization, entity meta, product snapshot fallback chain).
 - `test/moysklad-open-order-check.test.js` — MoySklad order-check behavior.
+- `test/moysklad-position-id.test.js` — customer-order creation fallback that
+  resolves the stored MoySklad position id after create responses without it.
 - `test/price-detector.test.js` — spoken price detection.
 - `test/reservation-digest-log.test.js` — reservation digest log behavior.
 - `test/reservation-parser.test.js` — VK comment intent parsing (reservation
   keywords, bare codes, `preferredCode` against phone/price collisions).
+- `test/vk.test.js` — VK publisher helpers for comment params and photo
+  attachment guards.
 - `test/ws-helpers.test.js` — pure helpers in `server/ws-helpers.js`
   (VK comment id / error code parsing, bounded id sets, reservation reply
-  templates, fatal-comment-read classification).
+  templates including silent `out_of_stock`, fatal-comment-read
+  classification).
+- `test/ws-server.integration.test.js` — WebSocket session harness smoke
+  coverage for the live-commerce flow.
+- `test/ws-server.manual-code.test.js` — operator `manualCode` scenarios,
+  including catalog gating, same-code merge stability, and reservation floor.
+- `test/ws-server.cancel-reservation.test.js` — dashboard reservation cancel
+  flow, exact MoySklad position delete, safe-mode block, and stock-slot
+  release.
 
-Full suite: 131 tests, all passing as of 2026-05-29.
+The suite changes frequently; trust `npm test` output for the current count.
 
 ## Documentation note
 

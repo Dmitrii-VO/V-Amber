@@ -17,6 +17,13 @@ test("detectPrice extracts spoken price with fillers", () => {
   });
 });
 
+test("detectPrice extracts spoken digits sequence", () => {
+  assert.deepEqual(detectPrice("цена два пять пять ноль"), {
+    value: 2550,
+    trigger: "цена",
+  });
+});
+
 test("detectPrice ignores text without price trigger", () => {
   assert.equal(detectPrice("код товара 12345"), null);
 });

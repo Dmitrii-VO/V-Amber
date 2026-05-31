@@ -55,6 +55,7 @@ const elements = {
 
   safeModeToggle: $("safeModeToggle"),
   safeModeBadge: $("safeModeBadge"),
+  safeModePrestreamBanner: $("safeModePrestreamBanner"),
   digestButton: $("digestButton"),
   digestModal: $("digestModal"),
   digestClose: $("digestClose"),
@@ -303,6 +304,7 @@ function setLifecycle(next) {
     stopUptimeTimer();
     elements.uptimeLabel.textContent = "0s";
   }
+  renderSafeMode();
 }
 
 function startUptimeTimer() {
@@ -1084,6 +1086,10 @@ function handleError(error, prefix) {
 function renderSafeMode() {
   elements.safeModeToggle.checked = state.safeMode;
   elements.safeModeBadge.hidden = !state.safeMode;
+  if (elements.safeModePrestreamBanner) {
+    const isBeforeStream = state.lifecycle === "idle" || state.lifecycle === "starting";
+    elements.safeModePrestreamBanner.hidden = !(state.safeMode && isBeforeStream);
+  }
 }
 
 function applySafeModeFromServer(value) {
@@ -1814,7 +1820,11 @@ function renderWishlistActive() {
     return;
   }
 
-  body.innerHTML = groups.map((g, gIdx) => {
+  const supplierOptions = wishlistState.suppliers.map((s) =>
+    `<option value="${escapeHtml(s.name)}" label="${escapeHtml(s.id)}"></option>`
+  ).join("");
+
+  body.innerHTML = `<datalist id="wishlistSupplierOptions">${supplierOptions}</datalist>` + groups.map((g, gIdx) => {
     const noSupplier = !g.supplierId;
     const allSelected = g.entries.every((e) => e.selected);
     const someSelected = g.entries.some((e) => e.selected);
@@ -1889,17 +1899,31 @@ function renderWishlistActive() {
       renderGroupTotals();
     });
   });
-  body.querySelectorAll("[data-supplier-pick]").forEach((sel) => {
-    sel.addEventListener("change", () => {
-      const entry = findEntry(sel.dataset.supplierPick);
+  body.querySelectorAll("[data-supplier-pick]").forEach((input) => {
+    const applySupplier = () => {
+      const entry = findEntry(input.dataset.supplierPick);
       if (!entry) return;
-      const supplierId = sel.value;
-      const supplier = wishlistState.suppliers.find((s) => s.id === supplierId);
+      const supplier = resolveSupplierInput(input.value);
+      if (!supplier && input.value.trim()) {
+        input.classList.add("is-dirty");
+        input.title = "Выберите поставщика из подсказок МойСклад.";
+        return;
+      }
+      input.classList.remove("is-dirty");
+      input.removeAttribute("title");
+      const supplierId = supplier?.id || "";
       entry.supplierId = supplierId || null;
       entry.supplierName = supplier?.name || "";
-      schedulePatchEntry(entry.id, sel, { supplierId, supplierName: supplier?.name || "" });
+      schedulePatchEntry(entry.id, input, { supplierId, supplierName: supplier?.name || "" });
       // После смены supplier нужна пере-группировка — перерисуем целиком.
       regroupAndRender();
+    };
+    input.addEventListener("change", applySupplier);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applySupplier();
+      }
     });
   });
   body.querySelectorAll("[data-remove]").forEach((btn) => {
@@ -1975,10 +1999,9 @@ function renderWishlistActive() {
 
 function renderWishlistRow(group, entry) {
   const supplierCell = !group.supplierId
-    ? `<select class="wishlist-supplier-picker" data-supplier-pick="${entry.id}">
-         <option value="">Выберите поставщика…</option>
-         ${wishlistState.suppliers.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("")}
-       </select>`
+    ? `<input class="wishlist-supplier-picker" data-supplier-pick="${entry.id}"
+              list="wishlistSupplierOptions" value="${escapeHtml(entry.supplierName || "")}"
+              placeholder="Поставщик..." title="Начните печатать имя поставщика и выберите из подсказок" />`
     : "";
   // «Заказавший» — имя зрителя, оформившего предзаказ. Если тот же зритель
   // повторно «засветился» по этому коду (seenEvents>1), показываем +N.
@@ -2082,6 +2105,15 @@ function findEntry(entryId) {
     if (e) return e;
   }
   return null;
+}
+
+function resolveSupplierInput(value) {
+  const needle = String(value || "").trim().toLowerCase();
+  if (!needle) return null;
+  return wishlistState.suppliers.find((s) =>
+    String(s.id || "").toLowerCase() === needle
+    || String(s.name || "").trim().toLowerCase() === needle
+  ) || null;
 }
 
 function regroupAndRender() {

@@ -723,6 +723,10 @@ a { color: inherit; }
   background: rgba(74, 222, 128, 0.08);
   border-color: rgba(74, 222, 128, 0.3);
 }
+.info-banner--safe-mode {
+  background: rgba(245, 165, 36, 0.1);
+  border-color: var(--amber-border);
+}
 .info-banner-body { display: flex; flex-direction: column; gap: 2px; }
 .info-banner-actions { display: flex; align-items: center; gap: var(--gap-2); }
 

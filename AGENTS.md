@@ -45,6 +45,7 @@ runner over `test/**/*.test.js`. More command notes live in
 
 - Prefer minimal changes inside existing modules and follow current JavaScript
   patterns unless the user asks for a refactor.
+- **Avoid "God Modules"**: Maintain files within a reasonable size (ideally < 800 lines). If a file grows beyond this, refactor into domain-driven sub-modules (e.g., in a `domain/` directory).
 - Do not assume planned architecture from the specification is implemented.
   Redis, SQLite, TypeScript, and Python audio-driver code are not part of the
   current runtime.
@@ -73,3 +74,4 @@ lowercase and kebab-cased.
 
 Do not store secrets, tokens, credentials, or private customer data in the
 wiki. Use redacted examples and references to secure local files instead.
+

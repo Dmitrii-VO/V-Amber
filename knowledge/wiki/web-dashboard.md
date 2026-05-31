@@ -44,6 +44,9 @@ Three inline banners replace blocking dialogs and surface state changes:
 
 - `#cacheBanner` — pre-start prompt to load product codes. Stays inline
   so transcripts can still flow; choice can be remembered.
+- `#safeModePrestreamBanner` — appears before/during stream start when safe
+  mode is enabled, warning that VK publications and MoySklad writes are
+  blocked.
 - `#connectionBanner` — appears when the WebSocket drops unexpectedly,
   with a `Перезапустить` button.
 - `#digestPromptBanner` — appears after the operator stops the stream
@@ -76,6 +79,16 @@ changes:
 The dashboard has a full wishlist modal with active/archive/settings tabs,
 manual add, draft restore from `localStorage`, inline edits, open-order checks,
 and purchase-order creation.
+
+The active wishlist table shows the buyer in the `Заказавший` column. The cell
+uses `entry.viewerName`, and shows `+N` when repeated seen-events exist for the
+same entry. This replaced the older `Зрители` count column during the W5/W6
+waiting-list phase.
+
+Rows in the `Без поставщика` group use a typeahead supplier field instead of a
+native dropdown. The operator can type part of the supplier name and pick the
+matching MoySklad supplier from browser suggestions; the UI still saves the
+resolved `supplierId` so purchase-order creation receives a valid agent id.
 
 ## Reservation digest modal
 

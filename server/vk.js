@@ -138,6 +138,25 @@ function isVkFatalError(error) {
   return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
 }
 
+export function isUsableCommentPhoto(photo) {
+  return Boolean(photo?.buffer && photo?.contentType && photo?.filename);
+}
+
+export function buildVideoCommentParams({ ownerId, videoId, message, attachments, replyToComment }) {
+  const params = {
+    owner_id: ownerId,
+    video_id: videoId,
+    message,
+  };
+  if (attachments) {
+    params.attachments = attachments;
+  }
+  if (replyToComment) {
+    params.reply_to_comment = replyToComment;
+  }
+  return params;
+}
+
 export function createVkPublisher(config) {
   const userToken = config?.userToken || "";
   const groupToken = config?.groupToken || "";
@@ -375,16 +394,16 @@ export function createVkPublisher(config) {
       };
 
       return sendWithRetry(async () => {
-        const attachments = productCard?.photo
+        const attachments = isUsableCommentPhoto(productCard?.photo)
           ? await uploadCommentPhoto(productCard.photo)
           : undefined;
 
-        return callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        return callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
           attachments,
-        });
+        }));
       }, meta);
     },
     async publishLotClosed(activeLot) {
@@ -406,11 +425,11 @@ export function createVkPublisher(config) {
       ].join("\n");
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-        }),
+        })),
         {
           kind: "lot_closed",
           code: activeLot.code,
@@ -437,12 +456,12 @@ export function createVkPublisher(config) {
       }
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-          reply_to_comment: commentId,
-        }),
+          replyToComment: commentId,
+        })),
         {
           kind: "reservation_reply",
           commentId,
@@ -477,11 +496,11 @@ export function createVkPublisher(config) {
       ].join("\n");
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-        }),
+        })),
         {
           kind: "discount_update",
           code: activeLot.code,
@@ -512,11 +531,11 @@ export function createVkPublisher(config) {
       ].join("\n");
 
       return sendWithRetry(
-        () => callVkApi("video.createComment", {
-          owner_id: liveOwnerId,
-          video_id: liveVideoId,
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
           message,
-        }),
+        })),
         {
           kind: "price_update",
           code: activeLot.code,

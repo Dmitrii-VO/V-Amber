@@ -28,6 +28,7 @@ import {
   isFatalCommentReadError,
   RESERVATION_HISTORY_LIMIT,
 } from "./ws-helpers.js";
+import { createVoicePipeline } from "./domain/voice-pipeline.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -140,20 +141,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     let activeLot = null;
     const openLotsBySessionId = new Map();
     let lastDetection = null;
-    let triggerActiveUntil = 0;
-    let triggerSessionFinals = [];
-
-    // Сброс окна голосовых триггеров. Точка отказа: если когда-нибудь
-    // привяжем авто-таймауты к моменту первого детекта, надо будет
-    // централизованно решить, что делать здесь. Reason оставляется в
-    // логах warn-уровня только при DEBUG_TRIGGER_WINDOW=1.
-    function resetTriggerWindow(reason) {
-      triggerActiveUntil = 0;
-      triggerSessionFinals = [];
-      if (process.env.DEBUG_TRIGGER_WINDOW === "1") {
-        logger.debug("article", "trigger_window_reset", { connectionId, reason });
-      }
-    }
+    const voicePipeline = createVoicePipeline({
+      connectionId,
+      detectionConfig,
+    });
     let nextRunId = 1;
     let activeRunId = null;
     let activeDetectionActionId = null;
@@ -271,7 +262,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       openLotsBySessionId.clear();
       lastDetection = null;
       activeDetectionActionId = null;
-      resetTriggerWindow("detection_state_reset");
+      voicePipeline.resetTriggerWindow("detection_state_reset");
     }
 
     function registerOpenLot(lot) {
@@ -296,7 +287,39 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     async function publishAllLotsClosed(reason) {
       const lots = getOpenLots();
-      await Promise.all(lots.map((lot) => publishLotClosed(lot, reason)));
+      // Последовательно, чтобы при «video not found» на конце эфира можно
+      // было записать ровно один warning и пропустить публикацию закрытия
+      // оставшихся лотов вместо серии error publish failures в логе.
+      let vkStreamUnavailable = false;
+      for (const lot of lots) {
+        await flushOrphanWaitlist(lot, reason);
+        if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
+          continue;
+        }
+        try {
+          await vk.publishLotClosed(lot);
+        } catch (error) {
+          if (error?.vkErrorCode === 15) {
+            vkStreamUnavailable = true;
+            logger.warn("vk", "lot_close_skipped_video_unavailable", {
+              connectionId,
+              code: lot.code,
+              lotSessionId: lot.lotSessionId,
+              reason,
+              error,
+            });
+          } else {
+            handleVkPublishError(lot, error);
+            logger.error("vk", "lot_close_publish_failed", {
+              connectionId,
+              code: lot.code,
+              lotSessionId: lot.lotSessionId,
+              reason,
+              error,
+            });
+          }
+        }
+      }
       openLotsBySessionId.clear();
       activeLot = null;
     }
@@ -1386,33 +1409,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       emitState();
     }
 
-    function rememberFinal(text) {
-      if (transcriptHasTrigger(text, detectionConfig.triggers)) {
-        triggerActiveUntil = Date.now() + detectionConfig.triggerWindowMs;
-        triggerSessionFinals = [{ text, ts: Date.now() }];
-        return;
-      }
-
-      if (Date.now() <= triggerActiveUntil) {
-        triggerSessionFinals.push({ text, ts: Date.now() });
-        triggerSessionFinals = triggerSessionFinals.slice(-Math.max(1, detectionConfig.finalBufferSize));
-      }
-    }
-
-    function buildDetectionInputs(text) {
-      const inputs = [text];
-
-      if (Date.now() > triggerActiveUntil || triggerSessionFinals.length === 0) {
-        return inputs;
-      }
-
-      for (let size = 1; size <= triggerSessionFinals.length; size += 1) {
-        inputs.unshift(triggerSessionFinals.slice(-size).map((entry) => entry.text).join(" "));
-      }
-
-      return [...new Set(inputs.filter(Boolean))];
-    }
-
     function isDetectionStillActive({ runId = null, enforceActiveRun = false, expectedDetectionId = null } = {}) {
       if (enforceActiveRun && runId !== activeRunId) {
         return false;
@@ -1509,7 +1505,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         allCandidates,
       });
 
-      resetTriggerWindow("lot_opened");
+      voicePipeline.resetTriggerWindow("lot_opened");
       emitState();
       return nextLot;
     }
@@ -1614,7 +1610,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         }
       }
 
-      resetTriggerWindow("redetection_merged");
+      voicePipeline.resetTriggerWindow("redetection_merged");
       emitState();
     }
 
@@ -1710,7 +1706,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
       startCommentPolling();
 
-      resetTriggerWindow("confirmed_detection_completed");
+      voicePipeline.resetTriggerWindow("confirmed_detection_completed");
     }
 
     logger.info("ws", "client_connected", { connectionId });
@@ -1780,7 +1776,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs });
               sessionLog.logTranscriptFinal({ text, latencyMs });
               sendJson(websocket, { type: "final", text, latencyMs });
-              rememberFinal(text);
+              voicePipeline.rememberFinal(text);
 
               // Голосовая отмена брони (W3): «<Имя Фамилия> отмена лота #код».
               // НЕ исполняем отмену из речи — только находим бронь и просим
@@ -1832,7 +1828,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               void (async () => {
-                const detectionInputs = buildDetectionInputs(text);
+                const detectionInputs = voicePipeline.buildDetectionInputs(text);
                 let detection = null;
 
                 for (const input of detectionInputs) {

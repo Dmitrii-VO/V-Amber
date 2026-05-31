@@ -164,6 +164,56 @@ Operator's answers to open design questions:
 3. A lot stays open until end of broadcast even at stock 0; further
    `бронь` over the cap go to the waiting list.
 
+## Log review 2026-05-30 21:02 bundle
+
+Source: [[../raw/log-review-2026-05-30-21-02|log-review-2026-05-30-21-02]]
+from `logs/v-amber-logs-2026-05-30T21-02-01-424Z.zip`.
+
+High-priority problems:
+
+- ~~Fresh `0.1.33` session had no MoySklad errors, but VK failed at stream
+  shutdown: comment polling stopped with `VK API 15: video not found`, then
+  `lot_closed` publishes failed for every open lot. Closing an ended video
+  should degrade quietly.~~ Fixed 2026-05-31: stream-end close now stops
+  after the first fatal/video-unavailable VK close failure and skips the
+  remaining close-comment publishes.
+- ~~Product `00136` hit `VK API 100: photo is undefined`; lot-card publish must
+  omit the photo parameter when no photo is available.~~ Fixed 2026-05-31:
+  VK comment params omit empty attachments, and incomplete photo objects are
+  not uploaded.
+- ~~Safe mode blocked the first fresh-session lot-card publish before the
+  operator disabled it. The dashboard should make pre-stream safe mode
+  obvious.~~ Fixed 2026-05-31: the dashboard shows a pre-stream safe-mode
+  banner when external writes/VK publishing are blocked.
+- `00269` and `00192` were reserved with unknown stock; stock-unknown remains
+  an oversell risk.
+- Variant/modification product codes confused the operator because the visible
+  code did not resolve the exact sellable item he expected.
+- Old `0.1.26` sessions still show MoySklad timeout failures, one
+  `reservation_order_failed`, and an orphan waitlist. `0.1.33` improved this
+  in the fresh session, but timeout handling remains important.
+
+New or reinforced operator wishes:
+
+- Manual code entry is a primary workflow. Roman explicitly preferred it
+  because typed codes appear immediately while voice waits for transcription.
+- Voice transcription latency can cost sales during live narration; a helper
+  operator can type codes/cancellations while the host keeps speaking.
+- Cancellation needs search/jump and voice assist. The existing cancel button
+  works, but scrolling through many lots during a live stream is not practical.
+- Buyer-facing replies should come from the official Amberry group identity,
+  not the older Amber Standard/personal-looking sender.
+- Buyers should see which lot was reserved; buyers who miss stock should be
+  notified quietly, preferably by DM/hidden path instead of public comment
+  noise.
+- Quantity phrases like "две штуки" and "забронируй сразу две штуки" should
+  be covered in the live workflow, not only in buyer comment parsing.
+- Simplify buyer commands further. A viewer reacted "сложно" to the
+  `бронь + код` explanation; tolerant forms such as short codes with missing
+  leading zeroes remain useful.
+- Price/discount parsing still needs hardening around `стоимость`, final
+  digits, and percent-discount phrases.
+
 ## Related pages
 
 - [[live-commerce-flow]]

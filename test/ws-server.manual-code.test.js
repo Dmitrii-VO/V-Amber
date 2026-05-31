@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startHarness } from "./helpers/ws-harness.js";
+import { createVkMock, startHarness } from "./helpers/ws-harness.js";
 
 // Сценарии ручного ввода кода на активном лоте (#14). Вариант А: ручной ввод
 // разрешён только при активном STT-стриме; код обязан быть в каталоге.
@@ -305,6 +305,38 @@ test("#14: overflow on an inactive open lot goes to wishlist", async () => {
     assert.equal(harness.wishlistStore.calls.length, 1);
     assert.equal(harness.wishlistStore.calls[0].lot.code, "03204");
     assert.equal(harness.wishlistStore.calls[0].event.viewerName, "Оля");
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("stream stop skips remaining lot-close publishes when VK video is gone", async () => {
+  const videoGoneError = new Error("VK API 15: Access denied: video not found");
+  videoGoneError.vkErrorCode = 15;
+  const vk = createVkMock({
+    publishLotClosed: async () => {
+      throw videoGoneError;
+    },
+  });
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
+    knownCodes: ["03204", "03199"],
+    vk,
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+
+    client.send({ type: "stop", stoppedAt: new Date().toISOString() });
+    await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
+
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
   } finally {
     await client.close();
     await harness.close();
