@@ -48,10 +48,10 @@ function parseMonetaryWords(words) {
     return UNIT_WORDS.get(norm[0]) * 1000 + HUNDREDS_WORDS.get(norm[1]);
   }
 
-  if (i < norm.length && /^тысяч[аи]?$/.test(norm[i])) {
+  if (i < norm.length && /^тысяч[ауи]?$/.test(norm[i])) {
     value += 1000;
     i++;
-  } else if (i + 1 < norm.length && /^тысяч[аи]?$/.test(norm[i + 1])) {
+  } else if (i + 1 < norm.length && /^тысяч[ауи]?$/.test(norm[i + 1])) {
     const mult = THOUSANDS_MULTIPLIERS.get(norm[i]);
     if (mult !== undefined) {
       value += mult * 1000;
@@ -82,7 +82,11 @@ function parseMonetaryWords(words) {
 }
 
 function tokenize(normalized) {
-  return normalized.match(/[a-zа-я0-9%]+/gi) || [];
+  // Сначала отделяем «%» от цифр («30%» → «30 %»), иначе склеенный
+  // токен «30%» не распознаётся как percent: isPercentToken проверяет
+  // ровно «%» или префикс «процент».
+  const split = normalized.replace(/(\d)\s*%/g, "$1 %");
+  return split.match(/[a-zа-я0-9%]+/gi) || [];
 }
 
 function isPercentToken(token) {

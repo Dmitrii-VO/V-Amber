@@ -343,6 +343,38 @@ test("#14: overflow on an inactive open lot goes to wishlist", async () => {
   }
 });
 
+// Этап 6: покупатель пишет «бронь 0588» вместо «бронь 00588». Раньше
+// exact-match терял такую бронь; теперь padding из ведущих нулей
+// маршрутизирует комментарий в правильный лот.
+test("buyer comment with missing leading zero matches an open lot by zero-padding", async () => {
+  const CARD_00588 = {
+    id: "p-00588",
+    name: "Кулон янтарь",
+    code: "00588",
+    pathName: "Украшения/Кулоны",
+    salePrice: 1800,
+    availableStock: 3,
+  };
+  const harness = await startHarness({
+    cardsByCode: { "00588": CARD_00588 },
+    knownCodes: ["00588"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "00588" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "00588");
+
+    harness.vk.pushComment({ id: 301, fromId: 7001, text: "бронь 0588", firstName: "Лена" });
+
+    await client.waitFor(hasReserved, { timeoutMs: 6000 });
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("stream stop skips remaining lot-close publishes when VK video is gone", async () => {
   const videoGoneError = new Error("VK API 15: Access denied: video not found");
   videoGoneError.vkErrorCode = 15;

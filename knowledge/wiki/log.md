@@ -221,6 +221,25 @@ catalog is loaded and the chosen code is not in it, the lot is not
 opened, the operator sees "Код N не найден в каталоге МойСклад", and the
 event is logged as `voice_code_rejected_unknown`.
 
+## [2026-05-31] parser | Stage 6 — tolerant codes and stronger price/discount
+
+Buyer-comment routing now zero-pads short buyer codes against the open
+lot. «бронь 0588» reaches a lot opened under code «00588» as long as no
+other open lot is an exact match for «0588». Padding only adds leading
+zeros, so codes that lose a non-zero leading digit (e.g. «10588» →
+«0588») will not produce a false positive.
+
+Price detector accepts «тысячу» (accusative singular), the common
+operator pronunciation. Discount detector splits glued «30%» tokens
+into «30» and «%», so «скидка 30%» and «20% скидки» now resolve to
+percent discounts. New `test/discount-detector.test.js` covers the
+percent-order, percent-glued, and absolute paths.
+
+Live quantity phrases («забронируй сразу две штуки») stay deferred:
+they would create reservations off speech alone, which contradicts the
+voice-confirms-not-acts rule from stage 1. Needs operator decision on
+which live action they should trigger.
+
 ## [2026-05-31] identity | VK service replies go through community token
 
 Stage 5: routed all live-video `video.createComment` writes and the

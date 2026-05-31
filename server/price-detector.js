@@ -80,10 +80,10 @@ function parseMonetaryWords(words) {
     return UNIT_WORDS.get(norm[0]) * 1000 + HUNDREDS_WORDS.get(norm[1]);
   }
 
-  if (i < norm.length && /^тысяч[аи]?$/.test(norm[i])) {
+  if (i < norm.length && /^тысяч[ауи]?$/.test(norm[i])) {
     value += 1000;
     i += 1;
-  } else if (i + 1 < norm.length && /^тысяч[аи]?$/.test(norm[i + 1])) {
+  } else if (i + 1 < norm.length && /^тысяч[ауи]?$/.test(norm[i + 1])) {
     const mult = THOUSANDS_MULTIPLIERS.get(norm[i]);
     if (mult !== undefined) {
       value += mult * 1000;

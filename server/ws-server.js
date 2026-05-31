@@ -983,16 +983,40 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     }
 
+    // Этап 6: толерантность к ведущим нулям в коде покупателя. Оператор
+     // говорит «00588», но покупатель пишет «бронь 0588» — старый exact-match
+    // терял такую бронь. Pad только добавляет ведущие нули и только если код
+    // лота длиннее: «10588» нельзя достичь pad'ом из «0588», поэтому
+    // ложноположительных матчей не появится.
+    function codesEquivalent(buyerCode, lotCode) {
+      if (!buyerCode || !lotCode) return false;
+      if (buyerCode === lotCode) return true;
+      if (buyerCode.length >= lotCode.length) return false;
+      if (!/^\d+$/.test(buyerCode) || !/^\d+$/.test(lotCode)) return false;
+      return buyerCode.padStart(lotCode.length, "0") === lotCode;
+    }
+
     function findCommentTarget(text) {
-      for (const lot of getOpenLots()) {
-        const expectedCode = normalizeReservationCode(lot.code);
-        const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
-        if (reservationComment.code && reservationComment.code === expectedCode) {
-          return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
-        }
-        const wishlistComment = parseWishlistComment(text);
-        if (wishlistComment.code && wishlistComment.code === expectedCode) {
-          return { lot, reservationComment, wishlistComment, matchedReservation: false, matchedWishlist: true };
+      const openLots = getOpenLots();
+      // Сначала ищем точное совпадение по любому лоту — exact wins over pad.
+      // Иначе при двух открытых лотах «0588» и «00588» голый «0588» уехал бы
+      // в первый по итерации лот, теряя реальное точное совпадение.
+      for (const pass of ["exact", "padded"]) {
+        for (const lot of openLots) {
+          const expectedCode = normalizeReservationCode(lot.code);
+          const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
+          const isMatch = pass === "exact"
+            ? reservationComment.code === expectedCode
+            : codesEquivalent(reservationComment.code, expectedCode);
+          if (reservationComment.code && isMatch) {
+            return { lot, reservationComment, wishlistComment: parseWishlistComment(text), matchedReservation: true, matchedWishlist: false };
+          }
+          if (pass === "exact") {
+            const wishlistComment = parseWishlistComment(text);
+            if (wishlistComment.code && wishlistComment.code === expectedCode) {
+              return { lot, reservationComment, wishlistComment, matchedReservation: false, matchedWishlist: true };
+            }
+          }
         }
       }
       return null;
