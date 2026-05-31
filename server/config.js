@@ -110,6 +110,14 @@ export const config = {
     // ПРОАКТИВНО чуть раньше, чтобы не терять аудио в окне реактивного
     // реконнекта по событию stream end.
     reconnectIntervalMs: parseIntEnv(process.env.YANDEX_SPEECHKIT_RECONNECT_MS, 9 * 60 * 1000),
+    // Порог уверенности финального распознавания (0..1). При 0 (по умолчанию)
+    // гейт выключен. ВНИМАНИЕ: Yandex STT v3 сейчас всегда отдаёт confidence=0
+    // («Currently is not used» в SDK), поэтому порог дремлет до тех пор, пока
+    // поле не начнут заполнять. Срабатывает только на положительный confidence
+    // ниже порога — на нулевом/отсутствующем значении транскрипт не режется.
+    // Клампим в [0..1]: мусорный порог (1.1, 70, Infinity) иначе зарезал бы
+    // все финалы, когда confidence начнут заполнять; NaN → 0 (гейт выключен).
+    minConfidence: Math.min(1, Math.max(0, Number.parseFloat(process.env.YANDEX_SPEECHKIT_MIN_CONFIDENCE) || 0)),
   },
 };
 

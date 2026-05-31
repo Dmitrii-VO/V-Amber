@@ -783,6 +783,20 @@ async function cleanupStreamingResources() {
   setLifecycle("idle");
 }
 
+// Просим AudioContext сразу на 16 кГц: тогда микрофон ресэмплит САМ браузер
+// своим качественным ресэмплером, а downsampleToInt16 становится no-op
+// (inputRate === targetRate) — это лучше нашего box-фильтра, особенно при
+// дробном коэффициенте 44.1→16 кГц. Не все браузеры уважают подсказку: при
+// отказе (исключение или иной фактический rate) падаем на дефолтный контекст
+// и наш ресэмплинг в downsampleToInt16.
+function createCaptureAudioContext() {
+  try {
+    return new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+  } catch {
+    return new AudioContext();
+  }
+}
+
 function downsampleToInt16(float32Array, inputRate, targetRate) {
   if (inputRate === targetRate) return convertFloatToInt16(float32Array);
   const sampleRateRatio = inputRate / targetRate;
@@ -1090,7 +1104,10 @@ async function startStreaming() {
       return;
     }
 
-    const audioContext = new AudioContext();
+    const audioContext = createCaptureAudioContext();
+    if (audioContext.sampleRate !== TARGET_SAMPLE_RATE) {
+      logEvent(`Браузер выдал ${audioContext.sampleRate} Гц — звук ресэмплится в 16 кГц на лету`, "info");
+    }
     await audioContext.audioWorklet.addModule("./audio-processor.js");
 
     if (state.setupGeneration !== setupGeneration || state.lifecycle !== "starting") {

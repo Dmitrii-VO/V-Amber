@@ -50,21 +50,26 @@ See [[live-commerce-flow]].
   `discount-detector.js`. `article-extractor` extends the base `UNIT_WORDS`
   with zero and derives its string `DIGIT_WORDS` from it; `price-detector`
   keeps its own `ZERO_WORDS`. Behavior is unchanged (38 detector tests green).
+- **Capture at 16 кГц natively** — `web-ui/app.js` (`createCaptureAudioContext`)
+  requests `new AudioContext({ sampleRate: 16000 })`, so the browser resamples
+  the mic with its own high-quality resampler and `downsampleToInt16` becomes a
+  no-op (`inputRate === targetRate`). This sidesteps the box-filter drift on
+  non-integer ratios (44.1 → 16 кГц). Browsers that ignore the hint fall back
+  to the default context + our resampler, and the UI logs which path is active.
+- **SpeechKit confidence surfaced (gate dormant)** — `final` confidence is read
+  in `speechkit-stream.js`, passed through `onFinal`, and logged in
+  `final_transcript` + the session log. A config gate
+  (`YANDEX_SPEECHKIT_MIN_CONFIDENCE`, default `0` = off) drops finals only on a
+  *positive* confidence below the threshold. **Yandex STT v3 currently always
+  returns `confidence: 0`** ("Currently is not used" in the SDK
+  `Alternative` type), so the gate is dormant today — the plumbing and lever
+  are in place for when the field starts being populated.
 
 ## Backlog / TODO
 
 Findings from the 2026-05-31 speech-recognition review, deferred for a later
-pass (in rough priority order):
+pass:
 
-- [ ] **Resampling quality for non-integer ratios.** `downsampleToInt16`
-  (`web-ui/app.js`) box-averages without a proper anti-alias low-pass; for
-  44.1 кГц → 16 кГц (ratio 2.75) the averaging window drifts via `Math.round`.
-  Try requesting `new AudioContext({ sampleRate: 16000 })` to avoid resampling
-  where the browser supports it; otherwise add a real low-pass.
-- [ ] **Use SpeechKit confidence.** `speechkit-stream.js` takes
-  `alternatives[0]` blind to confidence; low-quality finals enter article
-  detection on equal footing with confident ones. Pass confidence through and
-  gate the YandexGPT fallback / publication on it.
 - [ ] **Tune the EOU pause.** `maxPauseBetweenWordsHintMs: 700`
   (`speechkit-stream.js`) splits a code+price spoken in one breath into two
   finals — directly relevant to the operator request to publish price together

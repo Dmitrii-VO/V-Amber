@@ -136,9 +136,26 @@ export class SpeechKitStreamingSession {
       this.handlers.onPartial({ text: partialText, latencyMs });
     }
 
-    const finalText = response.final?.alternatives?.[0]?.text?.trim();
+    const finalAlt = response.final?.alternatives?.[0];
+    const finalText = finalAlt?.text?.trim();
     if (finalText) {
-      this.handlers.onFinal({ text: finalText, latencyMs });
+      const confidence = typeof finalAlt.confidence === "number" ? finalAlt.confidence : null;
+      const minConfidence = this.config.minConfidence || 0;
+
+      // Гейт по уверенности. Режем финал ТОЛЬКО при положительном confidence
+      // ниже порога — нулевое/отсутствующее значение трактуем как «нет данных»
+      // и пропускаем (Yandex STT v3 пока всегда шлёт 0, см. config.js). Так
+      // механизм готов к появлению реальных значений, но сегодня бездействует.
+      if (minConfidence > 0 && confidence !== null && confidence > 0 && confidence < minConfidence) {
+        logger.info("speechkit", "final_skipped_low_confidence", {
+          connectionId: this.context.connectionId,
+          confidence,
+          minConfidence,
+          text: finalText,
+        });
+      } else {
+        this.handlers.onFinal({ text: finalText, latencyMs, confidence });
+      }
     }
 
     const status = response.statusCode;

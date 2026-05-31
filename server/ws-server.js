@@ -1901,13 +1901,13 @@ export function attachWsServer(httpServer, config, services = {}) {
 
               sendJson(websocket, { type: "partial", text, latencyMs });
             },
-            onFinal: ({ text, latencyMs }) => {
+            onFinal: ({ text, latencyMs, confidence = null }) => {
               if (runId !== activeRunId) {
                 return;
               }
 
-              logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs });
-              sessionLog.logTranscriptFinal({ text, latencyMs });
+              logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs, confidence });
+              sessionLog.logTranscriptFinal({ text, latencyMs, confidence });
               sendJson(websocket, { type: "final", text, latencyMs });
               voicePipeline.rememberFinal(text);
 
