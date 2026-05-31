@@ -60,18 +60,16 @@ runner over `test/**/*.test.js`. More command notes live in
 
 ## Obsidian workflow
 
-Use the Amberry39-style vault structure:
+The full agent contract for working with the wiki — log entry format, new-page
+vs append rules, filename conventions, wikilink hygiene, raw-note contract,
+and the documentation-drift workflow — lives in
+[obsidian-knowledge-base](knowledge/wiki/obsidian-knowledge-base.md). Read it
+before touching the wiki. The short version:
 
-- `knowledge/raw/` stores append-only source material and redacted evidence.
-- `knowledge/wiki/` stores maintained wiki pages.
-- `knowledge/wiki/index.md` is the wiki entry point.
-- `knowledge/wiki/log.md` is the maintenance record.
-- `templates/` stores reusable Obsidian note templates.
-
-When durable knowledge is discovered, update the relevant wiki page and append
-a short entry to [log](knowledge/wiki/log.md). Keep maintained wiki filenames
-lowercase and kebab-cased.
-
-Do not store secrets, tokens, credentials, or private customer data in the
-wiki. Use redacted examples and references to secure local files instead.
+- `knowledge/raw/` is append-only source material; `knowledge/wiki/` is
+  maintained synthesis; `knowledge/wiki/index.md` and `log.md` are the entry
+  point and chronological record.
+- Lowercase, kebab-cased filenames; never store secrets in the wiki.
+- When durable knowledge is discovered, update the relevant page and append a
+  short entry to [log](knowledge/wiki/log.md).
 

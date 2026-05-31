@@ -221,6 +221,28 @@ catalog is loaded and the chosen code is not in it, the lot is not
 opened, the operator sees "Код N не найден в каталоге МойСклад", and the
 event is logged as `voice_code_rejected_unknown`.
 
+## [2026-05-31] maintenance | Consolidate Obsidian rules into one canonical page
+
+The rules for working with the vault were split across three places —
+`AGENTS.md` (Obsidian workflow section), [[project-conventions]] (Obsidian
+conventions section), and [[obsidian-knowledge-base]] — and partially
+duplicated. The pages also did not document things that agents actually
+need to do their job:
+
+- The exact log-entry heading shape (`## [YYYY-MM-DD] <type> | <title>`) and
+  the catalog of `<type>` values.
+- When to create a new page vs append to an existing one.
+- When to touch `index.md`.
+- Wikilink hygiene (raw-note link form, broken-link tolerance, no manual
+  backlinks).
+- Raw-note contract.
+- Page-staleness and deletion protocol.
+- The `documentation-drift.md` decision tree.
+
+Moved all of that into [[obsidian-knowledge-base]] as the single source of
+truth. `AGENTS.md` and [[project-conventions]] now keep only a short
+pointer plus the no-secrets rule. No content was lost.
+
 ## [2026-05-31] parser | Stage 6 — tolerant codes and stronger price/discount
 
 Buyer-comment routing now zero-pads short buyer codes against the open

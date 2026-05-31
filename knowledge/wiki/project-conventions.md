@@ -19,22 +19,13 @@ and follow the current JavaScript style unless the user asks for a refactor.
 
 `Amberry_Voice_Technical_Specification.md`, `README.md`, `AGENTS.md`,
 `CLAUDE.md`, `TODO.md`, and this wiki are active working documents even when
-some are ignored by local git config.
-
-When durable knowledge is discovered, update `knowledge/wiki/` and append a
-short maintenance entry to [[log]]. Keep `AGENTS.md` and `CLAUDE.md` short:
-they are operating guides, not project encyclopedias. If the evidence is a
-source snapshot, add it under `knowledge/raw/`.
+some are ignored by local git config. Keep `AGENTS.md` and `CLAUDE.md` short:
+they are operating guides, not project encyclopedias.
 
 ## Obsidian conventions
 
-This vault follows the Amberry39 pattern:
-
-- source snapshots live in `knowledge/raw/`;
-- maintained wiki pages live in `knowledge/wiki/`;
-- filenames are lowercase and kebab-cased;
-- `knowledge/wiki/index.md` is the first page agents read;
-- `knowledge/wiki/log.md` is the chronological maintenance record;
-- templates live in `templates/`.
-
-See [[obsidian-knowledge-base]].
+The canonical workflow for the Obsidian vault — structure, log entry format,
+new-page vs append rules, wikilink hygiene, raw-note contract, and the
+documentation-drift protocol — lives in [[obsidian-knowledge-base]]. This
+page intentionally does not duplicate that content; read the canonical page
+before touching the wiki.
