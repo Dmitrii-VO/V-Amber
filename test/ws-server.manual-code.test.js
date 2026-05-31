@@ -195,6 +195,38 @@ test("#14: manualCode with unknown stock — first reservation falls back to flo
   }
 });
 
+// Этап 4: unknown stock после refresh → лот помечается stockUnknown, оператор
+// получает явный warning «риск перепродажи». UI рисует amber pill по флагу.
+test("unknown stock surfaces a stockUnknown flag and a warning to the operator", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204_NO_STOCK },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 201, fromId: 6001, text: "03204", firstName: "Оля" });
+
+    const warning = await client.waitFor(
+      (m) => m.type === "warning" && /Остаток.*неизвестен/.test(m.message || ""),
+      { timeoutMs: 6000 },
+    );
+    assert.match(warning.message, /03204/);
+
+    const flagged = await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.product?.stockUnknown === true,
+      { timeoutMs: 6000 },
+    );
+    assert.equal(flagged.activeLot.product.availableStock, null);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("#14: manualCode re-entry preserves an accepted reservation (no poison, no close)", async () => {
   const harness = await startHarness({
     cardsByCode: { "03204": CARD_03204 },

@@ -532,6 +532,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             && Number.isFinite(productCard.availableStock)) {
           lot.product = lot.product || {};
           lot.product.availableStock = productCard.availableStock;
+          lot.product.stockUnknown = false;
           logger.info("moysklad", "stock_refreshed_before_first_reservation", {
             connectionId,
             code: lot.code,
@@ -539,20 +540,33 @@ export function attachWsServer(httpServer, config, services = {}) {
             availableStock: productCard.availableStock,
           });
         } else {
-          logger.warn("moysklad", "stock_unknown_first_reservation", {
-            connectionId,
-            code: lot.code,
-            lotSessionId: lot.lotSessionId,
-            reason: "card_returned_no_stock",
-          });
+          markLotStockUnknown(lot, "card_returned_no_stock");
         }
       } catch (error) {
-        logger.warn("moysklad", "stock_unknown_first_reservation", {
-          connectionId,
-          code: lot.code,
-          lotSessionId: lot.lotSessionId,
-          reason: "card_lookup_failed",
-          error,
+        markLotStockUnknown(lot, "card_lookup_failed", error);
+      }
+    }
+
+    // Бизнес-правило (этап 4 PLAN.md): unknown stock → разрешаем один slot
+    // (через floor=1 в getRemainingAvailableStock), но обязаны явно показать
+    // оператору риск перепродажи. Метим лот флагом stockUnknown, шлём toast
+    // и оставляем один greppable warning в логах.
+    function markLotStockUnknown(lot, reason, error = null) {
+      if (!lot?.code) return;
+      lot.product = lot.product || {};
+      const alreadyMarked = lot.product.stockUnknown === true;
+      lot.product.stockUnknown = true;
+      logger.warn("moysklad", "stock_unknown_first_reservation", {
+        connectionId,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        reason,
+        ...(error ? { error } : {}),
+      });
+      if (!alreadyMarked) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Остаток для лота ${lot.code} неизвестен — разрешён только 1 slot, риск перепродажи`,
         });
       }
     }
@@ -1623,6 +1637,25 @@ export function attachWsServer(httpServer, config, services = {}) {
       } = options;
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
+        return;
+      }
+
+      // Этап 4: если каталог загружен — пропускаем только коды, известные
+      // МойСкладу. Иначе голосовой путь молча открывал лот для «00011» с
+      // null-карточкой и оператор узнавал о промахе только по логам.
+      // Параллель с ручным вводом (manualCode rejection above).
+      const knownCodesForGate = productCodeCache?.getCodes?.() || null;
+      if (knownCodesForGate && knownCodesForGate.size > 0 && !knownCodesForGate.has(selectedCode)) {
+        logger.warn("article", "voice_code_rejected_unknown", {
+          connectionId,
+          code: selectedCode,
+          source,
+          transcript: detection?.transcript ?? null,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Код ${selectedCode} не найден в каталоге МойСклад`,
+        });
         return;
       }
 

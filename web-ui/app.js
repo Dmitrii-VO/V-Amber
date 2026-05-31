@@ -476,7 +476,8 @@ function renderActiveLot(lot) {
   elements.lotPrice.textContent = lotPrice != null ? formatPrice(lotPrice) : "—";
 
   const stock = product.availableStock;
-  elements.lotStock.textContent = stock != null ? String(stock) : "—";
+  const stockUnknown = product.stockUnknown === true && typeof stock !== "number";
+  elements.lotStock.textContent = stock != null ? String(stock) : (stockUnknown ? "?" : "—");
   elements.lotStock.classList.remove("green", "amber", "red", "lot-stock--low", "lot-stock--empty");
   if (typeof stock === "number") {
     if (stock <= 0) {
@@ -486,6 +487,8 @@ function renderActiveLot(lot) {
     } else {
       elements.lotStock.classList.add("green");
     }
+  } else if (stockUnknown) {
+    elements.lotStock.classList.add("amber", "lot-stock--low");
   }
 
   clearChildren(elements.lotStockPill);
@@ -502,6 +505,14 @@ function renderActiveLot(lot) {
     else if (stock <= 2) text = `осталось ${stock}`;
     else text = `остаток ${stock}`;
     pill.textContent = text;
+    elements.lotStockPill.append(pill);
+  } else if (stockUnknown) {
+    // Этап 4: МойСклад не вернул число — оператор должен видеть риск
+    // перепродажи. Бронь всё ещё принимается на 1 slot.
+    const pill = document.createElement("span");
+    pill.className = "pill pill--amber";
+    pill.textContent = "остаток неизвестен · риск перепродажи";
+    pill.title = "MoySklad не вернул остаток. Разрешён 1 slot, далее блокируем до refresh.";
     elements.lotStockPill.append(pill);
   }
 

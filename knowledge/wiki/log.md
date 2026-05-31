@@ -201,3 +201,31 @@ pre-stream safe-mode banner when external writes and VK publishing are blocked.
 
 Added `test/vk.test.js` and a WebSocket harness case for stream-stop close
 publishing. Full `npm test` passes with 190 tests.
+
+## [2026-05-31] policy | Unknown-stock and unknown-code gates
+
+Chose the policy for stock that MoySklad refuses to number when a lot is
+opened: **first slot + explicit warning**. The flow stays at floor=1 (one
+buyer is accepted, matching operator intent of "I'm holding it in hand")
+but the lot now carries `product.stockUnknown=true`, the operator gets
+a `warning` toast about resale risk, and the UI renders an amber pill
+"остаток неизвестен · риск перепродажи". Subsequent reservations on the
+same lot hit `committedReservationCount > 0` and bounce to wishlist as
+usual. See [[reservation-flow]].
+
+Plugged a second silent-failure path on the voice/LLM gate. Manual entry
+already rejected codes that the MoySklad catalog cache did not contain,
+but the voice-confirmed path opened a lot with a null product card. The
+gate now runs in `handleConfirmedDetection` for any source: if the
+catalog is loaded and the chosen code is not in it, the lot is not
+opened, the operator sees "Код N не найден в каталоге МойСклад", and the
+event is logged as `voice_code_rejected_unknown`.
+
+Variant/modification ambiguity still open. `moysklad.getProductCardByCode`
+queries only `entity/product?filter=code=...`. A code that lives on a
+variant (modification) currently returns null and trips the unknown-code
+gate above. Fixing it cleanly requires (1) a fallback to
+`entity/variant?filter=code=...&expand=product`, (2) a separate stock
+query against the variant's assortment href, and (3) a snapshot builder
+that joins the variant's characteristic name onto the parent product
+name. Left for a focused follow-up with real MoySklad fixtures.
