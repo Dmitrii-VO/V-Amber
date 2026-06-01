@@ -180,6 +180,31 @@ Pieces:
 - UI: `voiceCancelMatch` → `highlightReservationForCancel` adds
   `res-item--cancel-target` and scrolls to the row. Operator confirms.
 
+### Voice quantity (+N шт)
+
+Оператор может голосом добавить позиции к уже подтверждённой брони:
+«<Имя Фамилия> добавь N штук <код>» (синонимы глагола: запиши, поставь,
+поменяй, измени, плюс; единицы: шт/штук/штуки/пара/пары; код — цифрой
+или словами). По тому же контракту, что и отмена: сервер **не создаёт**
+позицию в МойСкладе из речи, только подсвечивает строку и предлагает
+кнопку «+N шт». Оператор подтверждает кликом, после чего
+`appendReservationQuantity` зеркалит `cancelReservation` (адресная привязка
+по `lotSessionId+viewerId+commentId`, safe-mode блокирует).
+
+Pieces:
+
+- `server/quantity-command-parser.js` — парсер фразы → `{ matched, name,
+  quantity, code }`.
+- `ws-server.js` `handleVoiceQuantityCommand` — находит лот по коду, ищет
+  бронь по имени через `matchNameAgainst`, шлёт `voiceQuantityMatch` с
+  предлагаемым количеством. Ambiguous match → warning, без подсветки.
+- UI `highlightReservationForQuantity` добавляет
+  `res-item--quantity-target` и вешает кнопку `+ N шт`. Клик кнопки шлёт
+  `appendReservationQuantity` → сервер вызывает
+  `moysklad.appendPositionToCustomerOrder` и пишет
+  `reserved_appended` событие, которое потом можно отменить отдельно по
+  его `positionId`.
+
 ## Waitlist and recovery
 
 While one reservation is being processed, later comments can wait. Startup

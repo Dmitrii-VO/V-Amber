@@ -11,6 +11,7 @@ import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
 import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
 import { parseCancelCommand } from "./cancel-command-parser.js";
+import { parseQuantityCommand } from "./quantity-command-parser.js";
 import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
 import {
@@ -512,6 +513,79 @@ export function attachWsServer(httpServer, config, services = {}) {
         spokenName,
         code,
         lotSessionId: lot.lotSessionId,
+      });
+    }
+
+    function handleVoiceQuantityCommand(command, transcript) {
+      const spokenName = command.name;
+      const code = command.code;
+      const quantity = command.quantity;
+
+      const lot = getOpenLots().find((candidate) => String(candidate.code) === String(code)) || null;
+      if (!lot) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Нет открытого лота ${code} для добавления (${spokenName})`,
+        });
+        return;
+      }
+
+      const state = ensureReservationState(lot);
+      const events = Array.isArray(state?.events) ? state.events : [];
+      const confirmable = events.filter(
+        (e) => e.status === "reserved" || e.status === "reserved_appended",
+      );
+      const candidates = confirmable.map((e) => ({
+        viewerId: e.viewerId,
+        commentId: e.commentId,
+        name: e.viewerName || nameCacheStore?.getName?.(e.viewerId) || "",
+      }));
+      const matches = matchNameAgainst(spokenName, candidates);
+
+      logger.info("ws", "voice_quantity_command", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        spokenCode: code,
+        spokenName,
+        quantity,
+        transcript: typeof transcript === "string" ? transcript.slice(0, 200) : "",
+        candidateCount: candidates.length,
+        matchCount: matches.length,
+        topScore: matches[0]?.score ?? null,
+      });
+
+      if (confirmable.length === 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Нет подтверждённых броней на лоте ${code}`,
+        });
+        return;
+      }
+      if (matches.length === 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Не нашёл бронь по имени «${spokenName}» — добавьте позицию вручную`,
+        });
+        return;
+      }
+      if (matches.length > 1 && matches[0].score === matches[1].score) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Несколько броней похожи на «${spokenName}» — выберите нужную и подтвердите`,
+        });
+        return;
+      }
+
+      const best = matches[0];
+      sendJson(websocket, {
+        type: "voiceQuantityMatch",
+        viewerId: best.viewerId,
+        commentId: best.commentId,
+        viewerName: best.name,
+        spokenName,
+        code,
+        lotSessionId: lot.lotSessionId,
+        quantity,
       });
     }
 
@@ -1940,6 +2014,16 @@ export function attachWsServer(httpServer, config, services = {}) {
                 return;
               }
 
+              // Голосовая команда «<Имя Фамилия> добавь N штук <код>».
+              // Тот же контракт, что у отмены: только подсветка строки и
+              // предложение применить — НЕ создаём позицию в МойСкладе из
+              // речи. Оператор подтверждает кнопкой на UI.
+              const quantityCommand = parseQuantityCommand(text);
+              if (quantityCommand.matched) {
+                handleVoiceQuantityCommand(quantityCommand, text);
+                return;
+              }
+
               const priceResult = detectPrice(text);
 
               const discountResult = detectDiscount(text, config.discount.triggers);
@@ -2453,6 +2537,137 @@ export function attachWsServer(httpServer, config, services = {}) {
             viewerId: event.viewerId,
             lotCode: lot.code,
             orderId,
+          });
+          emitState();
+          return;
+        }
+
+        if (payload.type === "appendReservationQuantity") {
+          // Подтверждение от UI на голосовую команду «<Имя> добавь N штук
+          // <код>». Добавляет ещё одну позицию в существующий customerorder
+          // покупателя — реальные деньги, поэтому путь зеркалит cancelReservation:
+          // адресная привязка по lotSessionId+viewerId+commentId, safe-mode
+          // блокирует, мутации только после явного клика оператора.
+          const lot = payload.lotSessionId
+            ? openLotsBySessionId.get(payload.lotSessionId)
+            : (payload.code
+              ? getOpenLots().find((candidate) => String(candidate.code) === String(payload.code))
+              : activeLot);
+          if (!lot) {
+            sendJson(websocket, { type: "warning", message: "Нет активного лота для добавления" });
+            return;
+          }
+
+          const quantityToAdd = Math.max(1, Math.min(10, Number(payload.quantity) || 0));
+          if (!Number.isFinite(quantityToAdd) || quantityToAdd <= 0) {
+            sendJson(websocket, { type: "warning", message: "Некорректное количество" });
+            return;
+          }
+
+          const state = ensureReservationState(lot);
+          const events = Array.isArray(state.events) ? state.events : [];
+          const targetViewerId = payload.viewerId;
+          const targetCommentId = payload.commentId;
+          const event = events.find((candidate) =>
+            String(candidate.viewerId) === String(targetViewerId)
+            && (targetCommentId == null || candidate.commentId === targetCommentId)
+            && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
+          if (!event) {
+            sendJson(websocket, { type: "warning", message: "Бронь не найдена" });
+            return;
+          }
+
+          const orderId = event.customerOrder?.id;
+          if (!orderId) {
+            sendJson(websocket, {
+              type: "warning",
+              message: "Нет связанного заказа МойСклад — добавьте позицию вручную",
+            });
+            return;
+          }
+
+          // Защита от двойного клика по «+ N шт» (UI ставит btn.disabled
+          // ПОСЛЕ постановки в очередь, гонка существует). Если запрос для
+          // этой брони уже выполняется — отказываем, чтобы в МойСкладе не
+          // появилось ДВА одинаковых дополнения по одному жесту.
+          if (event.appendInFlight) {
+            logger.warn("ws", "reservation_append_already_in_flight", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              viewerId: event.viewerId,
+            });
+            sendJson(websocket, { type: "warning", message: "Добавление уже выполняется — подождите" });
+            return;
+          }
+
+          if (isSafeMode()) {
+            logger.warn("safe-mode", "reservation_append_blocked", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              viewerId: event.viewerId,
+            });
+            sendJson(websocket, { type: "warning", message: "Добавление недоступно в safe-mode" });
+            return;
+          }
+
+          event.appendInFlight = true;
+          let appendResult;
+          try {
+            appendResult = await moysklad.appendPositionToCustomerOrder({
+              orderId,
+              activeLot: lot,
+              productCard: lot.product || null,
+              reservation: { viewerId: event.viewerId, quantity: quantityToAdd },
+              broadcastDate: formatBroadcastDate(new Date(event.createdAt || Date.now())),
+            });
+          } catch (error) {
+            event.appendInFlight = false;
+            logger.error("moysklad", "reservation_append_failed", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              viewerId: event.viewerId,
+              orderId,
+              quantity: quantityToAdd,
+              error,
+            });
+            sendJson(websocket, { type: "warning", message: "Не удалось добавить позицию — попробуйте ещё раз" });
+            return;
+          }
+          event.appendInFlight = false;
+
+          if (appendResult && appendResult.skipped === true && appendResult.safeMode === true) {
+            sendJson(websocket, { type: "warning", message: "Добавление недоступно в safe-mode" });
+            return;
+          }
+
+          // Записываем доп-позицию отдельным reserved_appended событием, чтобы
+          // её можно было отменить отдельно по адресному positionId.
+          const appendedEvent = {
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            viewerName: event.viewerName,
+            text: `voice_append: ${quantityToAdd} шт`,
+            createdAt: new Date().toISOString(),
+            status: "reserved_appended",
+            lotCode: lot.code,
+            quantity: quantityToAdd,
+            customerOrder: {
+              id: orderId,
+              positionId: appendResult?.positionId || null,
+            },
+          };
+          addReservationEvent(lot, appendedEvent);
+          state.committedReservationCount = (state.committedReservationCount || 0) + quantityToAdd;
+
+          logger.info("ws", "reservation_appended_by_voice", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            viewerId: event.viewerId,
+            viewerName: event.viewerName,
+            orderId,
+            positionId: appendResult?.positionId || null,
+            quantityAdded: quantityToAdd,
           });
           emitState();
           return;

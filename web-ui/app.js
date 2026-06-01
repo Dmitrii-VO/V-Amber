@@ -946,6 +946,13 @@ function handleServerMessage(payload) {
     return;
   }
 
+  if (payload.type === "voiceQuantityMatch") {
+    // Голосовая «<Имя> добавь N штук <код>»: сервер нашёл бронь, но позицию
+    // НЕ создаёт — пишет предложение, оператор подтверждает кнопкой «+ N шт».
+    highlightReservationForQuantity(payload);
+    return;
+  }
+
   logEvent(`Неизвестное сообщение: ${JSON.stringify(payload)}`, "warn");
 }
 
@@ -1463,6 +1470,74 @@ function highlightReservationForCancel(match) {
   row.classList.add("res-item--cancel-target");
   row.scrollIntoView({ block: "nearest", behavior: "smooth" });
   logEvent(`Голосовая отмена: подсвечена бронь «${shownName}» — подтвердите кнопкой «× отменить»`, "info");
+}
+
+// Голосовая «<Имя> добавь N штук <код>»: сервер передал предложение, но
+// позицию в МойСкладе не создавал. Подсвечиваем строку, вешаем pending data
+// атрибут с количеством, и при следующем renderReservationsForLots строка
+// получит кнопку «+ N шт» (см. renderReservationsForLots).
+function highlightReservationForQuantity(match) {
+  const list = elements.reservationList;
+  if (!list) return;
+  const selector = match.commentId != null
+    ? `.res-item[data-comment-id="${CSS.escape(String(match.commentId))}"]`
+    : `.res-item[data-viewer-id="${CSS.escape(String(match.viewerId))}"]`;
+  const row = list.querySelector(selector);
+  const shownName = match.viewerName || match.spokenName || "";
+  if (!row) {
+    logEvent(`Голосовое +кол-во: бронь «${shownName}» не видна в списке`, "warn");
+    return;
+  }
+  // Сбрасываем pending-quantity с других строк — пусть подсвечена только
+  // последняя по голосу, иначе оператор не поймёт что именно подтверждать.
+  list.querySelectorAll(".res-item--quantity-target").forEach((el) => {
+    el.classList.remove("res-item--quantity-target");
+    delete el.dataset.pendingQuantity;
+  });
+  row.classList.add("res-item--quantity-target");
+  row.dataset.pendingQuantity = String(match.quantity);
+  row.dataset.pendingLotSessionId = match.lotSessionId || "";
+  row.dataset.pendingCode = match.code || "";
+
+  // Кнопка появится при следующем рендере списка — но для быстроты сейчас
+  // добавим её здесь же.
+  ensureQuantityConfirmButton(row, match);
+  row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  logEvent(`Голосовое +кол-во: подсвечена бронь «${shownName}» (+${match.quantity} шт) — подтвердите кнопкой`, "info");
+}
+
+function ensureQuantityConfirmButton(row, match) {
+  if (!row) return;
+  // Если оператор повторил команду с другим количеством — старая кнопка
+  // должна уйти, иначе клик уведёт +N штук со старым значением. Каждый
+  // voiceQuantityMatch перерисовывает кнопку.
+  row.querySelectorAll(".res-quantity-confirm").forEach((el) => el.remove());
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "res-quantity-confirm";
+  btn.title = `Добавить ${match.quantity} шт в заказ`;
+  btn.textContent = `+ ${match.quantity} шт`;
+  btn.addEventListener("click", () => {
+    if (!(state.websocket && state.websocket.readyState === 1)) {
+      logEvent("Связь с сервером не установлена — нельзя добавить позицию", "warn");
+      return;
+    }
+    if (!window.confirm(`Добавить ${match.quantity} шт в заказ ${match.viewerName || match.spokenName || ""}? Позиция будет создана в МойСкладе.`)) {
+      return;
+    }
+    state.websocket.send(JSON.stringify({
+      type: "appendReservationQuantity",
+      lotSessionId: match.lotSessionId,
+      code: match.code,
+      viewerId: match.viewerId,
+      commentId: match.commentId,
+      quantity: match.quantity,
+    }));
+    logEvent(`Запрошено добавление +${match.quantity} шт`, "info");
+    btn.disabled = true;
+    btn.textContent = "…";
+  });
+  row.append(btn);
 }
 
 // Cancel a confirmed reservation (#16) — removes the buyer's MoySklad position,

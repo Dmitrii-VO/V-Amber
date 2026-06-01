@@ -370,6 +370,23 @@ a { color: inherit; }
   white-space: nowrap;
 }
 .res-cancel:hover { border-color: var(--red-border); color: var(--red); }
+/* Голосовое +кол-во: сервер прислал предложение, ждём клика оператора. */
+.res-item--quantity-target {
+  background: var(--amber-bg);
+  box-shadow: inset 3px 0 0 0 var(--green, #1f9d55);
+  animation: cancel-target-flash 1.2s ease-out 1;
+}
+.res-quantity-confirm {
+  justify-self: end;
+  border: 1px solid var(--green-border, var(--border));
+  background: transparent;
+  color: var(--green, #1f9d55);
+  border-radius: var(--radius);
+  padding: 2px 8px; font-size: var(--fs-xs); cursor: pointer;
+  white-space: nowrap;
+}
+.res-quantity-confirm:hover { background: var(--amber-bg); }
+.res-quantity-confirm:disabled { opacity: 0.5; cursor: default; }
 
 /* ===== Events ===== */
 .events { font-family: var(--font-mono); font-size: var(--fs-xs); display: flex; flex-direction: column; }

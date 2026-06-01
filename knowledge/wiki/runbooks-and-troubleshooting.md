@@ -3,6 +3,30 @@
 This page collects common local diagnostics for V-Amber. Add concrete incident
 runbooks here as the project accumulates failures.
 
+## VK replies come from the wrong group («Amber Standard» вместо «Amberry»)
+
+**Симптом:** в эфире карточки лотов и ответы покупателям публикуются от
+имени не той группы (исторически — «Amber Standard»).
+
+**Причина:** `VK_GROUP_TOKEN` (или fallback `VK_ACCESS_TOKEN`) в `.env`
+принадлежит не той группе. Код в [server/vk.js:167](server/vk.js:167)
+корректно использует group token, но если значение токена — от другой
+группы, ответы пойдут от неё.
+
+**Как починить (приватным каналом, не через репо):**
+
+1. В VK: управление сообществом Amberry → «Работа с API» → «Создать ключ» с
+   правами `wall`, `photos`, `messages`.
+2. Передать оператору приватно (DM в Telegram/Signal). Не вставлять токен
+   в публичный чат, скриншот, коммит или wiki.
+3. Оператор кладёт значение в `.env` как `VK_GROUP_TOKEN=<...>` и
+   **перезапускает сервер** — `process.env` читается на старте, hot-reload
+   токенов нет.
+4. Проверка: после рестарта сделать тестовую бронь на своём аккаунте —
+   карточка лота и ответ должны прийти от Amberry.
+
+См. также [[configuration-and-secrets#Safety]].
+
 ## Server does not start
 
 Check `.env` for `YANDEX_SPEECHKIT_API_KEY`. SpeechKit API key is required at
