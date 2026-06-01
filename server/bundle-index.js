@@ -42,6 +42,9 @@ function summarizeSession(records) {
     lotsOpened: 0,
     lotsClosed: 0,
     reservationsAccepted: 0,
+    reservationDetected: 0,
+    reservationFinalized: 0,
+    reservationFinalizedAccepted: 0,
     waitlistPending: 0,
     outOfStock: 0,
     waitlistMigrated: 0,
@@ -77,7 +80,20 @@ function summarizeSession(records) {
         summary.lotsClosed += 1;
         break;
       case "reservation_accepted":
+        // Legacy name: this is an early comment detection in current runtime,
+        // not proof that MoySklad accepted the reservation. Keep it only as
+        // fallback for old bundles that predate reservation_finalized.
+        summary.reservationDetected += 1;
         summary.reservationsAccepted += 1;
+        break;
+      case "reservation_detected":
+        summary.reservationDetected += 1;
+        break;
+      case "reservation_finalized":
+        summary.reservationFinalized += 1;
+        if (r.status === "reserved" || r.status === "reserved_appended") {
+          summary.reservationFinalizedAccepted += 1;
+        }
         break;
       case "reservation_waitlist_pending":
         summary.waitlistPending += 1;
@@ -133,6 +149,10 @@ function summarizeSession(records) {
       default:
         break;
     }
+  }
+
+  if (summary.reservationFinalized > 0) {
+    summary.reservationsAccepted = summary.reservationFinalizedAccepted;
   }
 
   if (summary.startedAt && summary.endedAt) {
@@ -245,6 +265,10 @@ export function generateIndexMd({
   lines.push(`- **Сессий:** ${sessions.length}`);
   lines.push(`- **Лотов открыто:** ${totals.lotsOpened}`);
   lines.push(`- **Броней принято:** ${totals.reservationsAccepted}`);
+  const detectedTotal = sessionSummaries.reduce((acc, s) => acc + (s.summary.reservationDetected || 0), 0);
+  if (detectedTotal !== totals.reservationsAccepted) {
+    lines.push(`- **Комментариев с бронью распознано:** ${detectedTotal}`);
+  }
   lines.push(`- **Out of stock отказов:** ${totals.outOfStock} (в wishlist попало: ${wishlistAddsFromOos})`);
   lines.push(`- **Waitlist → Wishlist на закрытии лотов:** ${totals.waitlistMigrated}`);
   const wishlistAddsTotal = wishlistAddRecords.length;

@@ -121,6 +121,13 @@ export const logger = {
   error(component, message, meta) {
     emit("ERROR", component, message, meta);
   },
+  async flush() {
+    try {
+      await writeChain;
+    } catch {
+      // writeLine already logs failures to stderr.
+    }
+  },
   filePath: logFilePath,
   rotatedPath,
   rotateKeep: ROTATE_KEEP,
