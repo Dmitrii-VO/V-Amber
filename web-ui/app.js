@@ -1522,16 +1522,16 @@ function ensureQuantityConfirmButton(row, match) {
       logEvent("Связь с сервером не установлена — нельзя добавить позицию", "warn");
       return;
     }
-    if (!window.confirm(`Добавить ${match.quantity} шт в заказ ${match.viewerName || match.spokenName || ""}? Позиция будет создана в МойСкладе.`)) {
+    const who = match.viewerName || match.spokenName || "";
+    if (!window.confirm(`Добавить +${match.quantity} шт, лот ${match.code}, покупатель ${who}? Позиция будет создана в МойСкладе.`)) {
       return;
     }
+    // actionId — однократный токен от сервера. Сервер берёт по нему
+    // проверенные lotSessionId/viewerId/commentId/quantity; клиентские
+    // значения остальных полей игнорируются (защита money-пути).
     state.websocket.send(JSON.stringify({
       type: "appendReservationQuantity",
-      lotSessionId: match.lotSessionId,
-      code: match.code,
-      viewerId: match.viewerId,
-      commentId: match.commentId,
-      quantity: match.quantity,
+      actionId: match.actionId,
     }));
     logEvent(`Запрошено добавление +${match.quantity} шт`, "info");
     btn.disabled = true;

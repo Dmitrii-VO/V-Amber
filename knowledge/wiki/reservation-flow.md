@@ -204,6 +204,13 @@ Pieces:
   `moysklad.appendPositionToCustomerOrder` и пишет
   `reserved_appended` событие, которое потом можно отменить отдельно по
   его `positionId`.
+- **actionId (server nonce).** В `voiceQuantityMatch` сервер кладёт
+  однократный UUID и хранит привязанные `lotSessionId/viewerId/commentId/
+  quantity` в `pendingQuantityActions` (TTL 60 с). При
+  `appendReservationQuantity` клиент возвращает только этот `actionId` —
+  сервер берёт значения из своей map, клиентские lotSessionId/viewerId/etc.
+  игнорируются. Иначе любой WS-клиент мог бы голым сообщением создать
+  позицию любой брони (HIGH из opencode review 2026-06-01).
 
 ## Waitlist and recovery
 

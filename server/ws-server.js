@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { logger } from "./logger.js";
 import { createSessionLog } from "./session-log.js";
@@ -213,6 +214,16 @@ export function attachWsServer(httpServer, config, services = {}) {
     // другая неустранимая ошибка. Любые публикации/опрос для такого лота —
     // no-op до конца сессии; пользователь увидит уведомление в UI один раз.
     const poisonedLotSessionIds = new Set();
+    // Однократные токены для голосовой команды «+N штук». Сервер выдаёт
+    // actionId в voiceQuantityMatch и хранит проверенный target (lot, event,
+    // quantity). При appendReservationQuantity клиент возвращает этот же
+    // actionId — сервер берёт значения ИЗ pendingQuantityActions, игнорируя
+    // присланные клиентом lotSessionId/viewerId/commentId/quantity. Так
+    // клиент не может произвольным WS-сообщением добавить позицию любой
+    // брони (HIGH из opencode review 2026-06-01). TTL 60 сек — за это время
+    // оператор либо кликает, либо команда устаревает.
+    const pendingQuantityActions = new Map();
+    const PENDING_QUANTITY_TTL_MS = 60_000;
 
     function isLotPoisoned(lotSessionId) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
@@ -535,11 +546,25 @@ export function attachWsServer(httpServer, config, services = {}) {
       const confirmable = events.filter(
         (e) => e.status === "reserved" || e.status === "reserved_appended",
       );
-      const candidates = confirmable.map((e) => ({
-        viewerId: e.viewerId,
-        commentId: e.commentId,
-        name: e.viewerName || nameCacheStore?.getName?.(e.viewerId) || "",
-      }));
+      // Dedupe по (viewerId, commentId): после первого voice append у того же
+      // покупателя появляется reserved_appended событие, и без dedupe два
+      // одинаковых имени дают «ambiguous» — оператор не может голосом добавить
+      // ещё штук (MEDIUM из opencode review). Берём первое событие на пару
+      // viewer+comment — этого достаточно, чтобы name-matcher не плодил
+      // искусственные дубли. Поиск реального event для апдейта идёт по
+      // первому reserved* событию того же viewerId.
+      const seen = new Set();
+      const candidates = [];
+      for (const e of confirmable) {
+        const key = `${e.viewerId}:${e.commentId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          viewerId: e.viewerId,
+          commentId: e.commentId,
+          name: e.viewerName || nameCacheStore?.getName?.(e.viewerId) || "",
+        });
+      }
       const matches = matchNameAgainst(spokenName, candidates);
 
       logger.info("ws", "voice_quantity_command", {
@@ -577,8 +602,21 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       const best = matches[0];
+      // Однократный токен, который вернётся в appendReservationQuantity.
+      // Без него любой WS-клиент мог бы прислать произвольные
+      // viewerId/commentId/quantity и создать чужую позицию в МойСкладе.
+      const actionId = randomUUID();
+      pendingQuantityActions.set(actionId, {
+        lotSessionId: lot.lotSessionId,
+        viewerId: best.viewerId,
+        commentId: best.commentId,
+        quantity,
+        expiresAt: Date.now() + PENDING_QUANTITY_TTL_MS,
+      });
+
       sendJson(websocket, {
         type: "voiceQuantityMatch",
+        actionId,
         viewerId: best.viewerId,
         commentId: best.commentId,
         viewerName: best.name,
@@ -587,6 +625,15 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotSessionId: lot.lotSessionId,
         quantity,
       });
+    }
+
+    function consumePendingQuantityAction(actionId) {
+      if (!actionId) return null;
+      const pending = pendingQuantityActions.get(actionId);
+      if (!pending) return null;
+      pendingQuantityActions.delete(actionId);
+      if (pending.expiresAt < Date.now()) return null;
+      return pending;
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
@@ -2544,33 +2591,38 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         if (payload.type === "appendReservationQuantity") {
           // Подтверждение от UI на голосовую команду «<Имя> добавь N штук
-          // <код>». Добавляет ещё одну позицию в существующий customerorder
-          // покупателя — реальные деньги, поэтому путь зеркалит cancelReservation:
-          // адресная привязка по lotSessionId+viewerId+commentId, safe-mode
-          // блокирует, мутации только после явного клика оператора.
-          const lot = payload.lotSessionId
-            ? openLotsBySessionId.get(payload.lotSessionId)
-            : (payload.code
-              ? getOpenLots().find((candidate) => String(candidate.code) === String(payload.code))
-              : activeLot);
-          if (!lot) {
-            sendJson(websocket, { type: "warning", message: "Нет активного лота для добавления" });
+          // <код>». Реальные деньги, поэтому ID-параметры берём ТОЛЬКО из
+          // server-side pending action — не из клиентского payload. Клиент
+          // присылает actionId, выданный в voiceQuantityMatch; всё остальное
+          // (lotSessionId, viewerId, commentId, quantity) — серверное.
+          const pending = consumePendingQuantityAction(payload.actionId);
+          if (!pending) {
+            sendJson(websocket, {
+              type: "warning",
+              message: "Команда устарела или уже применена — повторите голосом",
+            });
             return;
           }
 
-          const quantityToAdd = Math.max(1, Math.min(10, Number(payload.quantity) || 0));
-          if (!Number.isFinite(quantityToAdd) || quantityToAdd <= 0) {
+          const lot = openLotsBySessionId.get(pending.lotSessionId);
+          if (!lot) {
+            sendJson(websocket, { type: "warning", message: "Лот уже закрыт" });
+            return;
+          }
+
+          // Количество уже валидировано в парсере (1..10), но защитимся
+          // явно от nonsense: integer, в допустимом диапазоне.
+          if (!Number.isInteger(pending.quantity) || pending.quantity < 1 || pending.quantity > 10) {
             sendJson(websocket, { type: "warning", message: "Некорректное количество" });
             return;
           }
+          const quantityToAdd = pending.quantity;
 
           const state = ensureReservationState(lot);
           const events = Array.isArray(state.events) ? state.events : [];
-          const targetViewerId = payload.viewerId;
-          const targetCommentId = payload.commentId;
           const event = events.find((candidate) =>
-            String(candidate.viewerId) === String(targetViewerId)
-            && (targetCommentId == null || candidate.commentId === targetCommentId)
+            String(candidate.viewerId) === String(pending.viewerId)
+            && (pending.commentId == null || candidate.commentId === pending.commentId)
             && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
           if (!event) {
             sendJson(websocket, { type: "warning", message: "Бронь не найдена" });
