@@ -102,10 +102,68 @@ const QUANTITY_PATTERNS = [
   /\*\s*(\d+)/,                                                          // «*2»
 ];
 
+// Словесные количества: «две штуки», «три пары», «пять штук». Покупатели в
+// VK-комментариях пишут именно так чаще, чем цифрой; до этого парсер ловил
+// только «2 шт» и «*2». Покрываем 2..10 в типовых падежах. Коды — это
+// всегда цифры, так что пересечений с DIGIT_RUN нет.
+const WORD_QUANTITIES = new Map([
+  ["две", 2], ["два", 2], ["двое", 2], ["двух", 2],
+  ["три", 3], ["трое", 3], ["трёх", 3], ["трех", 3],
+  ["четыре", 4], ["четверо", 4], ["четырех", 4], ["четырёх", 4],
+  ["пять", 5], ["пятеро", 5], ["пяти", 5],
+  ["шесть", 6], ["шестеро", 6], ["шести", 6],
+  ["семь", 7], ["семеро", 7], ["семи", 7],
+  ["восемь", 8], ["восьмеро", 8], ["восьми", 8],
+  ["девять", 9], ["девятеро", 9], ["девяти", 9],
+  ["десять", 10], ["десятеро", 10], ["десяти", 10],
+]);
+const WORD_QUANTITY_KEYS = [...WORD_QUANTITIES.keys()].join("|");
+const PAIRS_MULTIPLIER = 2;
+const WORD_QUANTITY_RE = new RegExp(
+  `${NOT_LETTER_BEHIND}(${WORD_QUANTITY_KEYS})\\s+(шт(?:ук[аеиуов]?|уки)?|пар[ыуов]?|пара)${NOT_LETTER_AHEAD}`,
+);
+// Максимальное расстояние между словесным количеством и кодом товара (в
+// токенах). 1 покрывает «бронь 03204 две штуки», «беру пять штук 03204»,
+// «бронь 03204 пожалуйста две штуки», но блокирует «бронь 03204 а можно две
+// пары серёг показать» (2+ слов между кодом и «две пары» — это описание
+// желаемого, а не количество брони).
+const MAX_QTY_TOKEN_DISTANCE = 1;
+
+function isCloseToCode(normalized, match, code) {
+  if (!code) return true; // без кода в результате — нет ориентира, доверяем
+  const codeIdx = normalized.indexOf(code);
+  if (codeIdx < 0) return true;
+  const matchStart = match.index;
+  const matchEnd = matchStart + match[0].length;
+  // Берём промежуток МЕЖДУ совпадениями (qty…code или code…qty), не включая
+  // сами куски — иначе слова из «пять штук» сами учитывались бы как
+  // «расстояние».
+  const between = matchEnd <= codeIdx
+    ? normalized.slice(matchEnd, codeIdx)
+    : normalized.slice(codeIdx + code.length, matchStart);
+  const tokensBetween = between.split(/[^a-zа-я0-9]+/i).filter(Boolean);
+  return tokensBetween.length <= MAX_QTY_TOKEN_DISTANCE;
+}
+
 function extractQuantity(normalized, code) {
   if (!normalized) return 1;
-  // «пара» = 2. Без отдельного захвата чисел — самостоятельный лексический
-  // маркер. Если оператор хотел «3 пары», пусть напишет цифрой.
+  // Словесное количество с единицей измерения: «две штуки», «три пары»,
+  // «пять штук». Проверяем РАНЬШЕ одиночной «пары», иначе «три пары»
+  // схлопывалось бы в 2 вместо 6.
+  //
+  // Требуем близости к коду (≤ MAX_QTY_TOKEN_DISTANCE токенов), иначе
+  // «бронь 03204 а можно две пары серёг показать» давало бы 4 — покупатель
+  // просто описывает желаемое, а не бронирует пары.
+  const wordMatch = WORD_QUANTITY_RE.exec(normalized);
+  if (wordMatch && isCloseToCode(normalized, wordMatch, code)) {
+    const base = WORD_QUANTITIES.get(wordMatch[1]) || 1;
+    const unit = wordMatch[2];
+    const multiplier = /^пар/.test(unit) ? PAIRS_MULTIPLIER : 1;
+    return Math.min(QUANTITY_HARD_CAP, base * multiplier);
+  }
+  // Одиночная «пара» = 2. Без захвата числа — самостоятельный лексический
+  // маркер. Для «3 пары» используем цифру + регексп ниже или WORD_QUANTITY_RE
+  // («три пары») выше.
   if (new RegExp(`${NOT_LETTER_BEHIND}пара${NOT_LETTER_AHEAD}`).test(normalized)) {
     return Math.min(QUANTITY_HARD_CAP, 2);
   }

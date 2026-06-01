@@ -1143,6 +1143,23 @@ export function attachWsServer(httpServer, config, services = {}) {
 
               const target = findCommentTarget(comment.text);
               if (!target) {
+                // Forensic: коммент похож на бронь (keyword + код), но ни один
+                // открытый лот не подошёл. Раньше такие пропадали молча, и
+                // оператор замечал «почему-то перестала бронировать» только по
+                // отсутствию строки в списке (см. лог 2026-05-24 20:19:54 —
+                // «почему-то перестала бронировать, Ирина повторите»). Логируем
+                // на warn, чтобы видеть в diagnostics и в bundle.
+                const probe = parseReservationComment(comment.text);
+                if (probe.hasReservationKeyword && probe.code) {
+                  logger.warn("vk", "reservation_no_open_lot", {
+                    connectionId,
+                    commentId: comment.id,
+                    viewerId: comment.from_id,
+                    text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+                    reservationCommentCode: probe.code,
+                    openLotCodes: getOpenLots().map((lot) => lot.code),
+                  });
+                }
                 continue;
               }
               const { lot: currentLot, reservationComment, wishlistComment, matchedReservation, matchedWishlist } = target;

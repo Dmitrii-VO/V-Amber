@@ -150,7 +150,9 @@ the code never deletes whole customer orders. See
 
 The operator can also trigger a cancel by voice: «<Имя Фамилия> отмена
 лота #<код>» (variants: снять/убрать бронь, отмена брони, code with or
-without `#`). The voice path **never** performs the MoySklad delete
+without `#`; the code can be a digit run like `01059` **or** spoken as
+digit-words «ноль один ноль пять девять» — the latter is how operators
+actually dictate codes in livestream). The voice path **never** performs the MoySklad delete
 itself — it only **finds and highlights** the matching reservation row so
 the operator confirms with the same `× отменить` button. This keeps a
 speech-recognition error from auto-deleting a position (real money).

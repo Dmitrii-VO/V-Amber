@@ -49,6 +49,62 @@ test("multiple numbers — pick the longest digit run", () => {
   assert.deepEqual(parseReservationComment("хочу 03204 за 1500"), { hasReservationKeyword: true, code: "03204", quantity: 1 });
 });
 
+test("word-form quantity («две штуки», «три пары», «пять штук»)", () => {
+  // Покупатели в эфире пишут количество словом чаще, чем цифрой; до этого
+  // парсер ловил только «2 шт» / «*2» — словесная форма тихо схлопывалась
+  // в quantity=1 и оператор узнавал о двух желаемых штуках только из текста
+  // комментария.
+  assert.deepEqual(
+    parseReservationComment("бронь 03204 две штуки"),
+    { hasReservationKeyword: true, code: "03204", quantity: 2 },
+  );
+  assert.deepEqual(
+    parseReservationComment("хочу 03204 три штуки"),
+    { hasReservationKeyword: true, code: "03204", quantity: 3 },
+  );
+  assert.deepEqual(
+    parseReservationComment("беру пять штук 03204"),
+    { hasReservationKeyword: true, code: "03204", quantity: 5 },
+  );
+  // «три пары» = 6 (множитель «пара» = 2). До фикса было бы 2.
+  assert.deepEqual(
+    parseReservationComment("бронь 03204 три пары"),
+    { hasReservationKeyword: true, code: "03204", quantity: 6 },
+  );
+  // Кап на 10 — «двадцать штук» (через цифру) обрежется; для словесной
+  // формы проверяем верхнюю поддерживаемую цифру.
+  assert.deepEqual(
+    parseReservationComment("бронь 03204 десять штук"),
+    { hasReservationKeyword: true, code: "03204", quantity: 10 },
+  );
+});
+
+test("word-form quantity ignores words that are not quantity-units", () => {
+  // «две» без шт/пар — не количество. «бронь две тысячи» (вдруг покупатель
+  // имел в виду цену) должно остаться quantity=1, чтобы случайное «две»
+  // в свободной речи не превращало 1 шт в 2.
+  assert.deepEqual(
+    parseReservationComment("бронь 03204 две"),
+    { hasReservationKeyword: true, code: "03204", quantity: 1 },
+  );
+});
+
+test("word-form quantity needs to be close to the code (≤2 tokens)", () => {
+  // Покупатель говорит «бронь 03204, а можно две пары серёг показать» —
+  // «две пары» это описание желаемого, не количество. До локального
+  // гарда давало quantity=4 (opencode review 2026-06-01).
+  assert.deepEqual(
+    parseReservationComment("бронь 03204 а можно две пары серег показать"),
+    { hasReservationKeyword: true, code: "03204", quantity: 1 },
+  );
+  // А «бронь 03204 две штуки на двух подружек» (3 токена между кодом и
+  // количеством разрешено НЕ должно быть — пограничный случай).
+  assert.equal(
+    parseReservationComment("бронь 03204 потом подскажите две штуки").quantity,
+    1,
+  );
+});
+
 test("keyword without code returns hasReservationKeyword=true, code=null", () => {
   assert.deepEqual(parseReservationComment("бронь"), { hasReservationKeyword: true, code: null, quantity: 1 });
   assert.deepEqual(parseReservationComment("беру"), { hasReservationKeyword: true, code: null, quantity: 1 });

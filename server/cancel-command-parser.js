@@ -10,7 +10,23 @@
 // вызывающий код — здесь только разбор фразы. См. knowledge/wiki/
 // operator-feedback.md (W3).
 
+import { UNIT_WORDS as UNIT_WORDS_BASE } from "./ru-numerals.js";
+
 const CYR = "а-яё";
+
+// Слова-цифры (тот же словарь, что в article-extractor.js: единицы 1-9 +
+// «ноль»/«нуль»). Держим локальную карту word→"digit", чтобы парсер кода
+// в фразе отмены принимал словесные коды вроде «ноль один ноль пять девять»
+// (≡ 01059). Без этого регулярка #?\s*(\d{2,6}) терпит fail на самой
+// естественной речевой форме («Дмитрий Васильев отменил бронь ноль один…»),
+// и голосовая отмена молча не срабатывает — оператор лезет искать бронь
+// в МойСкладе вручную.
+const DIGIT_WORDS = new Map(
+  [
+    ...UNIT_WORDS_BASE,
+    ["ноль", 0], ["ноля", 0], ["нуль", 0],
+  ].map(([word, value]) => [word, String(value)]),
+);
 
 function normalize(text) {
   return String(text || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
@@ -35,8 +51,12 @@ export function parseCancelCommand(text) {
   if (!triggerMatch) return { matched: false };
 
   // Код ищем во всём тексте (обычно после команды: «...лота #033322»).
+  // Сначала пробуем цифровую запись, затем — словесную («ноль один ноль…»),
+  // которую оператор произносит чаще всего, когда диктует код вслух.
   const codeMatch = CODE_RE.exec(normalized);
-  const code = codeMatch ? codeMatch[1] : null;
+  const code = codeMatch
+    ? codeMatch[1]
+    : extractDigitWordsCode(normalized.slice(triggerMatch.index + triggerMatch[0].length));
   if (!code) return { matched: false };
 
   // Имя — то, что стоит ДО триггера. Это самый надёжный кусок: оператор
@@ -72,4 +92,40 @@ function extractName(prefix) {
 
   // Имя — не более 3 последних токенов (Имя Отчество Фамилия).
   return nameTokens.slice(-3).join(" ");
+}
+
+// Склеиваем последовательные слова-цифры в код («ноль один ноль пять девять»
+// → «01059»). Берём ПЕРВЫЙ непрерывный отрезок длиной 2..6 — это совпадает
+// с CODE_RE и с реальной длиной артикулов V-Amber.
+//
+// Защиты от ложных срабатываний (отмена — это списание реальных денег):
+// - перед первой цифрой допустимо лишь несколько служебных слов
+//   («код», «товара», «номер»), иначе пропускаем; иначе случайное
+//   «...пожалуйста один два...» собралось бы в код «12»;
+// - длиннее 6 цифр — не усекаем молча, а отказываемся: лишние цифры значат,
+//   что распознавание захватило цену/количество, и подсветка попала бы не
+//   в тот лот.
+const PRE_CODE_FILLER = new Set([
+  "код", "кода", "коду", "товара", "номер", "номера", "это", "вот", "пожалуйста",
+]);
+const MIN_CODE_LEN = 2;
+const MAX_CODE_LEN = 6;
+
+function extractDigitWordsCode(tail) {
+  const tokens = String(tail || "")
+    .split(" ")
+    .map((t) => t.replace(new RegExp(`[^${CYR}]`, "g"), ""))
+    .filter(Boolean);
+
+  let i = 0;
+  while (i < tokens.length && PRE_CODE_FILLER.has(tokens[i])) i += 1;
+
+  const chunks = [];
+  while (i < tokens.length && DIGIT_WORDS.has(tokens[i])) {
+    chunks.push(DIGIT_WORDS.get(tokens[i]));
+    i += 1;
+  }
+
+  if (chunks.length < MIN_CODE_LEN || chunks.length > MAX_CODE_LEN) return null;
+  return chunks.join("");
 }

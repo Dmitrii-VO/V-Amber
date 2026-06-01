@@ -120,7 +120,13 @@ export function detectPrice(text) {
       }
 
       // Стандартный разбор (тысяча пятьсот пятьдесят).
-      for (let len = Math.min(4, tokens.length - j); len >= 1; len -= 1) {
+      // Окно до 6 слов, чтобы «две тысячи двести девяносто пять» (5 слов)
+      // и аналогичные полные формы не теряли последнее слово — до этого
+      // лимит 4 срезал «пять» из 2295 и отдавал 2290 (см. транскрипт
+      // 2026-05-24 19:37:29 «пятёрку почему-то не распознаёт на конце»).
+      // parseMonetaryWords требует i === norm.length, так что окно нельзя
+      // расширить «случайным» хвостом — оно либо съест всё, либо вернёт null.
+      for (let len = Math.min(6, tokens.length - j); len >= 1; len -= 1) {
         const words = tokens.slice(j, j + len);
         if (words.some((word) => FILLER_WORDS.has(word))) continue;
         const value = parseMonetaryWords(words);

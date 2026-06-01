@@ -33,3 +33,10 @@ macOS launchers are documented in
   [voice-price-parsing](knowledge/wiki/voice-price-parsing.md),
   `server/article-extractor.js`, `server/price-detector.js`, and
   `server/discount-detector.js`.
+- Every push to `main` triggers the Auto Release workflow
+  (`.github/workflows/release.yml`), which auto-bumps the patch version and
+  pushes a `chore: bump version to X.Y.Z [skip ci]` commit from
+  `github-actions[bot]`, then cuts a `vX.Y.Z` GitHub release. So after any push
+  the remote is one commit ahead — `git pull --rebase` before the next push.
+  These bot commits only touch `package.json`; they are not a human
+  collaborator. See [release-process](knowledge/wiki/release-process.md).

@@ -55,6 +55,56 @@ test("no match when name is missing", () => {
   assert.equal(parseCancelCommand("отмена лота #033322").matched, false);
 });
 
+test("parses code spoken as digit-words («ноль один ноль пять девять»)", () => {
+  const r = parseCancelCommand("Дмитрий Васильев отменил бронь ноль один ноль пять девять");
+  assert.equal(r.matched, true);
+  assert.equal(r.name, "дмитрий васильев");
+  assert.equal(r.code, "01059");
+});
+
+test("digit-words: stops at non-digit word (trailing «штук» is dropped)", () => {
+  const r = parseCancelCommand("Анна Сидорова снять бронь ноль три два семь шесть штук");
+  assert.equal(r.matched, true);
+  assert.equal(r.code, "03276");
+});
+
+test("digit-words: «код товара» before the spoken code is allowed", () => {
+  const r = parseCancelCommand(
+    "Дмитрий Васильев отменил бронь код товара ноль три два семь шесть",
+  );
+  assert.equal(r.matched, true);
+  assert.equal(r.code, "03276");
+});
+
+test("digit-words: needs at least 2 consecutive digits to count", () => {
+  assert.equal(
+    parseCancelCommand("Иван Петров отмена лота семь штук").matched,
+    false,
+  );
+});
+
+test("digit-words: refuses runs longer than 6 (likely captured price/qty)", () => {
+  // 7 digit-words — better refuse than silently truncate to a 6-digit code
+  // that points at a different open lot (real-money risk).
+  assert.equal(
+    parseCancelCommand(
+      "Иван Петров отмена лота ноль один два три четыре пять шесть",
+    ).matched,
+    false,
+  );
+});
+
+test("digit-words: ignores stray digit-words not adjacent to the trigger", () => {
+  // After «отмена лота» the next words are unrelated chatter; the lone
+  // «один два» much later should not be glued into a fake code.
+  assert.equal(
+    parseCancelCommand(
+      "Иван Петров отмена лота смотри потом скажу один два",
+    ).matched,
+    false,
+  );
+});
+
 test("empty / null input is safe", () => {
   assert.equal(parseCancelCommand("").matched, false);
   assert.equal(parseCancelCommand(null).matched, false);

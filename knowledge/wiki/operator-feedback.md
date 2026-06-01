@@ -214,6 +214,69 @@ New or reinforced operator wishes:
 - Price/discount parsing still needs hardening around `стоимость`, final
   digits, and percent-discount phrases.
 
+## Log review 2026-05-30T21-02 bundle (TODO)
+
+Source: `logs/v-amber-logs-2026-05-30T21-02-01-424Z.zip`. Walkthrough on
+2026-06-01 sorted items into deferred / verified-stale / fixed.
+
+**Still open — deferred (need separate design):**
+
+- **#1 Variant/modification codes resolve to the wrong product.** `00269`
+  opened «Браслет из натурального янтаря и дерева» instead of the expected
+  item — article code lives on a parent modification group. Operator
+  [23:39–23:43 МСК]: *«модификации товара почему-то у меня высвечивается
+  кодом другим… какой-то косяк»*. Owner decision 2026-06-01: оставить, пока
+  непонятно как решать.
+- **#2 `availableStock: null` keeps allowing reservations.** `00269` /
+  `00192` were booked with unknown stock — silent oversell. Owner decision
+  2026-06-01: тоже оставить.
+- **#5 Search/jump in the reservation list (verified missing).** Voice
+  cancel lands (digit-word parser fixed 2026-06-01), но фильтра по коду /
+  имени у `#reservationList` нет — только `voiceCancelMatch`-подсветка
+  ([web-ui/app.js:582](web-ui/app.js:582)). Нужен текстовый фильтр сверху
+  панели «Брони» (Phase 2 UI).
+- **#10 «две штуки» in operator narration (verified missing).** Голосовой
+  путь оператора не создаёт броню; только покупатель по комменту. Feature
+  с открытым UX-вопросом (к какому viewerId привязывать?) — оставлен.
+- **#11 Wishlist hint not auto-posted (verified missing).** Подсказка
+  «СПИСОК <код>» есть только в recovery-логе ([server/index.js:68](server/index.js:68)),
+  в эфире в VK-комментарии не публикуется. Нужен дизайн «когда / как часто».
+
+**Resolved in this pass (2026-06-01, see uncommitted diff):**
+
+- ~~**#6 Diagnostic for «бронь перестала работать».**~~ Добавлен `warn
+  vk reservation_no_open_lot` в [ws-server.js:1145](server/ws-server.js:1145)
+  при `findCommentTarget=null`, но `parseReservationComment` распознал
+  keyword+код — раньше пропадало молча.
+- ~~**#7 Short trailing digit in voice price.**~~ В [price-detector.js:123](server/price-detector.js:123)
+  окно `parseMonetaryWords` поднято с 4 до 6 слов. Транскрипт «стоимость
+  две тысячи двести девяносто пять» → теперь 2295, а не 2290. Регрессионный
+  тест в [test/price-detector.test.js](test/price-detector.test.js).
+- ~~**#12 Buyer-comment word-form quantity.**~~ В [reservation-parser.js](server/reservation-parser.js)
+  добавлены WORD_QUANTITIES (две..десять) × шт/пары/штук. «бронь 03204 две
+  штуки» → quantity=2; «три пары» → 6; «десять штук» → 10. Хвост «две» без
+  единицы — игнорируется, чтобы свободная речь не подменяла quantity.
+
+**Verified already working (operator-feedback wiki was stale):**
+
+- **#8 «Цена два пять пять ноль → 2 ₽».** В bundle нет `voicePrice`<10;
+  тест `detectPrice extracts spoken digits sequence` фиксирует 2550. Закрыто
+  не позднее этого ревью; запись удалена из TODO.
+- **#9 Lot card with price when code+price said in one phrase.** Поток
+  `handleConfirmedDetection({ voicePrice })` уже выставляет
+  `productCard.voicePrice` перед `publishLotCard` ([ws-server.js:1791](server/ws-server.js:1791)),
+  и лот 03196 в логе открылся с `voicePrice:2290` именно так. Лот 03219
+  получил `null` из-за #7 (хвостовая пятёрка терялась), теперь покрыт
+  регрессионным тестом.
+
+**Из старого списка:**
+
+- **#3 Buyer notification of which lot was reserved** — owner подтвердил:
+  уже исправлено в другом месте; снято с TODO.
+- **#4 «Амбер Стандарт» vs «Амберри»** — это не код, а `.env`
+  (`VK_GROUP_TOKEN` указывает на не ту группу). [server/vk.js:167-176](server/vk.js:167)
+  уже корректно использует group token. Зафиксировать в runbook, не в коде.
+
 ## Related pages
 
 - [[live-commerce-flow]]
