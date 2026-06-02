@@ -93,6 +93,44 @@ test("quantity is capped at 10", () => {
   assert.equal(r.quantity, 10);
 });
 
+test("requested сохраняет сырое число до обрезки (двадцать → 10 / 20)", () => {
+  const r = parseQuantityCommand("Анна Сидорова добавь двадцать штук 03204");
+  assert.equal(r.matched, true);
+  assert.equal(r.quantity, 10);
+  assert.equal(r.requested, 20);
+});
+
+test("11–19 распознаются и обрезаются капом (одиннадцать → 10 / 11)", () => {
+  const r = parseQuantityCommand("Анна Сидорова добавь одиннадцать штук 03204");
+  assert.equal(r.matched, true);
+  assert.equal(r.quantity, 10);
+  assert.equal(r.requested, 11);
+});
+
+test("digit-word код с филлером посередине («ноль три ну два ноль четыре»)", () => {
+  const r = parseQuantityCommand(
+    "Иван Петров добавь две штуки код товара ноль три ну два ноль четыре",
+  );
+  assert.equal(r.matched, true);
+  assert.equal(r.code, "03204");
+});
+
+test("реальное слово завершает число (контроль склейки)", () => {
+  // «ноль три рублей пятьсот»: «рублей» — реальное слово, не цифра и не
+  // филлер, поэтому сбор цифр останавливается на нём. Код выводится только
+  // из честной серии цифр перед стоп-словом («ноль три» → «03»), а не
+  // склеивается через произвольную фразу. «пятьсот» в код НЕ попадает.
+  const r = parseQuantityCommand("Иван Петров добавь две штуки ноль три рублей пятьсот");
+  assert.equal(r.matched, true);
+  assert.equal(r.code, "03");
+});
+
+test("canonical: requested === quantity для штатного числа («две штуки»)", () => {
+  const r = parseQuantityCommand("Анна Сидорова добавь две штуки 03204");
+  assert.equal(r.quantity, 2);
+  assert.equal(r.requested, 2);
+});
+
 test("empty / null input is safe", () => {
   assert.equal(parseQuantityCommand("").matched, false);
   assert.equal(parseQuantityCommand(null).matched, false);

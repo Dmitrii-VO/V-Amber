@@ -75,6 +75,16 @@ when `remainingStock < event.quantity`, and `committedReservationCount`
 is bumped by `quantity` (not by 1) on accept and rolled back by
 `quantity` on safe-mode mid-flight blocks.
 
+**Operator override — the stock guard is buyer-`бронь` only.** The operator
+voice-append path (`appendReservationQuantity`, see "Voice quantity (+N шт)"
+below) **intentionally bypasses** this guard: it bumps
+`committedReservationCount` by the added quantity without checking
+`remainingStock`. This is the deliberate **"operator-always-right"** policy
+— a manual, button-confirmed action where the operator physically holds the
+goods and decides; the oversell risk on that path is knowingly the operator's.
+The counter is still bumped so subsequent **automatic** buyer reservations see
+the real occupancy.
+
 ## MoySklad write path
 
 For a valid reservation, the backend ensures or finds a counterparty and then
@@ -198,19 +208,34 @@ Pieces:
 - `ws-server.js` `handleVoiceQuantityCommand` — находит лот по коду, ищет
   бронь по имени через `matchNameAgainst`, шлёт `voiceQuantityMatch` с
   предлагаемым количеством. Ambiguous match → warning, без подсветки.
-- UI `highlightReservationForQuantity` добавляет
-  `res-item--quantity-target` и вешает кнопку `+ N шт`. Клик кнопки шлёт
-  `appendReservationQuantity` → сервер вызывает
-  `moysklad.appendPositionToCustomerOrder` и пишет
-  `reserved_appended` событие, которое потом можно отменить отдельно по
-  его `positionId`.
-- **actionId (server nonce).** В `voiceQuantityMatch` сервер кладёт
-  однократный UUID и хранит привязанные `lotSessionId/viewerId/commentId/
-  quantity` в `pendingQuantityActions` (TTL 60 с). При
+- UI `highlightReservationForQuantity` кладёт предложение в
+  `state.pendingQuantity` (Map, ключ `${viewerId}:${commentId}`) и
+  перерисовывает список. Подсветку `res-item--quantity-target` и кнопку
+  `+ N шт` навешивает `renderReservationsForLots` из этого state на каждый
+  рендер — поэтому кнопка **переживает любой `emitState`** (раньше её стирал
+  `clearChildren` при ре-рендере, и кнопка пропадала до клика). Клик кнопки
+  шлёт `appendReservationQuantity` → сервер вызывает
+  `moysklad.appendPositionToCustomerOrder` и пишет `reserved_appended`
+  событие, которое потом можно отменить отдельно по его `positionId`.
+- **actionId (server nonce) + lifecycle.** В `voiceQuantityMatch` сервер
+  кладёт однократный UUID и хранит привязанные `lotSessionId/viewerId/
+  commentId/quantity` в `pendingQuantityActions` (TTL 60 с). При
   `appendReservationQuantity` клиент возвращает только этот `actionId` —
   сервер берёт значения из своей map, клиентские lotSessionId/viewerId/etc.
   игнорируются. Иначе любой WS-клиент мог бы голым сообщением создать
-  позицию любой брони (HIGH из opencode review 2026-06-01).
+  позицию любой брони (HIGH из opencode review 2026-06-01). Токен читается
+  через `peekPendingQuantityAction` и удаляется **только после успешного**
+  append — при ошибке МойСклада он остаётся живым, чтобы оператор повторил
+  кликом. Защита от двойного клика — флаг `event.appendInFlight`.
+- **`voiceQuantityResult { actionId, ok }`.** Сервер шлёт ack на каждый
+  `appendReservationQuantity`: `ok:true` — позиция создана, UI убирает
+  предложение из `state.pendingQuantity`; `ok:false` — не применилось, UI
+  перерисовывает (кнопка снова кликабельна по живому токену).
+- **Кламп количества.** Парсер режет количество до `1..10`
+  (`QUANTITY_HARD_CAP`) и возвращает `requested` (что озвучили до клампа).
+  Сервер ставит `capped = requested > quantity` в `voiceQuantityMatch`; UI
+  показывает «запрошено N, максимум 10» в логе, тултипе и confirm-диалоге,
+  чтобы добавленное количество не расходилось молча с произнесённым.
 
 ## Waitlist and recovery
 

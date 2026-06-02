@@ -531,6 +531,11 @@ export function attachWsServer(httpServer, config, services = {}) {
       const spokenName = command.name;
       const code = command.code;
       const quantity = command.quantity;
+      // `requested` — что озвучил оператор ДО клампа (парсер режет до 1..10).
+      // Если запрошено больше cap, скажем об этом в UI явно, чтобы добавленное
+      // количество не расходилось молча с произнесённым.
+      const requested = Number.isFinite(command.requested) ? command.requested : quantity;
+      const capped = requested > quantity;
 
       const lot = getOpenLots().find((candidate) => String(candidate.code) === String(code)) || null;
       if (!lot) {
@@ -624,15 +629,23 @@ export function attachWsServer(httpServer, config, services = {}) {
         code,
         lotSessionId: lot.lotSessionId,
         quantity,
+        requested,
+        capped,
       });
     }
 
-    function consumePendingQuantityAction(actionId) {
+    // Читаем pending action БЕЗ удаления — токен живёт, пока append реально не
+    // применился. Раньше удаление в начале хендлера означало, что при ошибке
+    // МойСклада «попробуйте ещё раз» было невозможно: токен уже потрачен, а
+    // кнопка в UI висела на «…». Истёкший токен подчищаем здесь же.
+    function peekPendingQuantityAction(actionId) {
       if (!actionId) return null;
       const pending = pendingQuantityActions.get(actionId);
       if (!pending) return null;
-      pendingQuantityActions.delete(actionId);
-      if (pending.expiresAt < Date.now()) return null;
+      if (pending.expiresAt < Date.now()) {
+        pendingQuantityActions.delete(actionId);
+        return null;
+      }
       return pending;
     }
 
@@ -2595,25 +2608,29 @@ export function attachWsServer(httpServer, config, services = {}) {
           // server-side pending action — не из клиентского payload. Клиент
           // присылает actionId, выданный в voiceQuantityMatch; всё остальное
           // (lotSessionId, viewerId, commentId, quantity) — серверное.
-          const pending = consumePendingQuantityAction(payload.actionId);
+          // Ответ-ack для UI: оператор должен либо увидеть успех (кнопка
+          // уходит), либо получить ok:false и снова кликнуть по живому токену.
+          const ackFail = (message) => {
+            sendJson(websocket, { type: "warning", message });
+            sendJson(websocket, { type: "voiceQuantityResult", actionId: payload.actionId, ok: false });
+          };
+
+          const pending = peekPendingQuantityAction(payload.actionId);
           if (!pending) {
-            sendJson(websocket, {
-              type: "warning",
-              message: "Команда устарела или уже применена — повторите голосом",
-            });
+            ackFail("Команда устарела или уже применена — повторите голосом");
             return;
           }
 
           const lot = openLotsBySessionId.get(pending.lotSessionId);
           if (!lot) {
-            sendJson(websocket, { type: "warning", message: "Лот уже закрыт" });
+            ackFail("Лот уже закрыт");
             return;
           }
 
           // Количество уже валидировано в парсере (1..10), но защитимся
           // явно от nonsense: integer, в допустимом диапазоне.
           if (!Number.isInteger(pending.quantity) || pending.quantity < 1 || pending.quantity > 10) {
-            sendJson(websocket, { type: "warning", message: "Некорректное количество" });
+            ackFail("Некорректное количество");
             return;
           }
           const quantityToAdd = pending.quantity;
@@ -2625,16 +2642,13 @@ export function attachWsServer(httpServer, config, services = {}) {
             && (pending.commentId == null || candidate.commentId === pending.commentId)
             && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
           if (!event) {
-            sendJson(websocket, { type: "warning", message: "Бронь не найдена" });
+            ackFail("Бронь не найдена");
             return;
           }
 
           const orderId = event.customerOrder?.id;
           if (!orderId) {
-            sendJson(websocket, {
-              type: "warning",
-              message: "Нет связанного заказа МойСклад — добавьте позицию вручную",
-            });
+            ackFail("Нет связанного заказа МойСклад — добавьте позицию вручную");
             return;
           }
 
@@ -2648,6 +2662,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               lotSessionId: lot.lotSessionId,
               viewerId: event.viewerId,
             });
+            // Токен НЕ трогаем: первый запрос ещё в полёте, ack по нему придёт.
             sendJson(websocket, { type: "warning", message: "Добавление уже выполняется — подождите" });
             return;
           }
@@ -2658,7 +2673,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               lotSessionId: lot.lotSessionId,
               viewerId: event.viewerId,
             });
-            sendJson(websocket, { type: "warning", message: "Добавление недоступно в safe-mode" });
+            ackFail("Добавление недоступно в safe-mode");
             return;
           }
 
@@ -2682,13 +2697,15 @@ export function attachWsServer(httpServer, config, services = {}) {
               quantity: quantityToAdd,
               error,
             });
-            sendJson(websocket, { type: "warning", message: "Не удалось добавить позицию — попробуйте ещё раз" });
+            // Токен оставляем живым: append не применился, оператор может
+            // повторить кликом по той же кнопке (ack:false её ре-активирует).
+            ackFail("Не удалось добавить позицию — попробуйте ещё раз");
             return;
           }
           event.appendInFlight = false;
 
           if (appendResult && appendResult.skipped === true && appendResult.safeMode === true) {
-            sendJson(websocket, { type: "warning", message: "Добавление недоступно в safe-mode" });
+            ackFail("Добавление недоступно в safe-mode");
             return;
           }
 
@@ -2709,7 +2726,17 @@ export function attachWsServer(httpServer, config, services = {}) {
             },
           };
           addReservationEvent(lot, appendedEvent);
+          // ОПЕРАТОР ВСЕГДА ПРАВ: это ручное, подтверждённое кнопкой действие,
+          // поэтому stock-guard (который для buyer-`бронь` отклоняет
+          // remainingStock < quantity) здесь НАМЕРЕННО не применяется — оператор
+          // держит товар в руках и решает сам. Счётчик всё равно растим на
+          // quantityToAdd, чтобы последующие АВТО-брони видели реальную
+          // занятость. См. reservation-flow.md → "Stock protection". Риск
+          // перепродажи в этом пути — сознательно на ответственности оператора.
           state.committedReservationCount = (state.committedReservationCount || 0) + quantityToAdd;
+
+          // Append применился — только теперь гасим одноразовый токен.
+          pendingQuantityActions.delete(payload.actionId);
 
           logger.info("ws", "reservation_appended_by_voice", {
             connectionId,
@@ -2721,6 +2748,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             positionId: appendResult?.positionId || null,
             quantityAdded: quantityToAdd,
           });
+          sendJson(websocket, { type: "voiceQuantityResult", actionId: payload.actionId, ok: true });
           emitState();
           return;
         }
