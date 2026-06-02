@@ -282,3 +282,32 @@ gate above. Fixing it cleanly requires (1) a fallback to
 query against the variant's assortment href, and (3) a snapshot builder
 that joins the variant's characteristic name onto the parent product
 name. Left for a focused follow-up with real MoySklad fixtures.
+
+## [2026-06-01] analysis | Analytics tracking plan
+
+Applied the analytics-tracking workflow to the current operator dashboard.
+No active analytics SDK, GTM container, `gtag`, `dataLayer`, PostHog,
+Mixpanel, Amplitude, or Segment implementation was found in source files.
+
+Added [[analytics-tracking-plan]] as the measurement contract for future
+implementation. The plan prioritizes internal operator workflow events,
+reservation conversions, wishlist purchase-order completion, digest sends,
+safe-mode state, and redacted reliability analytics over public marketing
+attribution.
+
+Follow-up review added a required non-PII common event envelope so future
+JSONL analytics can be deduplicated and joined to local diagnostic bundles.
+
+## [2026-06-01] reliability | Complete broadcast logging trail
+
+Hardened the logging path so diagnostic bundles can reconstruct an эфир from
+session JSONL. Session filenames now include seconds, milliseconds, and a
+counter to avoid rapid restart overwrites; `logger.flush()` runs before bundle
+collection; `state_snapshot` records all open lots; and reservation JSONL now
+separates early `reservation_detected` from final `reservation_finalized`
+outcomes.
+
+The bundle `INDEX.md` now counts accepted reservations from finalized
+`reserved` / `reserved_appended` statuses instead of early comment detection,
+with a legacy fallback for older `reservation_accepted` records. Updated
+[[logging-and-diagnostics]] and [[testing-guide]].

@@ -6,6 +6,7 @@ import { createSessionJsonl } from "./session-jsonl.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sessionsDir = join(__dirname, "..", "logs", "sessions");
+let sessionSlugCounter = 0;
 
 function nowTime() {
   return new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -17,14 +18,16 @@ function nowDateTime() {
 
 function dateSlug() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}`;
+  const p = (n, width = 2) => String(n).padStart(width, "0");
+  sessionSlugCounter = (sessionSlugCounter + 1) % 10000;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}-${p(sessionSlugCounter, 4)}`;
 }
 
 export function createSessionLog() {
   let filePath = null;
   let jsonl = null;
   let writeChain = Promise.resolve();
+  let currentConnectionId = null;
 
   function append(text) {
     if (!filePath) {
@@ -41,8 +44,13 @@ export function createSessionLog() {
       });
   }
 
-  function jsonlEvent(kind, payload) {
-    if (jsonl) jsonl.writeEvent(kind, payload);
+  function jsonlEvent(kind, payload = {}) {
+    if (jsonl) {
+      jsonl.writeEvent(kind, {
+        connectionId: currentConnectionId || null,
+        ...payload,
+      });
+    }
   }
 
   return {
@@ -53,6 +61,7 @@ export function createSessionLog() {
       return jsonl;
     },
     logSessionStart({ connectionId, vkLiveVideoUrl, context } = {}) {
+      currentConnectionId = connectionId || null;
       const slug = dateSlug();
       filePath = join(sessionsDir, `${slug}.md`);
       jsonl = createSessionJsonl({ filePath: join(sessionsDir, `${slug}.jsonl`) });
@@ -131,7 +140,14 @@ export function createSessionLog() {
 
     logReservation({ viewerName, viewerId, lotCode } = {}) {
       append(`- ${nowTime()} **Бронь** от ${viewerName || `id${viewerId}`} (лот ${lotCode})`);
-      jsonlEvent("reservation_accepted", { viewerName, viewerId, lotCode });
+    },
+
+    logReservationDetected(payload = {}) {
+      jsonlEvent("reservation_detected", payload);
+    },
+
+    logReservationFinalized(payload = {}) {
+      jsonlEvent("reservation_finalized", payload);
     },
 
     logReservationWaitlist({ viewerName, viewerId, lotCode, position } = {}) {
@@ -203,6 +219,24 @@ export function createSessionLog() {
       jsonlEvent("discount_skipped", { text, reason, code, lotSessionId });
     },
 
+    logPriceChanged(payload = {}) {
+      jsonlEvent("lot_price_changed", payload);
+    },
+
+    logManualCodeSubmitted(payload = {}) {
+      jsonlEvent("manual_code_submitted", payload);
+    },
+
+    logLotClosed(payload = {}) {
+      const code = payload.code || payload.lotCode || "—";
+      append(`- ${nowTime()} **Лот закрыт** ${code} (${payload.reason || "—"})`);
+      jsonlEvent("lot_closed", payload);
+    },
+
+    logReservationQuantityAppended(payload = {}) {
+      jsonlEvent("reservation_quantity_appended", payload);
+    },
+
     logError({ component, message } = {}) {
       append(`- ${nowTime()} **Ошибка** [${component}] ${message}`);
       jsonlEvent("error", { component, message });
@@ -252,6 +286,7 @@ export function createSessionLog() {
       jsonlEvent("session_ended", { reason });
 
       filePath = null;
+      currentConnectionId = null;
       // jsonl зануляем НЕ сразу — пусть последняя запись допишется. flush()
       // ниже подождёт writeChain.then().
     },
