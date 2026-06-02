@@ -199,9 +199,12 @@ a { color: inherit; }
 .brand-sub { color: var(--text-dim); font-size: var(--fs-xs); font-family: var(--font-mono); }
 .brand-version { color: var(--amber); }
 
-.topbar-controls { display: flex; align-items: center; gap: var(--gap-3); flex: 1; min-width: 0; }
-.topbar-controls .mic-select { flex: 1; max-width: 280px; }
-.topbar-actions { display: flex; align-items: center; gap: var(--gap-3); }
+.topbar-controls { display: flex; align-items: center; gap: var(--gap-3); flex: 1; min-width: 0; flex-wrap: wrap; }
+/* Микрофонный селектор не должен схлопываться до одной буквы, когда рядом
+   тесно (узкие экраны MacBook): держим читаемый минимум, а поле VK-URL при
+   нехватке места переносится на новую строку благодаря flex-wrap выше. */
+.topbar-controls .mic-select { flex: 1 1 200px; min-width: 200px; max-width: 280px; }
+.topbar-actions { display: flex; align-items: center; gap: var(--gap-3); flex-wrap: wrap; }
 
 .main {
   display: grid; grid-template-columns: 1fr 380px;
@@ -418,6 +421,13 @@ a { color: inherit; }
   border-radius: 4px; color: var(--text-muted);
 }
 
+/* На ноутбучных экранах (≈1280–1440px) кнопок в шапке много, и одного ряда
+   не хватает: отдаём блоку «микрофон + VK-URL» всю ширину отдельной строкой,
+   чтобы селектор микрофона и поле ссылки были видны целиком. */
+@media (max-width: 1440px) {
+  .topbar-controls { flex: 1 1 100%; order: 3; }
+  .topbar-controls .mic-select { flex: 0 1 280px; }
+}
 @media (max-width: 1100px) { .main { grid-template-columns: 1fr 320px; } }
 @media (max-width: 900px) {
   .main { grid-template-columns: 1fr; }
