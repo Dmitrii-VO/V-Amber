@@ -66,8 +66,13 @@ corresponding stores are available.
 
 `server/bundle-index.js` generates a Markdown index for bundle contents. Its
 "Броней принято" count prefers `reservation_finalized` statuses and counts
-only `reserved` / `reserved_appended` as accepted. For old bundles without
-final statuses, it falls back to legacy `reservation_accepted` records.
+only `reserved` / `reserved_appended` as accepted. Because `reservation_finalized`
+is append-only (a reservation is re-finalized as `cancelled` when the operator
+cancels it), the count keeps only the **latest** status per stable reservation
+key (`lotSessionId` + `commentId` + `viewerId` + `positionId`) — so a cancelled
+reservation drops out of "принято", and cancelling one of a buyer's two
+positions leaves the other counted. For old bundles without final statuses, it
+falls back to legacy `reservation_accepted` records.
 
 ## Install ID
 

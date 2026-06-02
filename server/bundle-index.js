@@ -62,6 +62,15 @@ function summarizeSession(records) {
     context: null,
   };
 
+  // reservation_finalized — append-only: одна и та же бронь финализируется
+  // повторно (например reserved → потом cancelled при отмене оператором,
+  // server/ws-server.js cancel-path). Если считать каждую запись, отменённые
+  // брони остаются в «принято». Поэтому держим ПОСЛЕДНИЙ статус на стабильный
+  // ключ брони (лот + комментарий + зритель + позиция МС) и считаем только его.
+  const finalizedStatusByKey = new Map();
+  const reservationKey = (r) =>
+    [r.lotSessionId, r.commentId, r.viewerId, r.positionId].map((v) => v ?? "").join("|");
+
   for (const r of records) {
     const ts = r.ts;
     if (!summary.startedAt) summary.startedAt = ts;
@@ -91,9 +100,8 @@ function summarizeSession(records) {
         break;
       case "reservation_finalized":
         summary.reservationFinalized += 1;
-        if (r.status === "reserved" || r.status === "reserved_appended") {
-          summary.reservationFinalizedAccepted += 1;
-        }
+        // Только последний статус на бронь считается ниже (после цикла).
+        finalizedStatusByKey.set(reservationKey(r), r.status || null);
         break;
       case "reservation_waitlist_pending":
         summary.waitlistPending += 1;
@@ -148,6 +156,15 @@ function summarizeSession(records) {
         break;
       default:
         break;
+    }
+  }
+
+  // Принятой считается бронь, чей ПОСЛЕДНИЙ финальный статус — reserved /
+  // reserved_appended. Отменённые (последний статус cancelled) и прочие
+  // исходы сюда не попадают.
+  for (const status of finalizedStatusByKey.values()) {
+    if (status === "reserved" || status === "reserved_appended") {
+      summary.reservationFinalizedAccepted += 1;
     }
   }
 
