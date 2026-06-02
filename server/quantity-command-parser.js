@@ -142,13 +142,24 @@ function extractQuantityWithUnit(tail) {
   const END = `(?=$|[^${CYR}])`;
   // Сначала пробуем словесный формат («две штуки», «пять штук»). Цифра
   // («2 шт») идёт следом — реже в речи, но возможна при наговоре чисел.
+  // Допускаем составное числительное из ДВУХ слов перед единицей
+  // («двадцать пять штук», «тридцать две штуки») — иначе они давали бы тихий
+  // matched:false, ровно тот no-op, который мы и убираем. Значение всё равно
+  // упрётся в QUANTITY_HARD_CAP, но requested сохранит сказанное.
+  const qw = [...QUANTITY_WORDS.keys()].join("|");
   const wordRe = new RegExp(
-    `^\\s*(${[...QUANTITY_WORDS.keys()].join("|")})\\s+(${UNIT_RE.source})${END}`,
+    `^\\s*(${qw})(?:\\s+(${qw}))?\\s+(${UNIT_RE.source})${END}`,
   );
   const wordMatch = wordRe.exec(tail);
   if (wordMatch) {
-    const base = QUANTITY_WORDS.get(wordMatch[1]) || 1;
-    const multiplier = /^пар/.test(wordMatch[2]) ? 2 : 1;
+    const base1 = QUANTITY_WORDS.get(wordMatch[1]) || 0;
+    const base2 = wordMatch[2] ? (QUANTITY_WORDS.get(wordMatch[2]) || 0) : 0;
+    // Складываем только настоящие «десятки + единицы» (20..90 + 1..9). Иначе
+    // (например «пять две штуки» — оговорка) берём первое слово, не выдумывая
+    // сумму. Полный матч всё равно «съеден» — единица стоит после второго слова.
+    const isCompound = base1 >= 20 && base1 % 10 === 0 && base2 >= 1 && base2 <= 9;
+    const base = (isCompound ? base1 + base2 : base1) || 1;
+    const multiplier = /^пар/.test(wordMatch[3]) ? 2 : 1;
     const requested = base * multiplier;
     return {
       value: Math.min(QUANTITY_HARD_CAP, requested),
