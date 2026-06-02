@@ -5,7 +5,10 @@
 // цифровой код или словесный («ноль три два ноль четыре»), словесное или
 // цифровое количество («две», «5»). Имя — до триггера, как в cancel-парсере.
 //
-// Контракт: { matched: true, name, quantity, code } или { matched: false }.
+// Контракт: { matched: true, name, quantity, code, requested } или
+// { matched: false }. `quantity` обрезан капом [1..10]; `requested` — сырое
+// распознанное число ДО обрезки (может быть больше 10), чтобы оператор видел
+// в UI, что он сказал, и понимал, почему количество урезано.
 // САМ парсер денег не двигает — вызывающий код подсвечивает строку в UI и
 // ждёт явного подтверждения оператора. Это сознательно: ошибка
 // распознавания → лишняя позиция в МойСкладе = реальные деньги.
@@ -34,6 +37,28 @@ const QUANTITY_WORDS = new Map([
   ["восемь", 8], ["восьмеро", 8],
   ["девять", 9], ["девятеро", 9],
   ["десять", 10], ["десятеро", 10],
+  // 11–19, круглые десятки и сто. Всё это выше капа [1..10] — мы их
+  // РАСПОЗНАЁМ (чтобы оператор получил фидбек в UI), а затем обрезаем
+  // существующим QUANTITY_HARD_CAP. Файл нормализует ё→е, поэтому пишем
+  // е-варианты. requested сохранит исходное число до обрезки.
+  ["одиннадцать", 11],
+  ["двенадцать", 12],
+  ["тринадцать", 13],
+  ["четырнадцать", 14],
+  ["пятнадцать", 15],
+  ["шестнадцать", 16],
+  ["семнадцать", 17],
+  ["восемнадцать", 18],
+  ["девятнадцать", 19],
+  ["двадцать", 20],
+  ["тридцать", 30],
+  ["сорок", 40],
+  ["пятьдесят", 50],
+  ["шестьдесят", 60],
+  ["семьдесят", 70],
+  ["восемьдесят", 80],
+  ["девяносто", 90],
+  ["сто", 100],
 ]);
 
 const QUANTITY_HARD_CAP = 10;
@@ -66,6 +91,14 @@ const PRE_CODE_FILLER = new Set([
   "код", "кода", "коду", "товара", "номер", "номера", "это", "вот", "пожалуйста",
 ]);
 
+// Общий шум речи. Объявлен здесь (а не после extractCode), потому что
+// extractCode пропускает такие токены между цифрами-словами кода, а
+// extractName режет их в начале имени.
+const FILLER = new Set([
+  "так", "давай", "давайте", "значит", "ну", "вот", "это", "так-то",
+  "пожалуйста", "итак", "и", "а",
+]);
+
 function normalize(text) {
   return String(text || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
 }
@@ -93,7 +126,13 @@ export function parseQuantityCommand(text) {
   const name = extractName(beforeVerb);
   if (!name) return { matched: false };
 
-  return { matched: true, name, quantity: quantity.value, code };
+  return {
+    matched: true,
+    name,
+    quantity: quantity.value,
+    code,
+    requested: quantity.requested,
+  };
 }
 
 function extractQuantityWithUnit(tail) {
@@ -103,15 +142,28 @@ function extractQuantityWithUnit(tail) {
   const END = `(?=$|[^${CYR}])`;
   // Сначала пробуем словесный формат («две штуки», «пять штук»). Цифра
   // («2 шт») идёт следом — реже в речи, но возможна при наговоре чисел.
+  // Допускаем составное числительное из ДВУХ слов перед единицей
+  // («двадцать пять штук», «тридцать две штуки») — иначе они давали бы тихий
+  // matched:false, ровно тот no-op, который мы и убираем. Значение всё равно
+  // упрётся в QUANTITY_HARD_CAP, но requested сохранит сказанное.
+  const qw = [...QUANTITY_WORDS.keys()].join("|");
   const wordRe = new RegExp(
-    `^\\s*(${[...QUANTITY_WORDS.keys()].join("|")})\\s+(${UNIT_RE.source})${END}`,
+    `^\\s*(${qw})(?:\\s+(${qw}))?\\s+(${UNIT_RE.source})${END}`,
   );
   const wordMatch = wordRe.exec(tail);
   if (wordMatch) {
-    const base = QUANTITY_WORDS.get(wordMatch[1]) || 1;
-    const multiplier = /^пар/.test(wordMatch[2]) ? 2 : 1;
+    const base1 = QUANTITY_WORDS.get(wordMatch[1]) || 0;
+    const base2 = wordMatch[2] ? (QUANTITY_WORDS.get(wordMatch[2]) || 0) : 0;
+    // Складываем только настоящие «десятки + единицы» (20..90 + 1..9). Иначе
+    // (например «пять две штуки» — оговорка) берём первое слово, не выдумывая
+    // сумму. Полный матч всё равно «съеден» — единица стоит после второго слова.
+    const isCompound = base1 >= 20 && base1 % 10 === 0 && base2 >= 1 && base2 <= 9;
+    const base = (isCompound ? base1 + base2 : base1) || 1;
+    const multiplier = /^пар/.test(wordMatch[3]) ? 2 : 1;
+    const requested = base * multiplier;
     return {
-      value: Math.min(QUANTITY_HARD_CAP, base * multiplier),
+      value: Math.min(QUANTITY_HARD_CAP, requested),
+      requested,
       consumed: wordMatch[0].length,
     };
   }
@@ -122,8 +174,10 @@ function extractQuantityWithUnit(tail) {
     const n = Number.parseInt(digitMatch[1], 10);
     if (!Number.isFinite(n) || n <= 0) return null;
     const multiplier = /^пар/.test(digitMatch[2]) ? 2 : 1;
+    const requested = n * multiplier;
     return {
-      value: Math.min(QUANTITY_HARD_CAP, n * multiplier),
+      value: Math.min(QUANTITY_HARD_CAP, requested),
+      requested,
       consumed: digitMatch[0].length,
     };
   }
@@ -143,20 +197,36 @@ function extractCode(tail) {
   let i = 0;
   while (i < tokens.length && PRE_CODE_FILLER.has(tokens[i])) i += 1;
 
+  // Собираем цифры-слова, перешагивая через шум между ними («ноль три ну
+  // два ноль четыре» → «03204»). Но реальное слово (не цифра и не известный
+  // филлер) завершает число. Ограничиваем серию пропусков: не более двух
+  // филлеров подряд, иначе считаем, что число кончилось, — чтобы не склеить
+  // две несвязные группы цифр через длинную фразу.
   const chunks = [];
-  while (i < tokens.length && DIGIT_WORDS.has(tokens[i])) {
-    chunks.push(DIGIT_WORDS.get(tokens[i]));
-    i += 1;
+  let skipped = 0;
+  const MAX_SKIP = 2;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    if (DIGIT_WORDS.has(tok)) {
+      chunks.push(DIGIT_WORDS.get(tok));
+      skipped = 0;
+      i += 1;
+      continue;
+    }
+    // Шум между цифрами — пропускаем, но только если уже что-то собрали
+    // и в пределах лимита подряд идущих филлеров.
+    if (chunks.length > 0 && (PRE_CODE_FILLER.has(tok) || FILLER.has(tok)) && skipped < MAX_SKIP) {
+      skipped += 1;
+      i += 1;
+      continue;
+    }
+    // Реальное слово (или превышен лимит пропусков) — число закончилось.
+    break;
   }
 
   if (chunks.length < MIN_CODE_LEN || chunks.length > MAX_CODE_LEN) return null;
   return chunks.join("");
 }
-
-const FILLER = new Set([
-  "так", "давай", "давайте", "значит", "ну", "вот", "это", "так-то",
-  "пожалуйста", "итак", "и", "а",
-]);
 
 function extractName(prefix) {
   const tokens = String(prefix || "")

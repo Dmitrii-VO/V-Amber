@@ -66,6 +66,10 @@ Wiki review after introducing `server/reservation-parser.js` and
   paths). Stock guard uses `event.quantity` and bumps
   `committedReservationCount` accordingly. Tests:
   `test/reservation-parser.test.js` (quantity suite).
+  **Exception:** the operator voice-append path (`appendReservationQuantity`,
+  `server/quantity-command-parser.js`) intentionally skips the stock guard
+  ("operator-always-right") while still bumping `committedReservationCount`.
+  See [[reservation-flow]] → "Stock protection" / "Voice quantity (+N шт)".
 - **Stock-unknown one-shot refresh.**
   `ensureStockKnownBeforeFirstReservation` in `server/ws-server.js`
   retries `moysklad.getProductCardByCode` before the first reservation
