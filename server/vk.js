@@ -174,6 +174,11 @@ export function createVkPublisher(config) {
   // VK_GROUP_TOKEN или VK_ACCESS_TOKEN. userToken оставляем как
   // back-compat fallback для старых конфигов.
   const commentToken = groupToken || accessToken || userToken;
+  // Токен для read-методов, которые VK не принимает от имени сообщества
+  // (например video.get → error_code 5 "invalid token type"). Для таких
+  // вызовов нужен user-токен; commentToken оставляем fallback'ом на случай
+  // конфигов без VK_USER_TOKEN.
+  const readToken = userToken || commentToken;
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
@@ -634,15 +639,15 @@ export function createVkPublisher(config) {
       }
 
       try {
-        // Этап 5: validateLiveVideoUrl должен использовать тот же токен,
-        // под которым потом публикуются комментарии. Иначе при community-
-        // only конфиге (нет VK_USER_TOKEN) валидация падает auth_failed,
-        // хотя реальная публикация под commentToken работала бы.
+        // video.get — read-метод, который VK отклоняет для community-токенов
+        // (error_code 5 "invalid token type"). Поэтому валидацию делаем
+        // readToken'ом (user-токен с fallback на commentToken). Публикация
+        // комментариев ниже по-прежнему идёт под commentToken от имени группы.
         const response = await callVkApi("video.get", {
           owner_id: ownerId,
           videos: `${ownerId}_${videoId}`,
           extended: 1,
-        }, commentToken);
+        }, readToken);
         const video = response?.items?.[0];
         if (!video) {
           return {
