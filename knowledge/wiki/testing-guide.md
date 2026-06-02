@@ -29,6 +29,12 @@ node --test "test/**/*.test.js"
 - `test/moysklad-position-id.test.js` — customer-order creation fallback that
   resolves the stored MoySklad position id after create responses without it.
 - `test/price-detector.test.js` — spoken price detection.
+- `test/bundle-index.test.js` — diagnostic bundle summary counts for finalized
+  reservations and legacy reservation records.
+- `test/logger.test.js` — server logger flush behavior before diagnostics read
+  `logs/server.log`.
+- `test/session-log.test.js` — unique session filenames and JSONL reservation
+  outcome records.
 - `test/reservation-digest-log.test.js` — reservation digest log behavior.
 - `test/reservation-parser.test.js` — VK comment intent parsing (reservation
   keywords, bare codes, `preferredCode` against phone/price collisions).
@@ -40,6 +46,8 @@ node --test "test/**/*.test.js"
   classification).
 - `test/ws-server.integration.test.js` — WebSocket session harness smoke
   coverage for the live-commerce flow.
+- `test/ws-server.logging.test.js` — session JSONL events for reservation
+  outcomes and multi-lot state snapshots.
 - `test/ws-server.manual-code.test.js` — operator `manualCode` scenarios,
   including catalog gating, same-code merge stability, and reservation floor.
 - `test/ws-server.cancel-reservation.test.js` — dashboard reservation cancel

@@ -42,6 +42,9 @@ function summarizeSession(records) {
     lotsOpened: 0,
     lotsClosed: 0,
     reservationsAccepted: 0,
+    reservationDetected: 0,
+    reservationFinalized: 0,
+    reservationFinalizedAccepted: 0,
     waitlistPending: 0,
     outOfStock: 0,
     waitlistMigrated: 0,
@@ -58,6 +61,15 @@ function summarizeSession(records) {
     errors: [],
     context: null,
   };
+
+  // reservation_finalized — append-only: одна и та же бронь финализируется
+  // повторно (например reserved → потом cancelled при отмене оператором,
+  // server/ws-server.js cancel-path). Если считать каждую запись, отменённые
+  // брони остаются в «принято». Поэтому держим ПОСЛЕДНИЙ статус на стабильный
+  // ключ брони (лот + комментарий + зритель + позиция МС) и считаем только его.
+  const finalizedStatusByKey = new Map();
+  const reservationKey = (r) =>
+    [r.lotSessionId, r.commentId, r.viewerId, r.positionId].map((v) => v ?? "").join("|");
 
   for (const r of records) {
     const ts = r.ts;
@@ -77,7 +89,19 @@ function summarizeSession(records) {
         summary.lotsClosed += 1;
         break;
       case "reservation_accepted":
+        // Legacy name: this is an early comment detection in current runtime,
+        // not proof that MoySklad accepted the reservation. Keep it only as
+        // fallback for old bundles that predate reservation_finalized.
+        summary.reservationDetected += 1;
         summary.reservationsAccepted += 1;
+        break;
+      case "reservation_detected":
+        summary.reservationDetected += 1;
+        break;
+      case "reservation_finalized":
+        summary.reservationFinalized += 1;
+        // Только последний статус на бронь считается ниже (после цикла).
+        finalizedStatusByKey.set(reservationKey(r), r.status || null);
         break;
       case "reservation_waitlist_pending":
         summary.waitlistPending += 1;
@@ -133,6 +157,19 @@ function summarizeSession(records) {
       default:
         break;
     }
+  }
+
+  // Принятой считается бронь, чей ПОСЛЕДНИЙ финальный статус — reserved /
+  // reserved_appended. Отменённые (последний статус cancelled) и прочие
+  // исходы сюда не попадают.
+  for (const status of finalizedStatusByKey.values()) {
+    if (status === "reserved" || status === "reserved_appended") {
+      summary.reservationFinalizedAccepted += 1;
+    }
+  }
+
+  if (summary.reservationFinalized > 0) {
+    summary.reservationsAccepted = summary.reservationFinalizedAccepted;
   }
 
   if (summary.startedAt && summary.endedAt) {
@@ -245,6 +282,10 @@ export function generateIndexMd({
   lines.push(`- **Сессий:** ${sessions.length}`);
   lines.push(`- **Лотов открыто:** ${totals.lotsOpened}`);
   lines.push(`- **Броней принято:** ${totals.reservationsAccepted}`);
+  const detectedTotal = sessionSummaries.reduce((acc, s) => acc + (s.summary.reservationDetected || 0), 0);
+  if (detectedTotal !== totals.reservationsAccepted) {
+    lines.push(`- **Комментариев с бронью распознано:** ${detectedTotal}`);
+  }
   lines.push(`- **Out of stock отказов:** ${totals.outOfStock} (в wishlist попало: ${wishlistAddsFromOos})`);
   lines.push(`- **Waitlist → Wishlist на закрытии лотов:** ${totals.waitlistMigrated}`);
   const wishlistAddsTotal = wishlistAddRecords.length;

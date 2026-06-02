@@ -280,6 +280,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           connectionId,
         });
       }
+      emitStateSnapshot();
     }
 
     const unsubscribeSafeMode = onSafeModeChange((enabled, meta) => {
@@ -291,27 +292,15 @@ export function attachWsServer(httpServer, config, services = {}) {
     // мне «реперные точки» в диагностическом jsonl, чтобы реконструировать
     // состояние в любой момент эфира без жадного логирования каждой мутации.
     function emitStateSnapshot() {
-      if (!activeLot?.lotSessionId) return;
-      const reservations = activeLot.reservations || {};
-      const events = Array.isArray(reservations.events) ? reservations.events : [];
-      const byStatus = {};
-      for (const e of events) {
-        const k = e?.status || "unknown";
-        byStatus[k] = (byStatus[k] || 0) + 1;
-      }
+      const openLots = getOpenLots();
+      if (openLots.length === 0) return;
+      const activeLotSnapshot = activeLot?.lotSessionId
+        ? summarizeLotForDiagnostics(activeLot)
+        : null;
       sessionLog.logStateSnapshot({
-        activeLot: {
-          code: activeLot.code,
-          lotSessionId: activeLot.lotSessionId,
-          productId: activeLot.product?.id || null,
-          availableStock: activeLot.product?.availableStock ?? null,
-          salePrice: activeLot.product?.salePrice ?? null,
-          voicePrice: activeLot.product?.voicePrice ?? null,
-          effectivePrice: getLotEffectivePrice(activeLot) ?? null,
-        },
-        eventsByStatus: byStatus,
-        committedReservationCount: reservations.committedReservationCount || 0,
-        primaryReservation: reservations.primaryReservation || null,
+        activeLot: activeLotSnapshot,
+        activeLotSessionId: activeLotSnapshot?.lotSessionId || null,
+        openLots: openLots.map((lot) => summarizeLotForDiagnostics(lot)),
         safeMode: isSafeMode(),
         wishlistActive: services.wishlistStore?.getActiveCount?.() ?? 0,
       });
@@ -351,6 +340,83 @@ export function attachWsServer(httpServer, config, services = {}) {
       return [...openLotsBySessionId.values()];
     }
 
+    function summarizeLotForDiagnostics(lot) {
+      if (!lot) return null;
+      const reservations = lot.reservations || {};
+      const events = Array.isArray(reservations.events) ? reservations.events : [];
+      const eventsByStatus = {};
+      for (const event of events) {
+        const status = event?.status || "unknown";
+        eventsByStatus[status] = (eventsByStatus[status] || 0) + 1;
+      }
+      const salePrice = Number(getLotEffectivePrice(lot) || 0);
+      const discountAmount = Number(lot.discountAmount || 0);
+      return {
+        code: lot.code || null,
+        lotSessionId: lot.lotSessionId || null,
+        productId: lot.product?.id || null,
+        productName: lot.product?.name || null,
+        pathName: lot.product?.pathName || null,
+        availableStock: lot.product?.availableStock ?? null,
+        stockUnknown: lot.product?.stockUnknown === true,
+        salePrice: lot.product?.salePrice ?? null,
+        voicePrice: lot.product?.voicePrice ?? null,
+        effectivePrice: Number.isFinite(salePrice) ? salePrice : null,
+        discountAmount: Number.isFinite(discountAmount) ? discountAmount : 0,
+        discountedPrice: Number.isFinite(salePrice) ? Math.max(0, salePrice - discountAmount) : null,
+        openedAt: lot.openedAt || null,
+        source: lot.source || null,
+        eventsByStatus,
+        committedReservationCount: reservations.committedReservationCount || 0,
+        primaryReservation: reservations.primaryReservation || null,
+      };
+    }
+
+    function buildReservationDiagnosticPayload(lot, event, extra = {}) {
+      const lotSnapshot = summarizeLotForDiagnostics(lot) || {};
+      const order = event?.customerOrder || {};
+      return {
+        lotSessionId: lotSnapshot.lotSessionId || lot?.lotSessionId || null,
+        code: lotSnapshot.code || lot?.code || event?.lotCode || null,
+        commentId: event?.commentId ?? null,
+        commentText: typeof event?.text === "string" ? event.text.slice(0, 200) : "",
+        commentCreatedAt: event?.createdAt || null,
+        viewerId: event?.viewerId ?? null,
+        viewerName: event?.viewerName || null,
+        quantity: Math.max(1, Number(event?.quantity) || 1),
+        status: event?.status || null,
+        productId: lotSnapshot.productId || null,
+        productName: lotSnapshot.productName || null,
+        pathName: lotSnapshot.pathName || null,
+        availableStock: lotSnapshot.availableStock ?? null,
+        stockUnknown: lotSnapshot.stockUnknown === true,
+        salePrice: lotSnapshot.effectivePrice ?? null,
+        discountAmount: lotSnapshot.discountAmount ?? 0,
+        effectivePrice: lotSnapshot.discountedPrice ?? null,
+        orderId: order.id || null,
+        positionId: order.positionId || null,
+        ...extra,
+      };
+    }
+
+    function logReservationFinalized(lot, event, extra = {}) {
+      sessionLog.logReservationFinalized(buildReservationDiagnosticPayload(lot, event, extra));
+    }
+
+    function logLotClosedOnce(lot, reason) {
+      if (!lot?.lotSessionId || lot.__closedLogged === true) return;
+      Object.defineProperty(lot, "__closedLogged", {
+        value: true,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+      sessionLog.logLotClosed({
+        ...summarizeLotForDiagnostics(lot),
+        reason,
+      });
+    }
+
     async function publishAllLotsClosed(reason) {
       const lots = getOpenLots();
       // Последовательно, чтобы при «video not found» на конце эфира можно
@@ -359,6 +425,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       let vkStreamUnavailable = false;
       for (const lot of lots) {
         await flushOrphanWaitlist(lot, reason);
+        logLotClosedOnce(lot, reason);
         if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
           continue;
         }
@@ -664,6 +731,14 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotSessionId: activeLot.lotSessionId,
         transcript,
       });
+      sessionLog.logPriceChanged({
+        code: activeLot.code,
+        lotSessionId: activeLot.lotSessionId,
+        source: "voice",
+        value: priceResult.value,
+        trigger: priceResult.trigger || null,
+        transcript,
+      });
 
       if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
         await vk.publishPriceUpdate(activeLot).catch((error) => {
@@ -856,6 +931,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           discountAmount,
           effectivePrice: Number.isFinite(effectivePrice) ? effectivePrice : null,
         });
+        logReservationFinalized(lot, event, { reason: "safe_mode_preflight" });
         emitState();
         return;
       }
@@ -876,6 +952,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           lotCode: lot.code,
           position: waitlistPosition,
         });
+        logReservationFinalized(lot, event, { waitlistPosition });
         emitState();
         notifyReservationStatus(lot, event);
         return;
@@ -890,6 +967,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           commentId: event.commentId,
           viewerId: event.viewerId,
         });
+        logReservationFinalized(lot, event, { reason: "product_missing" });
         emitState();
         notifyReservationStatus(lot, event);
         return;
@@ -937,6 +1015,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             error,
           });
         }
+        logReservationFinalized(lot, event, { wishlistEntryId: event.wishlistEntryId || null });
         emitState();
         notifyReservationStatus(lot, event);
         return;
@@ -1044,6 +1123,8 @@ export function attachWsServer(httpServer, config, services = {}) {
             commentId: event.commentId,
             viewerId: event.viewerId,
           });
+          logReservationFinalized(lot, event, { reason: "safe_mode_mid_flight" });
+          emitState();
           notifyReservationStatus(lot, event);
           return;
         }
@@ -1057,15 +1138,19 @@ export function attachWsServer(httpServer, config, services = {}) {
         }
 
         if (!isReservationSessionCurrent(lot, reservationSessionVersion)) {
+          const staleReason = existingOrder?.id ? "stale_session_after_append" : "stale_session_after_create";
           logger.info("vk", "reservation_result_discarded", {
             connectionId,
             lotSessionId: lot.lotSessionId,
             commentId: event.commentId,
             viewerId: event.viewerId,
             orderId: order?.id || null,
-            reason: existingOrder?.id ? "stale_session_after_append" : "stale_session_after_create",
+            reason: staleReason,
             note: "MoySklad write completed; recorded in customerOrdersByViewerId to avoid duplicate orders.",
           });
+          event.status = "stale_discarded";
+          event.customerOrder = order;
+          logReservationFinalized(lot, event, { reason: staleReason });
           return;
         }
 
@@ -1097,6 +1182,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           lotCode: lot.code,
           appended: Boolean(existingOrder?.id),
         });
+        logReservationFinalized(lot, event, { appended: Boolean(existingOrder?.id) });
         notifyReservationStatus(lot, event);
       } catch (error) {
         state.acceptedUserIds.delete(event.viewerId);
@@ -1121,9 +1207,11 @@ export function attachWsServer(httpServer, config, services = {}) {
             viewerId: event.viewerId,
             reason: "stale_session_after_error",
           });
+          logReservationFinalized(lot, event, { reason: "stale_session_after_error" });
           return;
         }
 
+        logReservationFinalized(lot, event, { error: event.error });
         notifyReservationStatus(lot, event);
       } finally {
         if (
@@ -1428,7 +1516,16 @@ export function attachWsServer(httpServer, config, services = {}) {
                 viewerName: event.viewerName,
                 viewerId,
                 lotCode: currentLot.code,
+                lotSessionId: currentLot.lotSessionId,
+                commentId: event.commentId,
+                status: event.status,
+                quantity: event.quantity,
               });
+              sessionLog.logReservationDetected(buildReservationDiagnosticPayload(currentLot, event, {
+                reservationCommentCode: reservationComment.code,
+                hasReservationKeyword: reservationComment.hasReservationKeyword,
+                matchedReservation,
+              }));
               emitState();
               void processReservationEvent(currentLot, event);
             }
@@ -1552,6 +1649,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // Сначала зафиксировать «брошенные» брони в логе, ПОТОМ закрывать
       // VK-публикацию.
       await flushOrphanWaitlist(lot, reason);
+      logLotClosedOnce(lot, reason);
 
       if (isLotPoisoned(lot.lotSessionId)) {
         return;
@@ -2334,6 +2432,12 @@ export function attachWsServer(httpServer, config, services = {}) {
             code: activeLot.code,
             lotSessionId: activeLot.lotSessionId,
           });
+          sessionLog.logPriceChanged({
+            code: activeLot.code,
+            lotSessionId: activeLot.lotSessionId,
+            source: "manual",
+            value,
+          });
           if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
             await vk.publishPriceUpdate(activeLot).catch((error) => {
               handleVkPublishError(activeLot, error);
@@ -2421,6 +2525,12 @@ export function attachWsServer(httpServer, config, services = {}) {
             code,
             detectionId,
             activeLotCode: activeLot?.code || null,
+          });
+          sessionLog.logManualCodeSubmitted({
+            code,
+            detectionId,
+            activeLotCode: activeLot?.code || null,
+            activeLotSessionId: activeLot?.lotSessionId || null,
           });
 
           // Помечаем как активную детекцию — поздний голосовой final с другим
@@ -2585,6 +2695,12 @@ export function attachWsServer(httpServer, config, services = {}) {
             lotCode: lot.code,
             orderId,
           });
+          logReservationFinalized(lot, event, {
+            reason: "operator_cancelled",
+            previousStatus,
+            quantityReleased: released,
+            alreadyGone: Boolean(result?.alreadyGone),
+          });
           emitState();
           return;
         }
@@ -2721,6 +2837,12 @@ export function attachWsServer(httpServer, config, services = {}) {
             positionId: appendResult?.positionId || null,
             quantityAdded: quantityToAdd,
           });
+          sessionLog.logReservationQuantityAppended(buildReservationDiagnosticPayload(lot, appendedEvent, {
+            orderId,
+            positionId: appendResult?.positionId || null,
+            quantityAdded: quantityToAdd,
+          }));
+          logReservationFinalized(lot, appendedEvent, { appended: true, source: "voice_quantity_confirmed" });
           emitState();
           return;
         }

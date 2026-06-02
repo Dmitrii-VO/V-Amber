@@ -70,6 +70,8 @@ change.
   modes.
 - [[logging-and-diagnostics]] — JSON logs, Markdown session logs, JSONL state,
   diagnostic bundle, and install ID.
+- [[analytics-tracking-plan]] — Measurement contract for operator workflow,
+  conversion, and reliability analytics.
 - [[service-scripts]] — One-off diagnostic and recovery scripts.
 - [[reservation-digests]] — VK DM summaries for open live-commerce reservations.
 

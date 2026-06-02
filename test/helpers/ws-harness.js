@@ -144,6 +144,8 @@ function createSessionLogMock() {
     logWaitlistPromoted: noop,
     logVkComment: noop,
     logReservation: noop,
+    logReservationDetected: noop,
+    logReservationFinalized: noop,
     logOrphanWaitlist: noop,
     logWaitlistMigratedToWishlist: noop,
     logDiscount: noop,
@@ -151,6 +153,10 @@ function createSessionLogMock() {
     logSessionStart: noop,
     logTranscriptFinal: noop,
     logDiscountSkipped: noop,
+    logPriceChanged: noop,
+    logManualCodeSubmitted: noop,
+    logLotClosed: noop,
+    logReservationQuantityAppended: noop,
     logSessionEnd: noop,
     flush: async () => {},
   };
@@ -165,6 +171,7 @@ export async function startHarness({
   vk: vkOverride,
   wishlistStore: wishlistStoreOverride,
   config: configOverride = {},
+  createSessionLog: createSessionLogOverride,
 } = {}) {
   __resetIdCountersForTests();
 
@@ -194,7 +201,7 @@ export async function startHarness({
     productCodeCache,
     wishlistStore,
     createSpeechKitSession,
-    createSessionLog: createSessionLogMock,
+    createSessionLog: createSessionLogOverride || createSessionLogMock,
     saveActiveState: () => {},
     clearActiveState: async () => {},
     packageVersion: "test",

@@ -120,6 +120,7 @@ async function collectLogFiles() {
 }
 
 export async function listBundleFiles() {
+  await logger.flush?.();
   const files = await collectLogFiles();
   return files.map((f) => ({
     name: f.archiveName,
@@ -144,6 +145,7 @@ export async function buildLogBundle({
   wishlistSubmissions = null,
   settingsStore = null,
 } = {}) {
+  await logger.flush?.();
   const files = await collectLogFiles();
   const [installId, version] = await Promise.all([getInstallId(), readPackageVersion()]);
 
