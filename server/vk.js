@@ -168,23 +168,23 @@ export function createVkPublisher(config) {
   const userToken = config?.userToken || "";
   const groupToken = config?.groupToken || "";
   const accessToken = config?.accessToken || "";
-  // Этап 5: токен, под которым публикуем комментарии и грузим фото к
-  // live-видео. Должен принадлежать сообществу (Amberry), иначе reply-
-  // комментарии пойдут от user identity оператора. Допускаем оба имени —
-  // VK_GROUP_TOKEN или VK_ACCESS_TOKEN. userToken оставляем как
-  // back-compat fallback для старых конфигов.
-  const commentToken = groupToken || accessToken || userToken;
-  // Токен для read-методов, которые VK не принимает от имени сообщества
-  // (например video.get → error_code 5 "invalid token type"). Для таких
-  // вызовов нужен user-токен; commentToken оставляем fallback'ом на случай
-  // конфигов без VK_USER_TOKEN.
-  const readToken = userToken || commentToken;
+  // Токен для всех video.* методов: чтение комментариев (video.getComments),
+  // публикация карточек/цены/брони (video.createComment), валидация ссылки
+  // (video.get) и загрузка фото к комментарию. VK НЕ разрешает эти методы
+  // под токеном сообщества — отвечает error_code 27 "Group authorization
+  // failed: method is unavailable with group auth" (а video.get — ещё и
+  // error_code 5 "invalid token type"). Поэтому здесь нужен user-токен;
+  // group/access оставляем лишь как fallback для legacy single-token конфигов.
+  // Идея «Этапа 5» постить комментарии от имени группы технически
+  // невыполнима — VK видео-комментарии под community-токеном не принимает.
+  // Групповой токен остаётся только для messages.* (DM сообщества).
+  const videoToken = userToken || groupToken || accessToken;
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
   let liveOwnerId = normalizeVkOwnerId(config?.liveOwnerId || liveVideo.ownerId);
   let liveVideoId = normalizeVkVideoId(config?.liveVideoId || liveVideo.videoId);
-  const isEnabled = Boolean(commentToken);
+  const isEnabled = Boolean(videoToken);
   const minApiIntervalMs = parsePositiveInt(config?.apiMinIntervalMs, 1100);
   const rateLimitBackoffMs = parsePositiveInt(config?.apiRateLimitBackoffMs, 1500);
   // Адаптивный backoff: при каждой ошибке 6 удваиваем «штраф» к интервалу,
@@ -259,7 +259,7 @@ export function createVkPublisher(config) {
     const groupId = String(config?.groupId || "").replace(/^-/, "");
     const uploadServer = await callVkApi("photos.getWallUploadServer", {
       group_id: groupId || undefined,
-    }, commentToken);
+    }, videoToken);
 
     const formData = new FormData();
     formData.set("photo", new Blob([photo.buffer], { type: photo.contentType }), photo.filename);
@@ -279,7 +279,7 @@ export function createVkPublisher(config) {
       photo: uploadPayload.photo,
       server: String(uploadPayload.server),
       hash: uploadPayload.hash,
-    }, commentToken);
+    }, videoToken);
 
     const photoItem = Array.isArray(savedPhoto) ? savedPhoto[0] : null;
     if (!photoItem?.owner_id || !photoItem?.id) {
@@ -300,7 +300,7 @@ export function createVkPublisher(config) {
       count: Math.min(Math.max(count, 1), 100),
       extended: 1,
       sort: "desc",
-    }, commentToken);
+    }, videoToken);
 
     return {
       items: response?.items || [],
@@ -422,7 +422,7 @@ export function createVkPublisher(config) {
           videoId: liveVideoId,
           message,
           attachments,
-        }), commentToken);
+        }), videoToken);
       }, meta);
     },
     async publishLotClosed(activeLot) {
@@ -448,7 +448,7 @@ export function createVkPublisher(config) {
           ownerId: liveOwnerId,
           videoId: liveVideoId,
           message,
-        }), commentToken),
+        }), videoToken),
         {
           kind: "lot_closed",
           code: activeLot.code,
@@ -480,7 +480,7 @@ export function createVkPublisher(config) {
           videoId: liveVideoId,
           message,
           replyToComment: commentId,
-        }), commentToken),
+        }), videoToken),
         {
           kind: "reservation_reply",
           commentId,
@@ -519,7 +519,7 @@ export function createVkPublisher(config) {
           ownerId: liveOwnerId,
           videoId: liveVideoId,
           message,
-        }), commentToken),
+        }), videoToken),
         {
           kind: "discount_update",
           code: activeLot.code,
@@ -554,7 +554,7 @@ export function createVkPublisher(config) {
           ownerId: liveOwnerId,
           videoId: liveVideoId,
           message,
-        }), commentToken),
+        }), videoToken),
         {
           kind: "price_update",
           code: activeLot.code,
@@ -640,14 +640,13 @@ export function createVkPublisher(config) {
 
       try {
         // video.get — read-метод, который VK отклоняет для community-токенов
-        // (error_code 5 "invalid token type"). Поэтому валидацию делаем
-        // readToken'ом (user-токен с fallback на commentToken). Публикация
-        // комментариев ниже по-прежнему идёт под commentToken от имени группы.
+        // (error_code 5 "invalid token type"), как и все остальные video.*.
+        // Используем videoToken (user-токен с fallback).
         const response = await callVkApi("video.get", {
           owner_id: ownerId,
           videos: `${ownerId}_${videoId}`,
           extended: 1,
-        }, readToken);
+        }, videoToken);
         const video = response?.items?.[0];
         if (!video) {
           return {

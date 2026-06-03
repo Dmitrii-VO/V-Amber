@@ -32,17 +32,37 @@ lot cards, price updates, reservation replies, and wishlist activity.
 
 ## VK identity for service comments
 
-Stage 5 (chosen 2026-05-31): all `video.createComment` writes for lot
-cards, lot-closed, price/discount updates, and reservation replies, as
-well as `photos.getWallUploadServer` / `photos.saveWallPhoto` uploads,
-are routed through a `commentToken` derived as
-`VK_GROUP_TOKEN || VK_ACCESS_TOKEN || VK_USER_TOKEN`. The first two are
-community access tokens — when either is present, replies appear from
-the official Amberry group page, not from the operator's user account.
-`VK_USER_TOKEN` stays as a back-compat fallback for legacy single-token
-setups. DM-paths (`messages.send`,
-`messages.isMessagesFromGroupAllowed`) still require an explicit
-`VK_GROUP_TOKEN` because community DMs need community-scoped tokens.
+**All `video.*` methods require a user token, not a community token.**
+VK rejects `video.getComments`, `video.createComment` and `video.get`
+under a group/community token with `error_code 27` ("Group authorization
+failed: method is unavailable with group auth"; `video.get` also returns
+`error_code 5` "invalid token type"). So every video-comment path — lot
+cards, lot-closed, price/discount updates, reservation replies, the
+`photos.getWallUploadServer` / `photos.saveWallPhoto` uploads attached to
+them, comment polling, and live-URL validation — is routed through a
+`videoToken` derived as `VK_USER_TOKEN || VK_GROUP_TOKEN ||
+VK_ACCESS_TOKEN`. The group/access fallbacks exist only for legacy
+single-token configs. Service comments therefore appear from the
+operator's user account; posting live-video comments **from the group is
+not possible** through the VK API.
+
+DM-paths (`messages.send`, `messages.isMessagesFromGroupAllowed`) still
+require an explicit `VK_GROUP_TOKEN` because community DMs need
+community-scoped tokens — that is the only place the group token is used.
+
+### History / regression (2026-06)
+
+The earlier "Stage 5" attempt (2026-05-31, commit `8a33a6d`) routed video
+comments through a community-first `commentToken`
+(`VK_GROUP_TOKEN || ...`) to make replies appear from the Amberry group
+page. That intent is unattainable at the VK API level. Once a
+`VK_GROUP_TOKEN` was added to `.env` (needed for DMs), every video.*
+call started failing with `error_code 27`: comment polling died
+(`comment_poll_failed`, no reservations ingested) and no lot cards
+posted. The 30 May session — which had no group token, so the calls fell
+back to the user token — was the last that worked (28 successful
+publishes, 0 errors). The fix above restores that user-token behavior
+while keeping the group token for DMs.
 
 ## Runtime files
 
