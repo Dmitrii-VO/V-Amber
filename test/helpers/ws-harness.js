@@ -35,6 +35,9 @@ export function createVkMock(overrides = {}) {
   };
   const vk = {
     isEnabled: true,
+    selfUserId: overrides.selfUserId ?? 0,
+    getSelfUserId: wrap("getSelfUserId", overrides.getSelfUserId
+      || (async () => vk.selfUserId)),
     publishLotCard: wrap("publishLotCard", overrides.publishLotCard
       || (async () => ({ comment_id: nextCommentId++ }))),
     publishLotClosed: wrap("publishLotClosed", overrides.publishLotClosed || (async () => {})),

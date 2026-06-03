@@ -10,7 +10,18 @@ lot cards, price updates, reservation replies, and wishlist activity.
 - Operator feedback prefers private or less noisy wishlist confirmations.
 - Lot-card comments should include price immediately when the operator speaks
   code and price together.
-- Comments from the own VK group must be ignored for reservation matching.
+- Comments authored by the bot's own account are ignored by the poller
+  (`server/ws-server.js`, filter `comment.from_id === selfUserId`). The id is
+  resolved once via `vk.getSelfUserId()` (`users.get` under the user token, or
+  `VK_SELF_USER_ID` env override). Without this the bot re-ingested its own
+  «бронь подтверждена (код …)» reply as a fresh reservation from itself — see
+  the 2026-06-03 22:33 session, account «Amber Standard» (id 816076245) booked
+  every lot against itself, producing bogus `out_of_stock` and phantom wishlist
+  entries (and, at stock ≥2, would have created a phantom MoySklad order).
+- Published service comments do NOT include the internal `lotSessionId:` line
+  (it is operator-facing noise; nothing parses it back from chat). The lot card
+  also omits the price line entirely when price is 0 — the operator names the
+  price by voice and `publishPriceUpdate` posts it, avoiding a «Цена: 0 ₽» card.
 - Reservation intent is parsed by `server/reservation-parser.js`; the accepted
   vocabulary now extends well beyond `бронь <код>` (bare codes, `+<код>`,
   `беру/возьму/хочу/держи/+`, short `бр/брн/брнь`). See

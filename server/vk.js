@@ -77,12 +77,17 @@ function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
   lines.push(`Код товара: ${activeLot.code}`);
 
   if (product) {
+    // Цену печатаем, только когда она известна (>0). При остатке salePrice=0
+    // в МойСкладе оператор называет цену голосом, и она прилетит отдельной
+    // публикацией publishPriceUpdate — чтобы в чат не уходила «Цена: 0 ₽».
     const price = getLotPrice(activeLot);
-    if (discountAmount > 0) {
-      const effectivePrice = price - discountAmount;
-      lines.push(`Цена: ${formatPrice(effectivePrice)} (скидка −${formatPrice(discountAmount)})`);
-    } else {
-      lines.push(`Цена: ${formatPrice(price)}`);
+    if (price > 0) {
+      if (discountAmount > 0) {
+        const effectivePrice = price - discountAmount;
+        lines.push(`Цена: ${formatPrice(effectivePrice)} (скидка −${formatPrice(discountAmount)})`);
+      } else {
+        lines.push(`Цена: ${formatPrice(price)}`);
+      }
     }
     lines.push(`Доступный остаток: ${formatStock(product.availableStock)} шт`);
 
@@ -90,8 +95,6 @@ function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
       lines.push(`Категория: ${product.pathName}`);
     }
   }
-
-  lines.push(`lotSessionId: ${activeLot.lotSessionId}`);
 
   if (placeholderImageUrl && !activeLot?.product?.hasPhoto) {
     lines.push(`Фото: ${placeholderImageUrl}`);
@@ -179,6 +182,12 @@ export function createVkPublisher(config) {
   // невыполнима — VK видео-комментарии под community-токеном не принимает.
   // Групповой токен остаётся только для messages.* (DM сообщества).
   const videoToken = userToken || groupToken || accessToken;
+  // VK user id аккаунта, под которым бот публикует комментарии. Нужен, чтобы
+  // опрос комментариев игнорировал собственные сообщения бота (карточки,
+  // обновления цены, подтверждения броней) — иначе бот переисследует свой же
+  // ответ «бронь подтверждена (код …)» как новую бронь от своего же имени.
+  // Берём из env (VK_SELF_USER_ID) либо лениво через users.get.
+  let resolvedSelfUserId = parsePositiveInt(config?.selfUserId, 0) || 0;
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
@@ -358,6 +367,28 @@ export function createVkPublisher(config) {
   return {
     isEnabled,
     dmEnabled: Boolean(groupToken),
+    // Возвращает (и кэширует) VK user id собственного аккаунта бота. Если
+    // токена нет или users.get упал — возвращает 0; вызывающий код тогда
+    // просто не фильтрует (поведение как раньше).
+    async getSelfUserId() {
+      if (resolvedSelfUserId) {
+        return resolvedSelfUserId;
+      }
+      if (!videoToken) {
+        return 0;
+      }
+      try {
+        const users = await callVkApi("users.get", {}, videoToken);
+        const id = Number(Array.isArray(users) ? users[0]?.id : users?.id);
+        if (Number.isFinite(id) && id > 0) {
+          resolvedSelfUserId = id;
+          logger.info("vk", "self_user_id_resolved", { selfUserId: id });
+        }
+      } catch (error) {
+        logger.warn("vk", "self_user_id_lookup_failed", { error });
+      }
+      return resolvedSelfUserId;
+    },
     buildLotCardMessage(activeLot) {
       return buildLotCardMessage(activeLot, placeholderImageUrl);
     },
@@ -440,7 +471,6 @@ export function createVkPublisher(config) {
       const message = [
         "Лот закрыт.",
         `Код товара: ${activeLot.code}`,
-        `lotSessionId: ${activeLot.lotSessionId}`,
       ].join("\n");
 
       return sendWithRetry(
@@ -511,7 +541,6 @@ export function createVkPublisher(config) {
         `Обновлённая цена: ${formatPrice(effectivePrice)}`,
         `Скидка: −${formatPrice(discountAmount)}`,
         `Код товара: ${activeLot.code}`,
-        `lotSessionId: ${activeLot.lotSessionId}`,
       ].join("\n");
 
       return sendWithRetry(
@@ -546,7 +575,6 @@ export function createVkPublisher(config) {
       const message = [
         `Цена: ${formatPrice(price)}`,
         `Код товара: ${activeLot.code}`,
-        `lotSessionId: ${activeLot.lotSessionId}`,
       ].join("\n");
 
       return sendWithRetry(
@@ -701,6 +729,7 @@ export function resolveVkConfig(env) {
   return {
     userToken: env.VK_USER_TOKEN?.trim() || "",
     groupToken: env.VK_GROUP_TOKEN?.trim() || "",
+    selfUserId: env.VK_SELF_USER_ID?.trim() || "",
     accessToken: env.VK_ACCESS_TOKEN?.trim() || "",
     groupId: env.VK_GROUP_ID?.trim() || "",
     apiVersion: env.VK_API_VERSION?.trim() || "5.199",

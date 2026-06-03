@@ -1330,6 +1330,10 @@ export function attachWsServer(httpServer, config, services = {}) {
       void (async function pollLoop() {
         let initialized = false;
         let consecutiveFailures = 0;
+        // VK user id самого бота: его комментарии (карточки, обновления цены,
+        // подтверждения броней) нельзя переисследовать как чужие брони. 0 =
+        // не удалось определить → фильтр выключен (поведение как раньше).
+        const selfUserId = (await vk.getSelfUserId?.()) || 0;
 
         while (generation === commentPollingGeneration && openLotsBySessionId.size > 0) {
           try {
@@ -1362,6 +1366,14 @@ export function attachWsServer(httpServer, config, services = {}) {
             for (const comment of newItems) {
               commentPollingLastCommentId = Math.max(commentPollingLastCommentId, comment.id);
               addBoundedId(commentPollingSeenIds, comment.id);
+
+              // Игнорируем собственные комментарии бота: иначе ответ «бронь
+              // подтверждена (код …)» переисследуется как новая бронь от имени
+              // бота → ложный out_of_stock, мусор в wishlist, а при остатке ≥2
+              // — фантомный заказ в МойСкладе на аккаунт бота.
+              if (selfUserId && comment.from_id === selfUserId) {
+                continue;
+              }
 
               const target = findCommentTarget(comment.text);
               if (!target) {
