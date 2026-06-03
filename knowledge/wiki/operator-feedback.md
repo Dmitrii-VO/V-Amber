@@ -31,8 +31,11 @@ this page is the maintained wiki version.
   the operator repeats the same code. See [[reservation-flow#Same-code
   re-detection]].
 - If MoySklad stock is unknown, reservation can still pass.
-- VK comments from the project's own group must be ignored by reservation
-  handling so service comments are not processed as buyer actions.
+- ~~VK comments from the project's own group must be ignored by reservation
+  handling so service comments are not processed as buyer actions.~~ Resolved
+  2026-06-04: the poller skips comments where `from_id === vk.getSelfUserId()`
+  (`users.get` / `VK_SELF_USER_ID`). Before this, the bot re-ingested its own
+  «бронь подтверждена (код …)» reply as a self-reservation. See [[vk-comments]].
 
 ## Operator-audit pass (2026-05-29)
 

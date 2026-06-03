@@ -311,3 +311,38 @@ The bundle `INDEX.md` now counts accepted reservations from finalized
 `reserved` / `reserved_appended` statuses instead of early comment detection,
 with a legacy fallback for older `reservation_accepted` records. Updated
 [[logging-and-diagnostics]] and [[testing-guide]].
+
+## [2026-06-04] fix | VK comments live again — token routing reverted, self-ingestion closed
+
+Log review of bundles `…2026-06-03T19-10` and `…19-44` (the эфир stopped
+publishing comments and ingesting reservations).
+
+**Root cause — supersedes the [2026-05-31] Stage 5 decision above.** That stage
+routed `video.*` writes through a community-first `commentToken`. VK does not
+allow video methods under a community token: once `VK_GROUP_TOKEN` was set (for
+DMs) every `video.getComments` / `video.createComment` / `video.get` failed with
+`error_code 27` ("Group authorization failed: method is unavailable with group
+auth"). Comment polling and lot-card publishing died from 2026-06-02 on. Posting
+service comments "from the community page" is simply not attainable for live
+video — the user-token identity (account "Amber Standard") is the only option.
+Fix: derive `videoToken = VK_USER_TOKEN || VK_GROUP_TOKEN || VK_ACCESS_TOKEN`
+and use it for all `video.*` calls; the group token now serves only `messages.*`
+(community DMs). Restores the pre-Stage-5 behaviour that last worked 2026-05-30.
+
+**Self-comment re-ingestion (data-integrity bug).** The poller processed
+comments authored by the bot's own VK account (id 816076245), so its reply
+«… бронь подтверждена (код …)» was re-read as a fresh reservation from the bot
+itself — bogus `out_of_stock`, phantom wishlist entries, and (at stock ≥2) would
+have created a phantom MoySklad order on the bot account. Fix: resolve the bot's
+own id via `vk.getSelfUserId()` (`users.get`, or `VK_SELF_USER_ID` override) and
+skip comments where `from_id === selfUserId`. New `test/ws-server.self-comment.test.js`.
+
+**Chat hygiene.** Dropped the internal `lotSessionId:` line from every published
+comment (nothing parses it back); the lot card omits the price line when price
+is 0 (operator names it by voice → `publishPriceUpdate` posts it), so no more
+«Цена: 0 ₽» card.
+
+**Operator UX.** Added a persistent voice cancel-command format hint to the
+«Брони» panel. The parser stays strict (verb + «лот»/«бронь» + code, name
+required) — deliberately not loosened on the money path. Shipped as v0.1.48/49.
+Updated [[vk-comments]] and [[vk-integration]].

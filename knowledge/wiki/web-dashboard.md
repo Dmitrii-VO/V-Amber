@@ -34,6 +34,11 @@ stream.
   slot. The reservation row carries `lotSessionId`/code so cancellation works
   for old open lots, not only the current active lot. Blocked under safe mode. See [[http-api]] and
   [[deferred-operator-features]] #16.
+- The «Брони» panel shows a persistent voice cancel-command format hint
+  («Имя Фамилия отмена лота 03204»), reminding the operator that the name is
+  required and «лот»/«бронь» must precede the code. The parser is strict on this
+  (money path), so the hint reduces fumbled on-air cancellations. See
+  [[vk-comments]] and [[operator-feedback]] W3.
 
 The microphone flow uses Web Audio API and `web-ui/audio-processor.js` to
 capture PCM, downsample to 16 kHz, and send frames over WebSocket.
