@@ -365,6 +365,8 @@ a { color: inherit; }
 .res-name { font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .res-detail { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); }
 .res-empty { padding: var(--gap-6) var(--gap-5); text-align: center; color: var(--text-dim); font-size: var(--fs-sm); }
+.res-cancel-hint { padding: var(--gap-2) var(--gap-5); font-size: var(--fs-xs); line-height: 1.4; border-bottom: 1px solid var(--border); }
+.res-cancel-hint b { color: var(--text-muted); font-weight: 600; }
 .res-cancel {
   justify-self: end;
   border: 1px solid var(--border); background: transparent;
