@@ -35,6 +35,20 @@ test("detectArticle returns confirmed for numeric suffix", async () => {
   assert.equal(result.chosen?.code, "12345");
 });
 
+test("detectArticle opens a lot from the short «код» trigger and full «код товара»", async () => {
+  const config = { triggers: ["код товара", "артикул", "код"], minLength: 1, maxLength: 10 };
+
+  const short = await detectArticle("код 01234", config);
+  assert.equal(short.status, "confirmed");
+  assert.equal(short.chosen?.code, "01234");
+
+  // Full phrase must still resolve to the same code (no ambiguity from the
+  // overlapping «код» trigger — «товара» is stripped as a filler).
+  const full = await detectArticle("код товара 01234", config);
+  assert.equal(full.status, "confirmed");
+  assert.equal(full.chosen?.code, "01234");
+});
+
 test("detectArticle works after multiple invocations (cached global regex lastIndex)", async () => {
   // The capture regex is /g and cached. If lastIndex isn't reset between calls,
   // the second call on the same input would miss the match and return no_match.

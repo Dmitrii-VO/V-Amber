@@ -23,9 +23,14 @@ function parseArticleTriggers(value) {
     .filter(Boolean);
   const triggers = new Set(configured);
 
-  if (triggers.has("код товара") || triggers.has("артикул")) {
+  // Если используются стандартные триггеры — гарантируем все формы, включая
+  // сокращённые «код» и «артикул». Так «код 01234» (без «товара») тоже
+  // открывает лот. «код» матчится как отдельное слово (regex с границами),
+  // а «товара» в «код товара 01234» отрезается как filler в article-extractor.
+  if (triggers.has("код товара") || triggers.has("артикул") || triggers.has("код")) {
     triggers.add("код товара");
     triggers.add("артикул");
+    triggers.add("код");
   }
 
   return [...triggers];

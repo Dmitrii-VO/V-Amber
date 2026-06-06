@@ -44,7 +44,11 @@ MoySklad:
 
 Article parsing:
 
-- `VOICE_ARTICLE_TRIGGERS`
+- `VOICE_ARTICLE_TRIGGERS` — comma-separated phrases that introduce a lot code.
+  Default is `код товара`; when the standard triggers are used,
+  `parseArticleTriggers` (`server/config.js`) also auto-adds `артикул` **and the
+  short `код`**, so «код товара 01234», «артикул 01234» and «код 01234» all open
+  the lot out of the box (the short `код` was added 2026-06-06).
 - `VOICE_ARTICLE_MIN_LENGTH`
 - `VOICE_ARTICLE_MAX_LENGTH`
 
