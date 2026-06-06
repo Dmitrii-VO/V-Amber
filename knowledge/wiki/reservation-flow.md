@@ -32,6 +32,28 @@ ignored — only digits-only or keyword-bearing comments reserve. Tests live
 in `test/reservation-parser.test.js` — extend them when adding a new
 variant.
 
+## Code matching and operator escalation
+
+`findCommentTarget` (`server/ws-server.js`) maps a buyer comment to exactly one
+open lot:
+
+1. **Exact pass** over all open lots — an exact code match always wins.
+2. **Zero-tolerant pass** via `codesEquivalent`: codes are compared after
+   stripping **leading** zeros, so both too-few and too-many leading zeros match
+   (`0588`↔`00588`, `000296`↔`00296`). Significant digits must match exactly —
+   internal-zero edits (`012005` vs `01205`) and digit typos do **not** match.
+   A reservation is made **only when exactly one** open lot matches.
+
+When a comment has a reservation keyword + code but maps to **zero or more than
+one** open lot, the system does **not** auto-reserve and does **not** post a
+public VK comment. Instead it escalates to the operator console: a
+`reservationAttention` WS message (`reason: "no_open_lot" | "ambiguous"`, with
+`viewerName`, `code`, `candidateCodes`, `text`) renders an amber "Брони требуют
+внимания" banner (`web-ui/app.js`, dismissible rows). The forensic
+`reservation_no_open_lot` warn log is still emitted for the diagnostic bundle.
+This is the channel for typo/ambiguous bookings the operator must clarify
+(«повтори бронь, Ирина»). Tests: `test/ws-server.manual-code.test.js`.
+
 ## Active lot state
 
 `server/ws-server.js` owns the active lot, the open-lot registry, accepted
@@ -92,11 +114,44 @@ creates or appends a customer order in MoySklad. Safe mode wraps external write
 methods so dry runs still log detected events without creating real external
 state.
 
-Customer-order merging is scoped to the broadcast day. The first reservation
-from a buyer on a calendar day creates a new MoySklad customer order with a
-daily marker such as `#Эфир 2026-05-24`. Later reservations from the same buyer
-on the same day append only to an order with the same marker. Older open orders
-without that marker, including unpaid `Новый` orders, must stay separate.
+### Customer-order merging (day-agnostic, since 2026-06-06)
+
+A buyer's reservations merge into **one** MoySklad customer order **regardless
+of broadcast day** (operator decision, log review 2026-06-05). The first
+reservation creates an order (still stamped with a `#Эфир 2026-06-05` marker for
+audit); every later reservation by the same buyer appends to their latest
+**non-closed** order.
+
+- **Open (append):** `Новый`, `Собран`, `Выставлен счет`, `Оплачен`, `Копит`,
+  `Заказ проведен`.
+- **Closed (→ new order):** `Запакован`, `Отправлен`, `Доставлен`, `Отменён`.
+- No age limit. `Копит` is the buyer's explicit "tab" status.
+
+Implementation:
+
+- `moysklad.findLatestOpenCustomerOrder` filters by `agent` and excludes the
+  closed states via repeated `state!=<href>` filters (MoySklad combines them
+  with AND), `order=moment,desc&limit=1`. Closed-state hrefs are resolved once
+  in `resolveDefaults` from `entity/customerorder/metadata` into
+  `defaults.closedStateHrefs`; `CLOSED_ORDER_STATE_NAMES` is the name set. If the
+  closed states can't be resolved, it falls back to `Новый`-only (old behavior).
+- `ws-server.js` `customerOrderKey` is the bare `viewerId` (the date was
+  dropped). Cross-session lookup uses `findOpenCustomerOrderForCounterparty`.
+- **Operator contract:** to start a buyer's *new* order, move the current one to
+  `Запакован`+ ; otherwise all new reservations keep appending.
+
+**Stale-cache guard.** The in-memory `customerOrdersByViewerId` is only set when
+the bot *creates* an order, and it now lives for the whole session (no daily
+reset). Before appending to a cached order, `ws-server.js` re-checks it against
+MoySklad via `moysklad.isCustomerOrderAppendable(orderId)` — a direct read of
+that order's current state. If the operator closed it mid-stream (or the check
+fails), the cache entry is dropped and the reservation re-resolves through the
+lookup, creating a new order instead of appending to a closed one. Logged as
+`cached_order_closed_discarded` / `cached_order_recheck_failed`.
+
+There is **no** `Отгружен` status in this MoySklad account; the 10 live states
+are `Новый · Собран · Выставлен счет · Оплачен · Копит · Запакован · Отправлен ·
+Доставлен · Отменен · Заказ проведен`.
 
 ## Same-code re-detection
 
@@ -146,8 +201,8 @@ as `customerOrder.positionId`.
 
 On a confirmed delete the handler decrements `committedReservationCount`
 by `event.quantity`, removes the viewer from `acceptedUserIds` (so the
-same buyer can reserve again), drops the `customerOrdersByViewerId` day
-entry, and sets `event.status = "cancelled"`. The freed slot is available
+same buyer can reserve again), drops the `customerOrdersByViewerId` entry
+(keyed by `viewerId`), and sets `event.status = "cancelled"`. The freed slot is available
 to the next buyer immediately. Safe mode blocks the delete: the handler
 re-checks `isSafeMode()` and replies with a warning without touching
 state, and `removePositionFromOrder` is also in the `wrapWithSafeMode`

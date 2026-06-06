@@ -82,3 +82,7 @@ change.
   migration.
 - [[../raw/log-review-2026-05-24-18-45|log-review-2026-05-24-18-45]] —
   Source summary from the 2026-05-24 operator test session.
+- [[../raw/log-review-2026-06-05-plan|log-review-2026-06-05-plan]] — Findings and
+  implementation plan from the 2026-06-05 broadcast log review (VK photo
+  fallback, adaptive poll + queue priority, day-agnostic order merge, reservation
+  escalation, discount tests). Implemented 2026-06-06.

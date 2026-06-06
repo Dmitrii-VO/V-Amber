@@ -40,6 +40,35 @@ lot cards, price updates, reservation replies, and wishlist activity.
   service reply confirms. The code is passed in from the call site
   (`notifyReservationStatus`) via `getReservationReplyMessage(event,
   { code })`.
+- **Lot card never dies on a broken photo (since 2026-06-06).**
+  `publishLotCard` uploads the photo **separately** from posting the comment.
+  If the upload fails, or VK rejects the attachment with `error_code 100`
+  («photo is undefined»), the card is re-published **text-only** with the
+  placeholder line (`buildLotCardMessage(..., { forcePlaceholder: true })`).
+  Broken-photo articles surface via `lot_card_photo_upload_failed` /
+  `lot_card_photo_rejected_retry_text_only` warn logs (the 5 June 2026 bundle
+  flagged 00136, 00037, 03018, 03232). Before this, an invalid photo was a fatal
+  VK 100 with no retry and buyers saw no card at all.
+- **Unmatched/ambiguous reservations escalate to the operator, not to chat.**
+  A `бронь`+code comment that maps to zero or >1 open lots produces a
+  `reservationAttention` WS message (amber console banner), never a public VK
+  reply. See [[reservation-flow#Code matching and operator escalation]].
+
+## Comment polling cadence and queue priority
+
+- **Adaptive poll interval (since 2026-06-06).** The poller in
+  `server/ws-server.js` runs a single global `video.getComments(100)` per cycle
+  (not per-lot). The wait between cycles is now adaptive: ~1.5 s while new
+  comments are arriving, ramping to a max of 8 s when the chat is quiet
+  (`ACTIVE_POLL_MS` / `IDLE_POLL_STEP_MS` / `IDLE_POLL_MAX_MS`). It replaced a
+  fixed 2 s loop. Failure backoff is unchanged (2→4→…→32 s).
+- **Two-lane VK queue (publish priority).** `server/vk.js` serializes all VK API
+  calls under one rate limiter (`minApiIntervalMs`, adaptive `backoffMultiplier`
+  up to ×8). The queue now has two lanes: publishing (cards, price, reservation
+  replies, lot-closed, photo upload) is **high** priority and preempts the
+  **low**-priority `video.getComments` poll. A polling burst therefore no longer
+  delays a buyer's reservation reply. Routing is by method name
+  (`vkCallPriority`: only `video.getComments` is low).
 
 ## VK identity for service comments
 

@@ -16,6 +16,17 @@ replies, discount notifications, and lot close messages.
 The VK client includes rate-limit protection for `VK API 6`. The live video URL
 must be valid and must not parse to zero IDs.
 
+### Queue priority and poll cadence (since 2026-06-06)
+
+`server/vk.js` runs all VK calls through one rate-limited queue (single
+`minApiIntervalMs` gate, adaptive `backoffMultiplier` up to ×8 on `VK API 6`).
+The queue has **two lanes**: publishing (cards/price/replies/lot-closed/photo
+upload) is high priority and preempts the low-priority `video.getComments` poll,
+so a polling burst never delays a reservation reply. The comment poll cadence in
+`server/ws-server.js` is adaptive — ~1.5 s active, ramping to 8 s when quiet
+(was a fixed 2 s). Lot cards also degrade to text-only when a photo upload fails
+or VK returns `error_code 100`. Details in [[vk-comments]].
+
 ## Token routing (critical)
 
 All `video.*` methods — `video.getComments`, `video.createComment`,
