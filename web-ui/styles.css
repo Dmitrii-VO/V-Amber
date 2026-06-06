@@ -770,8 +770,26 @@ a { color: inherit; }
   background: rgba(245, 165, 36, 0.1);
   border-color: var(--amber-border);
 }
+.info-banner--attention {
+  background: rgba(245, 165, 36, 0.1);
+  border-color: var(--amber-border);
+}
 .info-banner-body { display: flex; flex-direction: column; gap: 2px; }
 .info-banner-actions { display: flex; align-items: center; gap: var(--gap-2); }
+
+.attention-list { display: flex; flex-direction: column; gap: 6px; }
+.attention-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--gap-2);
+  padding: 6px 10px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.attention-row__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.attention-row__head { font-size: var(--fs-sm); }
+.attention-row__sub { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attention-row__dismiss { padding: 0 10px; flex: 0 0 auto; }
 
 .toggle--inline { font-size: var(--fs-xs); color: var(--text-dim); }
 

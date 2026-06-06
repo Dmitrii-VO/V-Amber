@@ -67,7 +67,7 @@ test("#16: cancel a reserved_appended buyer deletes only the targeted position",
     cardsByCode: { "03204": CARD_03204 },
     overrides: {
       ensureCounterparty: async () => ({ id: "cp-1" }),
-      findBroadcastCustomerOrderForCounterparty: async () => ({ id: "co-existing", name: "#Эфир" }),
+      findOpenCustomerOrderForCounterparty: async () => ({ id: "co-existing", name: "#Эфир" }),
       appendPositionToCustomerOrder: async () => ({ orderId: "co-existing", positionId: "pos-appended-1" }),
     },
   });

@@ -14,6 +14,20 @@ import {
   buildProductSnapshot,
 } from "./moysklad-helpers.js";
 
+// Статусы заказа клиента, считающиеся «закрытыми» — после них новые брони
+// покупателя уходят в НОВЫЙ заказ, а не дописываются. Имена нормализуются
+// (нижний регистр, ё→е, обрезка пробелов). «Отменён» учитываем тоже.
+const CLOSED_ORDER_STATE_NAMES = new Set([
+  "запакован",
+  "отправлен",
+  "доставлен",
+  "отменен",
+]);
+
+function normalizeStateName(name) {
+  return String(name || "").trim().toLowerCase().replace(/ё/g, "е");
+}
+
 export function createMoySkladClient(config, options = {}) {
   const authHeader = getAuthHeader(config || {});
   const isEnabled = Boolean(config?.baseUrl && authHeader);
@@ -324,27 +338,42 @@ export function createMoySkladClient(config, options = {}) {
         .map((item) => item.name),
     });
 
-    // Резолвим UUID статуса «Новый» один раз: нужен для поиска ранее
-    // созданного заказа клиента, в который можно дописать позицию вместо
-    // создания нового customer order на каждую бронь.
+    // Статусы заказа клиента из метаданных. Нужны для двух вещей:
+    //  1) href статуса «Новый» — под ним создаём заказ;
+    //  2) множество «закрытых» статусов — после них заказ дополнять нельзя
+    //     (новая бронь покупателя → новый заказ). Открыт всё остальное.
+    // Тянем метаданные всегда (даже при заданном customerOrderStateId), иначе
+    // не из чего собрать множество закрытых статусов для объединения заказов
+    // независимо от дня (см. operator-feedback «Log review 2026-06-05»).
+    let states = [];
+    try {
+      const metadata = await requestJson("entity/customerorder/metadata", {});
+      states = Array.isArray(metadata.states) ? metadata.states : [];
+    } catch (error) {
+      logger.warn("moysklad", "customer_order_metadata_resolve_failed", { error });
+    }
+
     if (!defaults.customerOrderStateId) {
-      try {
-        const metadata = await requestJson("entity/customerorder/metadata", {});
-        const states = Array.isArray(metadata.states) ? metadata.states : [];
-        const newState = states.find((item) => /^нов/i.test(String(item?.name || "").trim()))
-          || states[0];
-        defaults.customerOrderStateId = newState?.id || "";
-        defaults.customerOrderStateHref = newState?.meta?.href || "";
-        logger.info("moysklad", "customer_order_state_resolved", {
-          stateId: defaults.customerOrderStateId,
-          stateName: newState?.name || null,
-        });
-      } catch (error) {
-        logger.warn("moysklad", "customer_order_state_resolve_failed", { error });
-      }
+      const newState = states.find((item) => /^нов/i.test(String(item?.name || "").trim()))
+        || states[0];
+      defaults.customerOrderStateId = newState?.id || "";
+      defaults.customerOrderStateHref = newState?.meta?.href || "";
+      logger.info("moysklad", "customer_order_state_resolved", {
+        stateId: defaults.customerOrderStateId,
+        stateName: newState?.name || null,
+      });
     } else {
       defaults.customerOrderStateHref = `${config.baseUrl.replace(/\/$/, "")}/entity/customerorder/metadata/states/${defaults.customerOrderStateId}`;
     }
+
+    // Закрытые статусы по решению оператора: «Запакован», «Отправлен»,
+    // «Доставлен», «Отменён». В заказ с любым из них новые брони НЕ дописываем.
+    const closedStates = states.filter((item) => CLOSED_ORDER_STATE_NAMES.has(normalizeStateName(item?.name)));
+    defaults.closedStateHrefs = new Set(closedStates.map((item) => item?.meta?.href).filter(Boolean));
+    logger.info("moysklad", "customer_order_closed_states_resolved", {
+      closedCount: defaults.closedStateHrefs.size,
+      closedNames: closedStates.map((item) => item?.name),
+    });
 
     cachedDefaults = defaults;
     return defaults;
@@ -441,6 +470,28 @@ export function createMoySkladClient(config, options = {}) {
     return Boolean(defaults?.customerOrderStateHref && stateHref === defaults.customerOrderStateHref);
   }
 
+  // Открытым (= в сводку/дозапись) считаем заказ, чей статус НЕ в множестве
+  // закрытых (Запакован/Отправлен/Доставлен/Отменён). Это совпадает с логикой
+  // findLatestOpenCustomerOrder: Копит/Оплачен/Собран и т.п. — открыты. Если
+  // закрытые статусы резолвить не удалось — fallback к «только Новый», чтобы
+  // случайно не втянуть отгруженный заказ.
+  function isOpenCustomerOrderState(order, defaults) {
+    const closedHrefs = defaults?.closedStateHrefs instanceof Set ? defaults.closedStateHrefs : null;
+    if (!closedHrefs || closedHrefs.size === 0) {
+      return isNewCustomerOrderState(order, defaults);
+    }
+    const state = order?.state || null;
+    const stateName = String(state?.name || "").trim();
+    if (stateName) {
+      return !CLOSED_ORDER_STATE_NAMES.has(normalizeStateName(stateName));
+    }
+    const stateHref = state?.meta?.href || "";
+    if (!stateHref) {
+      return true; // нет статуса — трактуем как открытый (как «Новый»)
+    }
+    return !closedHrefs.has(stateHref);
+  }
+
   function buildMoySkladCustomerOrderUrl(orderId) {
     return orderId ? `https://online.moysklad.ru/app/#customerorder/edit?id=${orderId}` : "";
   }
@@ -511,22 +562,27 @@ export function createMoySkladClient(config, options = {}) {
     }
 
     const defaults = await resolveDefaults();
-    if (!defaults.customerOrderStateHref) {
-      // Без href статуса «Новый» нельзя надёжно отличить открытые заказы
-      // от завершённых; лучше вернуть null и создать новый заказ, чем
-      // дописать позицию в уже отгружённый.
+    const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
+    const closedHrefs = defaults.closedStateHrefs instanceof Set ? [...defaults.closedStateHrefs] : [];
+
+    let filterParts;
+    if (closedHrefs.length > 0) {
+      // День значения не имеет: берём самый свежий заказ контрагента, чей
+      // статус ещё НЕ закрыт (не «Запакован/Отправлен/Доставлен/Отменён»).
+      // В него и дописываем брони, сколько бы дней ни прошло. `state!=` —
+      // штатный оператор фильтра МойСклада; несколько `!=` объединяются по И.
+      filterParts = [`agent=${agentHref}`, ...closedHrefs.map((href) => `state!=${href}`)];
+    } else if (defaults.customerOrderStateHref) {
+      // Фолбэк (закрытые статусы резолвить не удалось): прежнее поведение —
+      // дописываем только в заказы статуса «Новый».
+      filterParts = [`agent=${agentHref}`, `state=${defaults.customerOrderStateHref}`];
+    } else {
       logger.warn("moysklad", "open_order_lookup_skipped_no_state", { counterpartyId });
       return null;
     }
 
-    const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
-    const filter = [
-      `agent=${agentHref}`,
-      `state=${defaults.customerOrderStateHref}`,
-    ].join(";");
-
     const payload = await requestJson("entity/customerorder", {
-      filter,
+      filter: filterParts.join(";"),
       order: "moment,desc",
       limit: 1,
     }, { source });
@@ -541,6 +597,25 @@ export function createMoySkladClient(config, options = {}) {
       name: row.name,
       counterpartyId,
     };
+  }
+
+  // Перепроверяет статус КОНКРЕТНОГО заказа: можно ли в него ещё дописывать.
+  // Нужна для in-memory кэша заказов (customerOrdersByViewerId) — оператор мог
+  // перевести заказ в закрытый статус прямо во время эфира, и слепой append по
+  // кэшу дописал бы позицию в уже отгружённый/упакованный заказ.
+  async function checkCustomerOrderAppendable(orderId, { source } = {}) {
+    if (!orderId) {
+      return false;
+    }
+    const defaults = await resolveDefaults();
+    const closedHrefs = defaults.closedStateHrefs instanceof Set ? defaults.closedStateHrefs : null;
+    if (!closedHrefs || closedHrefs.size === 0) {
+      // Закрытые статусы резолвить не удалось → не блокируем (поведение как
+      // до объединения заказов независимо от дня).
+      return true;
+    }
+    const order = await requestJson(`entity/customerorder/${orderId}`, { expand: "state" }, { source });
+    return isOpenCustomerOrderState(order, defaults);
   }
 
   async function findLatestBroadcastCustomerOrder(counterpartyId, { broadcastDate, source } = {}) {
@@ -779,6 +854,14 @@ export function createMoySkladClient(config, options = {}) {
         return null;
       }
       return findLatestOpenCustomerOrder(counterpartyId);
+    },
+    // true, если в заказ можно дописать позицию (статус не закрыт). Используется
+    // для перепроверки устаревшего in-memory кэша заказа перед append'ом.
+    async isCustomerOrderAppendable(orderId, { source } = {}) {
+      if (!isEnabled) {
+        return true;
+      }
+      return checkCustomerOrderAppendable(orderId, { source });
     },
     async findBroadcastCustomerOrderForCounterparty(counterpartyId, { broadcastDate, source } = {}) {
       if (!isEnabled) {
@@ -1296,7 +1379,7 @@ export function createMoySkladClient(config, options = {}) {
         for (const order of rows) {
           const description = String(order?.description || "");
           if (!description.includes("#Эфир")) continue;
-          if (!isNewCustomerOrderState(order, defaults)) continue;
+          if (!isOpenCustomerOrderState(order, defaults)) continue;
           if (!order?.id) continue;
 
           let counterparty = order.agent || null;

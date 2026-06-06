@@ -65,7 +65,8 @@ function getLotPrice(activeLot) {
     : salePrice;
 }
 
-function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
+function buildLotCardMessage(activeLot, placeholderImageUrl = "", options = {}) {
+  const { forcePlaceholder = false } = options;
   const product = activeLot?.product;
   const discountAmount = activeLot?.discountAmount || 0;
   const lines = [];
@@ -96,7 +97,7 @@ function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
     }
   }
 
-  if (placeholderImageUrl && !activeLot?.product?.hasPhoto) {
+  if (placeholderImageUrl && (forcePlaceholder || !activeLot?.product?.hasPhoto)) {
     lines.push(`Фото: ${placeholderImageUrl}`);
   }
 
@@ -126,6 +127,14 @@ function buildPhotoAttachment(photo) {
 
 function isVkRateLimitError(error) {
   return error?.vkErrorCode === 6;
+}
+
+// VK 100 «One of the parameters … was missing or invalid» — это как раз
+// «photo is undefined»: само вложение оказалось битым. Текст карточки при
+// этом валиден, поэтому такую ошибку лечим повторной публикацией без фото,
+// а не отказом от карточки.
+function isVkAttachmentError(error) {
+  return error?.vkErrorCode === 100;
 }
 
 // Ошибки, которые не лечатся ретраем: повторный запрос даст то же самое,
@@ -202,48 +211,80 @@ export function createVkPublisher(config) {
   // к норме без ручной настройки.
   const MAX_BACKOFF_MULTIPLIER = 8;
   let backoffMultiplier = 1;
-  let apiQueue = Promise.resolve();
   let nextApiCallAt = 0;
 
-  function enqueueVkApiCall(method, operation) {
-    const run = apiQueue.then(async () => {
-      const waitMs = Math.max(0, nextApiCallAt - Date.now());
-      if (waitMs > 0) {
-        await delay(waitMs);
-      }
+  // Две полосы общей VK-очереди под одним rate-limit'ом. Публикации
+  // (карточка/цена/ответ на бронь/закрытие лота, а также служебные методы)
+  // идут в high-полосу и опережают чтение комментариев (video.getComments)
+  // из low-полосы. Так всплеск опроса не задерживает подтверждение брони
+  // покупателю. Один и тот же `nextApiCallAt` сохраняет общий интервал и
+  // адаптивный backoff — две полосы делят квоту, а не удваивают её.
+  const highQueue = [];
+  const lowQueue = [];
+  let pumping = false;
 
-      try {
-        const result = await operation();
-        // Успех — затухание адаптивного штрафа.
-        if (backoffMultiplier > 1) {
-          backoffMultiplier = 1;
-          logger.info("vk", "api_rate_limit_recovered", { method });
+  async function pumpVkQueue() {
+    if (pumping) {
+      return;
+    }
+    pumping = true;
+    try {
+      while (highQueue.length > 0 || lowQueue.length > 0) {
+        const task = highQueue.length > 0 ? highQueue.shift() : lowQueue.shift();
+
+        const waitMs = Math.max(0, nextApiCallAt - Date.now());
+        if (waitMs > 0) {
+          await delay(waitMs);
         }
-        return result;
-      } catch (error) {
-        if (isVkRateLimitError(error)) {
-          // Внутренний ретрай убран: пусть верхний sendWithRetry решает,
-          // повторять ли. Здесь только наращиваем штраф к следующему вызову,
-          // чтобы не уходить в стену повторно сразу же.
-          const previousMultiplier = backoffMultiplier;
-          backoffMultiplier = Math.min(MAX_BACKOFF_MULTIPLIER, backoffMultiplier * 2);
-          logger.warn("vk", "api_rate_limited", {
-            method,
-            previousMultiplier,
-            nextMultiplier: backoffMultiplier,
-            adaptiveDelayMs: minApiIntervalMs * backoffMultiplier,
-            error,
-          });
+
+        try {
+          const result = await task.operation();
+          // Успех — затухание адаптивного штрафа.
+          if (backoffMultiplier > 1) {
+            backoffMultiplier = 1;
+            logger.info("vk", "api_rate_limit_recovered", { method: task.method });
+          }
+          task.resolve(result);
+        } catch (error) {
+          if (isVkRateLimitError(error)) {
+            // Внутренний ретрай убран: пусть верхний sendWithRetry решает,
+            // повторять ли. Здесь только наращиваем штраф к следующему вызову,
+            // чтобы не уходить в стену повторно сразу же.
+            const previousMultiplier = backoffMultiplier;
+            backoffMultiplier = Math.min(MAX_BACKOFF_MULTIPLIER, backoffMultiplier * 2);
+            logger.warn("vk", "api_rate_limited", {
+              method: task.method,
+              previousMultiplier,
+              nextMultiplier: backoffMultiplier,
+              adaptiveDelayMs: minApiIntervalMs * backoffMultiplier,
+              error,
+            });
+          }
+          task.reject(error);
+        } finally {
+          // При rate-limit прибавляем не minApiIntervalMs, а штрафованный.
+          nextApiCallAt = Date.now() + minApiIntervalMs * backoffMultiplier;
         }
-        throw error;
-      } finally {
-        // При rate-limit прибавляем не minApiIntervalMs, а штрафованный.
-        nextApiCallAt = Date.now() + minApiIntervalMs * backoffMultiplier;
       }
+    } finally {
+      pumping = false;
+    }
+  }
+
+  function enqueueVkApiCall(method, operation, options = {}) {
+    const priority = options.priority || "low";
+    return new Promise((resolve, reject) => {
+      const task = { method, operation, resolve, reject };
+      (priority === "high" ? highQueue : lowQueue).push(task);
+      void pumpVkQueue();
     });
+  }
 
-    apiQueue = run.catch(() => {});
-    return run;
+  // Чтение комментариев — фоновый опрос, ему можно подождать. Всё остальное
+  // (публикации, загрузка фото, разовые users.get/video.get) — высокий
+  // приоритет, чтобы реакция покупателю не стояла в очереди за опросом.
+  function vkCallPriority(method) {
+    return method === "video.getComments" ? "low" : "high";
   }
 
   async function callVkApi(method, params, token = userToken) {
@@ -261,7 +302,7 @@ export function createVkPublisher(config) {
     return enqueueVkApiCall(method, async () => {
       const response = await fetch(url, { method: "POST" });
       return parseVkResponse(response);
-    });
+    }, { priority: vkCallPriority(method) });
   }
 
   async function uploadCommentPhoto(photo) {
@@ -434,7 +475,6 @@ export function createVkPublisher(config) {
         return { ok: false, skipped: true };
       }
 
-      const message = buildLotCardMessage(activeLot, placeholderImageUrl);
       const meta = {
         kind: "lot_card",
         code: activeLot.code,
@@ -443,18 +483,52 @@ export function createVkPublisher(config) {
         videoId: liveVideoId,
       };
 
-      return sendWithRetry(async () => {
-        const attachments = isUsableCommentPhoto(productCard?.photo)
-          ? await uploadCommentPhoto(productCard.photo)
-          : undefined;
+      // 1. Готовим вложение заранее и ОТДЕЛЬНО от публикации. Если загрузка
+      //    фото упала (битый/недоступный файл) — карточка всё равно должна
+      //    выйти, поэтому переходим в текстовый режим, а не валим публикацию.
+      let attachments;
+      let photoBroken = false;
+      if (isUsableCommentPhoto(productCard?.photo)) {
+        try {
+          attachments = await uploadCommentPhoto(productCard.photo);
+        } catch (error) {
+          photoBroken = true;
+          logger.warn("vk", "lot_card_photo_upload_failed", { ...meta, error });
+        }
+      }
 
-        return callVkApi("video.createComment", buildVideoCommentParams({
+      const message = buildLotCardMessage(activeLot, placeholderImageUrl, {
+        forcePlaceholder: photoBroken,
+      });
+
+      const publish = (text, withPhoto, extraMeta = {}) => sendWithRetry(
+        () => callVkApi("video.createComment", buildVideoCommentParams({
           ownerId: liveOwnerId,
           videoId: liveVideoId,
-          message,
-          attachments,
-        }), videoToken);
-      }, meta);
+          message: text,
+          attachments: withPhoto ? attachments : undefined,
+        }), videoToken),
+        { ...meta, withPhoto, ...extraMeta },
+      );
+
+      try {
+        return await publish(message, Boolean(attachments));
+      } catch (error) {
+        // 2. Текст карточки валиден, отклонено именно вложение (VK 100
+        //    «photo is undefined») — перепубликуем без фото с плейсхолдером,
+        //    чтобы покупатели всё-таки увидели лот.
+        if (attachments && isVkAttachmentError(error)) {
+          logger.warn("vk", "lot_card_photo_rejected_retry_text_only", {
+            ...meta,
+            vkErrorCode: error.vkErrorCode,
+          });
+          const textMessage = buildLotCardMessage(activeLot, placeholderImageUrl, {
+            forcePlaceholder: true,
+          });
+          return publish(textMessage, false, { fallback: "text_only" });
+        }
+        throw error;
+      }
     },
     async publishLotClosed(activeLot) {
       if (!isEnabled || !activeLot?.lotSessionId) {

@@ -51,3 +51,30 @@ test("detectDiscount returns null for «без скидки»", () => {
 test("detectDiscount returns null without a trigger word", () => {
   assert.equal(detectDiscount("просто двести рублей", TRIGGERS), null);
 });
+
+// #5 (log review 2026-06-05): оператор произносит скидку как «скидка N%» и
+// «минус N%» (и цифрами, и словами). Эти формы обязаны давать процент.
+test("detectDiscount handles «скидка 50%» (digits)", () => {
+  assert.deepEqual(detectDiscount("скидка 50%", TRIGGERS), { kind: "percent", value: 50 });
+});
+
+test("detectDiscount handles «скидка пятьдесят процентов» (words)", () => {
+  assert.deepEqual(detectDiscount("скидка пятьдесят процентов", TRIGGERS), { kind: "percent", value: 50 });
+});
+
+test("detectDiscount handles «минус N%» without the word «скидка» (digits)", () => {
+  assert.deepEqual(detectDiscount("минус 10%", TRIGGERS), { kind: "percent", value: 10 });
+  assert.deepEqual(detectDiscount("минус 20 процентов", TRIGGERS), { kind: "percent", value: 20 });
+});
+
+test("detectDiscount handles «минус двадцать процентов» (words)", () => {
+  assert.deepEqual(detectDiscount("минус двадцать процентов", TRIGGERS), { kind: "percent", value: 20 });
+});
+
+// #5 anti-false-trigger: пока система не знает условий, «максимальная скидка» и
+// «есть скидка» НЕ должны применять скидку (нет числа → ничего не меняем).
+test("detectDiscount does NOT apply vague «максимальная скидка»", () => {
+  assert.equal(detectDiscount("максимальная скидка", TRIGGERS), null);
+  assert.equal(detectDiscount("у нас есть скидка", TRIGGERS), null);
+  assert.equal(detectDiscount("будет хорошая скидка", TRIGGERS), null);
+});

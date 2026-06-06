@@ -917,7 +917,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       const state = ensureReservationState(lot);
       const reservationSessionVersion = customerOrderSessionVersion;
       const broadcastDate = formatBroadcastDate(new Date(event.createdAt || Date.now()));
-      const customerOrderKey = `${broadcastDate}:${event.viewerId}`;
+      // Заказы объединяются НЕЗАВИСИМО от дня (решение оператора): ключ — только
+      // зритель. broadcastDate ниже идёт лишь в описание заказа (#Эфир, аудит).
+      const customerOrderKey = `${event.viewerId}`;
 
       if (isSafeMode()) {
         event.status = "safe_mode_logged";
@@ -1048,10 +1050,43 @@ export function attachWsServer(httpServer, config, services = {}) {
         let existingOrder = customerOrdersByViewerId.get(customerOrderKey) || null;
         let resolvedCounterparty = null;
 
+        // Кэш заказа мог устареть: оператор перевёл заказ в закрытый статус
+        // (Запакован/Отправлен/Доставлен/Отменён) прямо во время эфира. Слепой
+        // append по кэшу дописал бы позицию в уже закрытый заказ, поэтому перед
+        // дозаписью перепроверяем статус ИМЕННО этого заказа в МойСкладе. При
+        // закрытом/ошибке проверки — выбрасываем из кэша и переразрешаем ниже
+        // через источник истины (lookup → иначе новый заказ).
+        if (existingOrder?.id) {
+          try {
+            const appendable = await moysklad.isCustomerOrderAppendable(existingOrder.id);
+            if (!appendable) {
+              logger.info("moysklad", "cached_order_closed_discarded", {
+                connectionId,
+                lotSessionId: lot.lotSessionId,
+                viewerId: event.viewerId,
+                orderId: existingOrder.id,
+              });
+              customerOrdersByViewerId.delete(customerOrderKey);
+              existingOrder = null;
+            }
+          } catch (recheckError) {
+            logger.warn("moysklad", "cached_order_recheck_failed", {
+              connectionId,
+              viewerId: event.viewerId,
+              orderId: existingOrder.id,
+              error: recheckError,
+            });
+            customerOrdersByViewerId.delete(customerOrderKey);
+            existingOrder = null;
+          }
+        }
+
         // Cross-session merge: in-memory map is wiped when the WebSocket
         // closes or the operator restarts the stream, so the same viewer's
         // next reservation looks "fresh" even when MoySklad already has an
-        // open «Новый» order for them. Ask MoySklad as source of truth.
+        // open order for them. Ask MoySklad as source of truth. День значения
+        // не имеет: берём последний НЕзакрытый заказ покупателя (открыт до
+        // «Запакован/Отправлен/Доставлен», «Отменён» тоже закрыт).
         if (!existingOrder?.id) {
           try {
             resolvedCounterparty = await moysklad.ensureCounterparty({
@@ -1059,9 +1094,8 @@ export function attachWsServer(httpServer, config, services = {}) {
               viewerName: event.viewerName,
             });
             if (resolvedCounterparty?.id) {
-              const found = await moysklad.findBroadcastCustomerOrderForCounterparty(
+              const found = await moysklad.findOpenCustomerOrderForCounterparty(
                 resolvedCounterparty.id,
-                { broadcastDate },
               );
               if (found?.id) {
                 existingOrder = found;
@@ -1264,17 +1298,20 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     }
 
-    // Этап 6: толерантность к ведущим нулям в коде покупателя. Оператор
-     // говорит «00588», но покупатель пишет «бронь 0588» — старый exact-match
-    // терял такую бронь. Pad только добавляет ведущие нули и только если код
-    // лота длиннее: «10588» нельзя достичь pad'ом из «0588», поэтому
-    // ложноположительных матчей не появится.
+    // Этап 6 (+ log review 2026-06-05): толерантность к ВЕДУЩИМ нулям в обе
+    // стороны. Покупатель пишет «бронь 0588» вместо «00588» (нулей меньше) или
+    // «бронь 000296» вместо «00296» (нулей больше) — обе формы должны указывать
+    // на тот же лот. Сравниваем коды после срезания ведущих нулей. Значащие
+    // цифры обязаны совпасть точно, поэтому «10588»/«1588» и внутренние нули
+    // («012005» vs «01205») НЕ матчатся — такие уходят оператору на разбор.
+    // Неоднозначность (несколько открытых лотов после нормализации) ловит
+    // правило «ровно один матч» в findCommentTarget.
     function codesEquivalent(buyerCode, lotCode) {
       if (!buyerCode || !lotCode) return false;
       if (buyerCode === lotCode) return true;
-      if (buyerCode.length >= lotCode.length) return false;
       if (!/^\d+$/.test(buyerCode) || !/^\d+$/.test(lotCode)) return false;
-      return buyerCode.padStart(lotCode.length, "0") === lotCode;
+      const stripLeadingZeros = (code) => code.replace(/^0+/, "") || "0";
+      return stripLeadingZeros(buyerCode) === stripLeadingZeros(lotCode);
     }
 
     function findCommentTarget(text) {
@@ -1315,6 +1352,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           text,
           lotCodes: paddedMatches.map(({ lot }) => lot.code),
         });
+        // Несколько открытых лотов подходят под код покупателя — НЕ бронируем
+        // наугад. Возвращаем причину, чтобы вызывающий код вынес это оператору
+        // на дашборд (а не списал бронь не на тот артикул).
+        return { lot: null, reason: "ambiguous", candidateCodes: paddedMatches.map(({ lot }) => lot.code) };
       }
       return null;
     }
@@ -1327,15 +1368,25 @@ export function attachWsServer(httpServer, config, services = {}) {
       const generation = ++commentPollingGeneration;
       commentPollingActive = true;
 
+      // Адаптивная частота опроса: пока в чате идут новые комментарии — опрос
+      // частый (ACTIVE_POLL_MS), в тишине плавно растягивается до IDLE_*. Так
+      // в активной фазе брони ловятся быстрее, а в простое мы не жжём квоту VK
+      // и не толкаемся с публикациями. Раньше интервал был фиксированный 2с.
+      const ACTIVE_POLL_MS = 1500;
+      const IDLE_POLL_STEP_MS = 1500;
+      const IDLE_POLL_MAX_MS = 8000;
+
       void (async function pollLoop() {
         let initialized = false;
         let consecutiveFailures = 0;
+        let quietCycles = 0;
         // VK user id самого бота: его комментарии (карточки, обновления цены,
         // подтверждения броней) нельзя переисследовать как чужие брони. 0 =
         // не удалось определить → фильтр выключен (поведение как раньше).
         const selfUserId = (await vk.getSelfUserId?.()) || 0;
 
         while (generation === commentPollingGeneration && openLotsBySessionId.size > 0) {
+          let activityThisCycle = false;
           try {
             const comments = await vk.getComments(100);
             if (generation !== commentPollingGeneration || openLotsBySessionId.size === 0) {
@@ -1363,6 +1414,9 @@ export function attachWsServer(httpServer, config, services = {}) {
               .filter((item) => item.id > commentPollingLastCommentId && !commentPollingSeenIds.has(item.id))
               .sort((left, right) => left.id - right.id);
 
+            // Был ли в этом цикле новый трафик — задаёт частоту следующего опроса.
+            activityThisCycle = newItems.length > 0;
+
             for (const comment of newItems) {
               commentPollingLastCommentId = Math.max(commentPollingLastCommentId, comment.id);
               addBoundedId(commentPollingSeenIds, comment.id);
@@ -1376,22 +1430,43 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               const target = findCommentTarget(comment.text);
-              if (!target) {
-                // Forensic: коммент похож на бронь (keyword + код), но ни один
-                // открытый лот не подошёл. Раньше такие пропадали молча, и
-                // оператор замечал «почему-то перестала бронировать» только по
-                // отсутствию строки в списке (см. лог 2026-05-24 20:19:54 —
-                // «почему-то перестала бронировать, Ирина повторите»). Логируем
-                // на warn, чтобы видеть в diagnostics и в bundle.
+              if (!target || !target.lot) {
+                // Коммент похож на бронь (keyword + код), но однозначного
+                // открытого лота нет: либо ни один не подошёл, либо подошло
+                // несколько (ambiguous). Бронировать наугад нельзя — выносим
+                // это ОПЕРАТОРУ на дашборд (а не в публичный VK-коммент) и
+                // логируем для diagnostics/bundle. Раньше такие пропадали молча
+                // (см. лог 2026-05-24 20:19:54 «…перестала бронировать, Ирина
+                // повторите»).
                 const probe = parseReservationComment(comment.text);
                 if (probe.hasReservationKeyword && probe.code) {
+                  const reason = target?.reason || "no_open_lot";
+                  const openLotCodes = getOpenLots().map((lot) => lot.code);
+                  const profileForAttention = profileMap.get(comment.from_id);
+                  const viewerNameForAttention = profileForAttention
+                    ? [profileForAttention.first_name, profileForAttention.last_name].filter(Boolean).join(" ")
+                    : (nameCacheStore?.getName?.(comment.from_id) || "");
                   logger.warn("vk", "reservation_no_open_lot", {
                     connectionId,
                     commentId: comment.id,
                     viewerId: comment.from_id,
+                    viewerName: viewerNameForAttention,
+                    reason,
                     text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
                     reservationCommentCode: probe.code,
-                    openLotCodes: getOpenLots().map((lot) => lot.code),
+                    candidateCodes: target?.candidateCodes || [],
+                    openLotCodes,
+                  });
+                  sendJson(websocket, {
+                    type: "reservationAttention",
+                    reason,
+                    commentId: comment.id,
+                    viewerId: comment.from_id,
+                    viewerName: viewerNameForAttention,
+                    code: probe.code,
+                    text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+                    candidateCodes: target?.candidateCodes || [],
+                    openLotCodes,
                   });
                 }
                 continue;
@@ -1601,10 +1676,19 @@ export function attachWsServer(httpServer, config, services = {}) {
             }
           }
 
-          // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
-          const delayMs = consecutiveFailures === 0
-            ? 2000
-            : Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
+          let delayMs;
+          if (consecutiveFailures > 0) {
+            // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
+            delayMs = Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
+          } else if (activityThisCycle) {
+            // Чат активен — опрашиваем часто.
+            quietCycles = 0;
+            delayMs = ACTIVE_POLL_MS;
+          } else {
+            // Тишина — плавно растягиваем интервал до потолка.
+            quietCycles += 1;
+            delayMs = Math.min(IDLE_POLL_MAX_MS, ACTIVE_POLL_MS + quietCycles * IDLE_POLL_STEP_MS);
+          }
           await new Promise((resolve) => {
             setTimeout(resolve, delayMs);
           });
@@ -2693,11 +2777,11 @@ export function attachWsServer(httpServer, config, services = {}) {
           // Снимаем зрителя из принятых, чтобы тот же покупатель мог
           // забронировать заново (или поллер VK принял его новый комментарий).
           state.acceptedUserIds.delete(event.viewerId);
-          // Сбрасываем in-memory маппинг заказа на день, чтобы следующая бронь
-          // этого зрителя переразрешилась через МойСклад, а не дописала позицию
-          // в заказ, из которого мы только что удалили позицию.
-          const broadcastDate = formatBroadcastDate(new Date(event.createdAt || Date.now()));
-          customerOrdersByViewerId.delete(`${broadcastDate}:${event.viewerId}`);
+          // Сбрасываем in-memory маппинг заказа этого зрителя, чтобы следующая
+          // бронь переразрешилась через МойСклад, а не дописала позицию в заказ,
+          // из которого мы только что удалили позицию. Ключ — только зритель
+          // (объединение независимо от дня).
+          customerOrdersByViewerId.delete(`${event.viewerId}`);
           const previousStatus = event.status;
           event.status = "cancelled";
 

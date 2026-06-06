@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVkMock, startHarness } from "./helpers/ws-harness.js";
+import { createVkMock, createMoyskladMock, startHarness } from "./helpers/ws-harness.js";
 
 // Сценарии ручного ввода кода на активном лоте (#14). Вариант А: ручной ввод
 // разрешён только при активном STT-стриме; код обязан быть в каталоге.
@@ -369,6 +369,127 @@ test("buyer comment with missing leading zero matches an open lot by zero-paddin
 
     await client.waitFor(hasReserved, { timeoutMs: 6000 });
     assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// #3: бронь с ключевым словом + код, но НЕТ открытого лота под этот код →
+// сервер не бронирует, а выносит оператору строку «требует внимания»
+// (reservationAttention), без публичного VK-комментария.
+test("reservation keyword with no matching open lot escalates to the operator", async () => {
+  const harness = await startHarness({ cardsByCode: { "03204": CARD_03204 }, knownCodes: ["03204"] });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 401, fromId: 8001, text: "бронь 09999", firstName: "Ирина" });
+
+    const attention = await client.waitFor((m) => m.type === "reservationAttention", { timeoutMs: 6000 });
+    assert.equal(attention.reason, "no_open_lot");
+    assert.equal(attention.code, "09999");
+    assert.equal(attention.viewerName, "Ирина");
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// #3: код покупателя ложится zero-padding'ом сразу на НЕСКОЛЬКО открытых лотов
+// → ambiguous, бронить наугад нельзя. Эскалация оператору с кандидатами.
+test("ambiguous zero-padded reservation escalates with candidate codes (no auto-reserve)", async () => {
+  const CARD_00588 = {
+    id: "p-00588", name: "Кулон A", code: "00588", pathName: "Украшения", salePrice: 1800, availableStock: 3,
+  };
+  const CARD_000588 = {
+    id: "p-000588", name: "Кулон B", code: "000588", pathName: "Украшения", salePrice: 1900, availableStock: 3,
+  };
+  const harness = await startHarness({
+    cardsByCode: { "00588": CARD_00588, "000588": CARD_000588 },
+    knownCodes: ["00588", "000588"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "00588" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "00588");
+    client.send({ type: "manualCode", code: "000588" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "000588" && m.openLots?.length === 2);
+
+    harness.vk.pushComment({ id: 402, fromId: 8002, text: "бронь 588", firstName: "Оля" });
+
+    const attention = await client.waitFor((m) => m.type === "reservationAttention", { timeoutMs: 6000 });
+    assert.equal(attention.reason, "ambiguous");
+    assert.deepEqual([...attention.candidateCodes].sort(), ["000588", "00588"]);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// #2 (log review 2026-06-05): покупатель набрал ЛИШНИЕ ведущие нули
+// («бронь 000296» вместо «00296»). Теперь матчится после среза ведущих нулей.
+test("buyer comment with extra leading zeros matches an open lot", async () => {
+  const CARD_00296 = {
+    id: "p-00296", name: "Браслет янтарь", code: "00296",
+    pathName: "Украшения/Браслеты", salePrice: 2100, availableStock: 3,
+  };
+  const harness = await startHarness({
+    cardsByCode: { "00296": CARD_00296 },
+    knownCodes: ["00296"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "00296" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "00296");
+
+    harness.vk.pushComment({ id: 311, fromId: 7101, text: "бронь 000296", firstName: "Вера" });
+
+    await client.waitFor(hasReserved, { timeoutMs: 6000 });
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// #1 (log review 2026-06-05): оператор перевёл заказ в закрытый статус
+// (Запакован/…) во время эфира. Следующая бронь того же зрителя НЕ должна
+// дописываться в закрытый заказ по устаревшему in-memory кэшу — создаётся новый.
+test("cached order closed by operator mid-stream is not appended to (new order created)", async () => {
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
+    overrides: {
+      ensureCounterparty: async () => ({ id: "cp-1" }),
+      // Кэшированный заказ к моменту перепроверки уже «Запакован».
+      isCustomerOrderAppendable: async () => false,
+    },
+  });
+  const harness = await startHarness({ knownCodes: ["03204", "03199"], moysklad });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+    harness.vk.pushComment({ id: 501, fromId: 9001, text: "03204", firstName: "Зоя" });
+    await client.waitFor(hasReservedInOpenLot("03204"), { timeoutMs: 6000 });
+
+    client.send({ type: "manualCode", code: "03199" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03199" && m.openLots?.length === 2);
+    harness.vk.pushComment({ id: 502, fromId: 9001, text: "03199", firstName: "Зоя" });
+    await client.waitFor(hasReservedInOpenLot("03199"), { timeoutMs: 6000 });
+
+    // Кэш отброшен после перепроверки → второй заказ создан, а не дописан.
+    assert.equal(harness.moysklad.callsTo("isCustomerOrderAppendable").length, 1);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 2);
+    assert.equal(harness.moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
   } finally {
     await client.close();
     await harness.close();

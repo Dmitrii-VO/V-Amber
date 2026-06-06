@@ -285,3 +285,125 @@ test("createCustomerOrderReservation writes daily broadcast marker", async () =>
     restore();
   }
 });
+
+// Метаданные со ВСЕМИ статусами эфирного цикла. open = дописываем, closed = нет.
+function fullStatesMetadata() {
+  const hrefBase = "https://moysklad.test/api/remap/1.2/entity/customerorder/metadata/states";
+  const names = [
+    "Новый", "Собран", "Выставлен счет", "Оплачен", "Копит",
+    "Запакован", "Отправлен", "Доставлен", "Отменен", "Заказ проведен",
+  ];
+  return {
+    states: names.map((name, i) => ({
+      id: `state-${i}`,
+      name,
+      meta: { href: `${hrefBase}/state-${i}` },
+    })),
+  };
+}
+
+function defaultsResponseFull(path) {
+  if (path === "entity/organization") return jsonResponse({ rows: [{ id: "org-1", name: "Org" }] });
+  if (path === "entity/store") return jsonResponse({ rows: [{ id: "store-1", name: "Store" }] });
+  if (path === "entity/customerorder/metadata") return jsonResponse(fullStatesMetadata());
+  return null;
+}
+
+test("findOpenCustomerOrderForCounterparty excludes closed states via state!= filter (day-agnostic)", async () => {
+  let lookupParams = null;
+  const fetchMock = createFetchMock((path, searchParams) => {
+    const defaults = defaultsResponseFull(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      lookupParams = searchParams;
+      return jsonResponse({ rows: [{ id: "co-open", name: "VK00009" }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findOpenCustomerOrderForCounterparty("cp-1");
+
+    assert.deepEqual(result, { id: "co-open", name: "VK00009", counterpartyId: "cp-1" });
+    // limit 1 + сортировка по свежести: берём самый последний открытый заказ.
+    assert.equal(lookupParams.get("limit"), "1");
+    assert.equal(lookupParams.get("order"), "moment,desc");
+    // Фильтр исключает ровно 4 закрытых статуса и не привязан к дате.
+    const filter = lookupParams.get("filter");
+    const notEquals = filter.split(";").filter((part) => part.includes("state!="));
+    assert.equal(notEquals.length, 4, "должно быть 4 исключения (Запакован/Отправлен/Доставлен/Отменён)");
+    for (const closed of ["state-5", "state-6", "state-7", "state-8"]) {
+      assert.match(filter, new RegExp(`state!=.*states/${closed}(?:;|$)`));
+    }
+    // Открытые статусы (Оплачен/Копит/Собран/Заказ проведён) НЕ исключаются.
+    assert.doesNotMatch(filter, /states\/state-3(?:;|$)/, "Оплачен не должен быть исключён");
+    assert.doesNotMatch(filter, /states\/state-4(?:;|$)/, "Копит не должен быть исключён");
+  } finally {
+    restore();
+  }
+});
+
+test("getReservationDigestForDate includes open states beyond Новый and excludes closed", async () => {
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponseFull(path);
+    if (defaults) return defaults;
+    if (path === "entity/counterparty/metadata/attributes") {
+      return jsonResponse({ rows: [{ id: "vk-attr", name: "VK ID" }] });
+    }
+    if (path === "entity/customerorder") {
+      return jsonResponse({
+        rows: [
+          { id: "o-new", name: "VK01", description: "#Эфир 2026-06-05\nviewerId=101", state: { name: "Новый" }, agent: { name: "Аня" } },
+          { id: "o-kopit", name: "VK02", description: "#Эфир 2026-06-05\nviewerId=102", state: { name: "Копит" }, agent: { name: "Оля" } },
+          { id: "o-oplachen", name: "VK03", description: "#Эфир 2026-06-05\nviewerId=103", state: { name: "Оплачен" }, agent: { name: "Ира" } },
+          { id: "o-packed", name: "VK04", description: "#Эфир 2026-06-05\nviewerId=104", state: { name: "Запакован" }, agent: { name: "Зоя" } },
+          { id: "o-sent", name: "VK05", description: "#Эфир 2026-06-05\nviewerId=105", state: { name: "Отправлен" }, agent: { name: "Юля" } },
+        ],
+      });
+    }
+    if (/^entity\/customerorder\/.+\/positions$/.test(path)) {
+      return jsonResponse({ rows: [{ id: "pos-1", quantity: 1, price: 100000, sum: 100000, assortment: { code: "00001", name: "Товар" } }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const digest = await client.getReservationDigestForDate("2026-06-05");
+
+    // Новый/Копит/Оплачен — открыты (3); Запакован/Отправлен — закрыты (исключены).
+    assert.equal(digest.count, 3);
+    assert.deepEqual(
+      digest.clients.map((c) => c.orders[0].stateName).sort(),
+      ["Копит", "Новый", "Оплачен"],
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("findOpenCustomerOrderForCounterparty falls back to Новый-only when closed states cannot be resolved", async () => {
+  let lookupParams = null;
+  const fetchMock = createFetchMock((path, searchParams) => {
+    const defaults = defaultsResponse(path); // только «Новый»
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      lookupParams = searchParams;
+      return jsonResponse({ rows: [{ id: "co-new", name: "VK00001" }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findOpenCustomerOrderForCounterparty("cp-1");
+
+    assert.deepEqual(result, { id: "co-new", name: "VK00001", counterpartyId: "cp-1" });
+    const filter = lookupParams.get("filter");
+    assert.match(filter, /state=.*states\/state-new/);
+    assert.doesNotMatch(filter, /state!=/);
+  } finally {
+    restore();
+  }
+});

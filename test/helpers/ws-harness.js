@@ -73,6 +73,10 @@ export function createMoyskladMock({ cardsByCode = {}, overrides = {} } = {}) {
     getProductCardByCode: wrap("getProductCardByCode", overrides.getProductCardByCode
       || (async (code) => cardsByCode[code] || null)),
     ensureCounterparty: wrap("ensureCounterparty", overrides.ensureCounterparty || (async () => null)),
+    findOpenCustomerOrderForCounterparty: wrap("findOpenCustomerOrderForCounterparty",
+      overrides.findOpenCustomerOrderForCounterparty || (async () => null)),
+    isCustomerOrderAppendable: wrap("isCustomerOrderAppendable",
+      overrides.isCustomerOrderAppendable || (async () => true)),
     findBroadcastCustomerOrderForCounterparty: wrap("findBroadcastCustomerOrderForCounterparty",
       overrides.findBroadcastCustomerOrderForCounterparty || (async () => null)),
     appendPositionToCustomerOrder: wrap("appendPositionToCustomerOrder",

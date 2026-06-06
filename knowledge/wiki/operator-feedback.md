@@ -37,6 +37,48 @@ this page is the maintained wiki version.
   (`users.get` / `VK_SELF_USER_ID`). Before this, the bot re-ingested its own
   «бронь подтверждена (код …)» reply as a self-reservation. See [[vk-comments]].
 
+## Log review 2026-06-05 (resolved 2026-06-06)
+
+Source: `knowledge/raw/log-review-2026-06-05-plan.md`. Orders/wishlist on 5 June
+were correct (0 MoySklad errors); all issues were VK-side or recognition. Five
+fixes landed:
+
+- **Lot card no longer dies on a broken photo.** `publishLotCard`
+  (`server/vk.js`) uploads the photo separately; if the upload fails or VK
+  rejects the attachment (error 100 «photo is undefined»), the card is
+  republished text-only with the placeholder line. Broken-photo articles surface
+  via `lot_card_photo_*` warn logs. See [[vk-comments]].
+- **Adaptive comment poll + publish priority.** The poll loop
+  (`server/ws-server.js`) runs ~1.5 s while comments flow and ramps to 8 s when
+  quiet (was a fixed 2 s). The shared VK queue (`server/vk.js`) now has two
+  lanes: publishing (cards/price/replies/close) preempts `video.getComments`, so
+  a polling burst no longer delays a buyer's reservation reply.
+- **Order merge independent of day.** A buyer's reservations append to their last
+  NON-closed order regardless of broadcast date. Open = Новый, Собран, Выставлен
+  счет, Оплачен, Копит, Заказ проведен; closed (→ new order) = Запакован,
+  Отправлен, Доставлен, Отменён. `findLatestOpenCustomerOrder`
+  (`server/moysklad.js`) excludes closed states via `state!=` filters; the
+  in-memory key dropped the date; the `#Эфир` marker stays for audit only.
+  Operator contract: to start a buyer's new order, move the current one to
+  «Запакован»+; otherwise reservations keep appending. See [[reservation-flow]].
+  The in-memory order cache is rechecked against MoySklad before each append
+  (`isCustomerOrderAppendable`): if the operator closed the cached order
+  mid-stream, the next reservation creates a new order instead of appending to a
+  closed one. The day digest (`getReservationDigestForDate`) uses the same
+  open/closed classification, so Копит/Оплачен/Собран orders are included (not
+  just Новый).
+- **Ambiguous/unmatched reservations escalate to the operator.** When a comment
+  has a reservation keyword + code but maps to zero or to more than one open lot,
+  the system does NOT auto-reserve and does NOT post a public VK comment — it
+  pushes a `reservationAttention` row to the operator console (amber banner).
+  Leading-zero tolerance now works in both directions (too few or too many
+  leading zeros: `0588`→`00588`, `000296`→`00296`) via stripping leading zeros;
+  significant digits must match exactly, and the strict single-match rule still
+  routes any ambiguity to the operator.
+- **Discounts.** «скидка N%» and «минус N%» (digits and words) apply a percent;
+  vague «максимальная/есть скидка» stays un-applied. Locked with regression
+  tests in `test/discount-detector.test.js`. See [[voice-price-parsing]].
+
 ## Operator-audit pass (2026-05-29)
 
 A full operator-perspective audit produced 20 items split across Phase 1

@@ -952,6 +952,15 @@ function handleServerMessage(payload) {
     return;
   }
 
+  if (payload.type === "reservationAttention") {
+    // Бронь не удалось однозначно сопоставить открытому лоту (нет лота или
+    // подходит несколько). Сервер НЕ бронирует и НЕ пишет в публичный VK —
+    // показываем оператору строку «требует внимания», чтобы он уточнил у
+    // покупателя или открыл нужный лот.
+    addReservationAttention(payload);
+    return;
+  }
+
   if (payload.type === "voiceCancelMatch") {
     // Голосовая отмена брони (W3): сервер нашёл бронь по произнесённому имени,
     // но НЕ отменил её. Подсвечиваем строку и просим оператора подтвердить
@@ -1012,6 +1021,68 @@ document.getElementById("digestPromptOpen")?.addEventListener("click", () => {
 });
 
 document.getElementById("digestPromptDismiss")?.addEventListener("click", hideDigestPromptBanner);
+
+// Брони, требующие ручного разбора оператором (нет однозначного открытого лота).
+const reservationAttentionSeen = new Set();
+
+function addReservationAttention(payload) {
+  const banner = document.getElementById("reservationAttentionBanner");
+  const list = document.getElementById("reservationAttentionList");
+  if (!banner || !list) return;
+
+  // Один и тот же коммент не дублируем (поллер может прислать его повторно).
+  const dedupeKey = String(payload.commentId ?? `${payload.viewerId}:${payload.code}:${payload.text}`);
+  if (reservationAttentionSeen.has(dedupeKey)) return;
+  reservationAttentionSeen.add(dedupeKey);
+
+  const who = payload.viewerName ? payload.viewerName : `id ${payload.viewerId ?? "?"}`;
+  const reasonText = payload.reason === "ambiguous"
+    ? `код «${payload.code}» подходит нескольким лотам${payload.candidateCodes?.length ? ` (${payload.candidateCodes.join(", ")})` : ""}`
+    : `нет открытого лота под код «${payload.code}»`;
+
+  const row = document.createElement("div");
+  row.className = "attention-row";
+
+  const body = document.createElement("div");
+  body.className = "attention-row__body";
+  const head = document.createElement("div");
+  head.className = "attention-row__head";
+  head.textContent = `${who}: ${reasonText}`;
+  const sub = document.createElement("div");
+  sub.className = "attention-row__sub dim";
+  sub.textContent = payload.text || "";
+  body.append(head, sub);
+
+  const dismiss = document.createElement("button");
+  dismiss.className = "btn btn--ghost attention-row__dismiss";
+  dismiss.type = "button";
+  dismiss.textContent = "✓";
+  dismiss.title = "Убрать строку";
+  dismiss.addEventListener("click", () => {
+    row.remove();
+    if (!list.children.length) banner.hidden = true;
+  });
+
+  row.append(body, dismiss);
+  list.prepend(row);
+  banner.hidden = false;
+
+  logEvent(`Бронь требует внимания — ${who}: ${reasonText}`, "warn");
+
+  while (list.children.length > 20) {
+    list.lastChild.remove();
+  }
+}
+
+function clearReservationAttention() {
+  const banner = document.getElementById("reservationAttentionBanner");
+  const list = document.getElementById("reservationAttentionList");
+  if (list) list.replaceChildren();
+  if (banner) banner.hidden = true;
+  reservationAttentionSeen.clear();
+}
+
+document.getElementById("reservationAttentionClear")?.addEventListener("click", clearReservationAttention);
 
 function showConnectionBanner() {
   const banner = document.getElementById("connectionBanner");
