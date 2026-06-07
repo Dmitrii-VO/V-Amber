@@ -346,3 +346,11 @@ is 0 (operator names it by voice → `publishPriceUpdate` posts it), so no more
 «Брони» panel. The parser stays strict (verb + «лот»/«бронь» + code, name
 required) — deliberately not loosened on the money path. Shipped as v0.1.48/49.
 Updated [[vk-comments]] and [[vk-integration]].
+
+## [2026-06-08] fix | MoySklad reservation discounts stay in discount field
+
+Fixed customer-order position payloads so discounted reservations send the
+original item price in `price` and the calculated percentage in MoySklad's
+`discount` field. MoySklad now owns the final `sum` calculation instead of the
+integration pre-subtracting the discount from the price. Updated
+[[moysklad-integration]].

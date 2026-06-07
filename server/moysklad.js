@@ -28,6 +28,22 @@ function normalizeStateName(name) {
   return String(name || "").trim().toLowerCase().replace(/ё/g, "е");
 }
 
+function buildCustomerOrderPosition({ config, activeLot, productCard, reservation }) {
+  const quantity = Math.max(1, Number(reservation?.quantity) || 1);
+  const salePrice = Number(getEffectiveSalePrice(activeLot, productCard) || 0);
+  const discountAmount = Number(activeLot?.discountAmount || 0);
+  const position = {
+    quantity,
+    price: toMinorUnits(salePrice),
+    reserve: quantity,
+    assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
+  };
+  if (Number.isFinite(salePrice) && salePrice > 0 && Number.isFinite(discountAmount) && discountAmount > 0) {
+    position.discount = Math.min(100, (discountAmount / salePrice) * 100);
+  }
+  return position;
+}
+
 export function createMoySkladClient(config, options = {}) {
   const authHeader = getAuthHeader(config || {});
   const isEnabled = Boolean(config?.baseUrl && authHeader);
@@ -1109,12 +1125,7 @@ export function createMoySkladClient(config, options = {}) {
         store: buildEntityMeta(config.baseUrl, "store", defaults.storeId),
         agent: buildEntityMeta(config.baseUrl, "counterparty", counterparty.id),
         positions: [
-          {
-            quantity: Math.max(1, Number(reservation?.quantity) || 1),
-            price: toMinorUnits(getEffectiveSalePrice(activeLot, productCard) - (activeLot.discountAmount || 0)),
-            reserve: Math.max(1, Number(reservation?.quantity) || 1),
-            assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
-          },
+          buildCustomerOrderPosition({ config, activeLot, productCard, reservation }),
         ],
       };
 
@@ -1152,12 +1163,7 @@ export function createMoySkladClient(config, options = {}) {
       await ensureOrderHasBroadcastDescription(orderId, broadcastDate);
 
       const payload = [
-        {
-          quantity: Math.max(1, Number(reservation?.quantity) || 1),
-          price: toMinorUnits(getEffectiveSalePrice(activeLot, productCard) - (activeLot.discountAmount || 0)),
-          reserve: Math.max(1, Number(reservation?.quantity) || 1),
-          assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
-        },
+        buildCustomerOrderPosition({ config, activeLot, productCard, reservation }),
       ];
 
       const positions = await postJson(`entity/customerorder/${orderId}/positions`, payload);

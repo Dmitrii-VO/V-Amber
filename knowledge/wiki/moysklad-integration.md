@@ -21,6 +21,11 @@ sizes or prices.
 For buyer reservations, the backend creates or appends customer orders and
 checks active-lot stock to avoid overselling when stock is known.
 
+Discounted reservation positions keep the original MoySklad sale price in the
+position `price` field. The applied lot discount is sent through the position
+`discount` percentage field, and MoySklad calculates the final line `sum`.
+The integration must not pre-subtract the discount from `price`.
+
 Live reservation orders use a daily broadcast marker in the order description,
 for example `#Эфир 2026-05-24`. Cross-session merging only reuses orders for
 the same counterparty and the same marker. Open MoySklad orders from earlier

@@ -286,6 +286,79 @@ test("createCustomerOrderReservation writes daily broadcast marker", async () =>
   }
 });
 
+test("createCustomerOrderReservation sends discount separately from original price", async () => {
+  let createdPayload = null;
+  const fetchMock = createFetchMock((path, searchParams, init) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      createdPayload = JSON.parse(init.body);
+      return jsonResponse({ id: "co-new", name: "VK00004" });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    await client.createCustomerOrderReservation({
+      activeLot: {
+        code: "03359",
+        lotSessionId: "lot-1",
+        discountAmount: 205,
+        product: { id: "product-1", salePrice: 2050 },
+      },
+      productCard: { salePrice: 2050 },
+      reservation: { viewerId: 123, viewerName: "Елена", commentId: 456 },
+      counterparty: { id: "cp-1" },
+      broadcastDate: "2026-05-24",
+    });
+
+    const position = createdPayload.positions[0];
+    assert.equal(position.price, 205000);
+    assert.equal(position.discount, 10);
+    assert.equal(Object.hasOwn(position, "sum"), false);
+  } finally {
+    restore();
+  }
+});
+
+test("appendPositionToCustomerOrder sends discount separately from original price", async () => {
+  let appendedPayload = null;
+  const fetchMock = createFetchMock((path, searchParams, init) => {
+    if (path === "entity/customerorder/co-existing") {
+      return jsonResponse({ id: "co-existing", description: "#Эфир 2026-05-24" });
+    }
+    if (path === "entity/customerorder/co-existing/positions") {
+      appendedPayload = JSON.parse(init.body);
+      return jsonResponse([{ id: "pos-1" }]);
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    await client.appendPositionToCustomerOrder({
+      orderId: "co-existing",
+      activeLot: {
+        code: "03359",
+        lotSessionId: "lot-1",
+        discountAmount: 205,
+        product: { id: "product-1", salePrice: 2050 },
+      },
+      productCard: { salePrice: 2050 },
+      reservation: { viewerId: 123, viewerName: "Елена", commentId: 456 },
+      broadcastDate: "2026-05-24",
+    });
+
+    const position = appendedPayload[0];
+    assert.equal(position.price, 205000);
+    assert.equal(position.discount, 10);
+    assert.equal(Object.hasOwn(position, "sum"), false);
+  } finally {
+    restore();
+  }
+});
+
 // Метаданные со ВСЕМИ статусами эфирного цикла. open = дописываем, closed = нет.
 function fullStatesMetadata() {
   const hrefBase = "https://moysklad.test/api/remap/1.2/entity/customerorder/metadata/states";
