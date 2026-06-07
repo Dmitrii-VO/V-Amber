@@ -286,6 +286,88 @@ test("createCustomerOrderReservation writes daily broadcast marker", async () =>
   }
 });
 
+test("findBroadcastCustomerOrderForCounterparty excludes paid orders from append lookup", async () => {
+  let lookupParams = null;
+  const fetchMock = createFetchMock((path, searchParams) => {
+    const defaults = defaultsResponseFull(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      lookupParams = searchParams;
+      return jsonResponse({
+        rows: [{
+          id: "co-paid",
+          name: "VK-paid",
+          description: "#Эфир 2026-05-24\nVK reservation",
+          state: { name: "Оплачен" },
+        }],
+      });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", {
+      broadcastDate: "2026-05-24",
+    });
+
+    assert.equal(result, null);
+    const filter = lookupParams.get("filter");
+    assert.match(filter, /state!=.*states\/state-3(?:;|$)/, "Оплачен должен быть исключён из append lookup");
+    assert.match(filter, /state!=.*states\/state-5(?:;|$)/, "Запакован должен быть исключён из append lookup");
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty searches beyond first page", async () => {
+  const fetchMock = createFetchMock((path, searchParams) => {
+    const defaults = defaultsResponseFull(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      const offset = Number(searchParams.get("offset") || 0);
+      if (offset === 0) {
+        return jsonResponse({
+          meta: { size: 101 },
+          rows: Array.from({ length: 100 }, (_, index) => ({
+            id: `co-old-${index}`,
+            name: `VK-old-${index}`,
+            description: "#Эфир 2026-05-23\nVK reservation",
+            state: { name: "Новый" },
+          })),
+        });
+      }
+      return jsonResponse({
+        meta: { size: 101 },
+        rows: [{
+          id: "co-current",
+          name: "VK-current",
+          description: "#Эфир 2026-05-24\nVK reservation",
+          state: { name: "Новый" },
+        }],
+      });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", {
+      broadcastDate: "2026-05-24",
+    });
+
+    assert.equal(result.id, "co-current");
+    assert.deepEqual(
+      fetchMock.calls
+        .filter((call) => call.path === "entity/customerorder")
+        .map((call) => call.searchParams.get("offset")),
+      ["0", "100"],
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("createCustomerOrderReservation sends discount separately from original price", async () => {
   let createdPayload = null;
   const fetchMock = createFetchMock((path, searchParams, init) => {
@@ -354,6 +436,125 @@ test("appendPositionToCustomerOrder sends discount separately from original pric
     assert.equal(position.price, 205000);
     assert.equal(position.discount, 10);
     assert.equal(Object.hasOwn(position, "sum"), false);
+  } finally {
+    restore();
+  }
+});
+
+test("isCustomerOrderAppendable rejects paid orders", async () => {
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponseFull(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder/co-paid") {
+      return jsonResponse({ id: "co-paid", state: { name: "Оплачен" } });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const appendable = await client.isCustomerOrderAppendable("co-paid");
+    assert.equal(appendable, false);
+  } finally {
+    restore();
+  }
+});
+
+test("ensureCounterparty skips same-name counterparty with another VK ID", async () => {
+  let createdPayload = null;
+  const fetchMock = createFetchMock((path, searchParams, init = {}) => {
+    if (path === "entity/counterparty/metadata/attributes") {
+      return jsonResponse({ rows: [{ id: "vk-attr", name: "VK ID" }] });
+    }
+    if (path === "entity/counterparty" && init.method === "POST") {
+      createdPayload = JSON.parse(init.body);
+      return jsonResponse({ id: "cp-new", name: createdPayload.name });
+    }
+    if (path === "entity/counterparty" && searchParams.has("filter")) {
+      return jsonResponse({ rows: [] });
+    }
+    if (path === "entity/counterparty/cp-old") {
+      return jsonResponse({
+        id: "cp-old",
+        name: "VK: Ирина Туржанская",
+        attributes: [{ id: "vk-attr", value: "111" }],
+      });
+    }
+    if (path === "entity/counterparty") {
+      const search = searchParams.get("search") || "";
+      if (search === "VK: Ирина Туржанская") {
+        return jsonResponse({
+          rows: [{
+            id: "cp-old",
+            name: "VK: Ирина Туржанская",
+          }],
+        });
+      }
+      if (search === "viewerId=222") {
+        return jsonResponse({ rows: [] });
+      }
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const counterparty = await client.ensureCounterparty({
+      viewerId: 222,
+      viewerName: "Ирина Туржанская",
+    });
+
+    assert.equal(counterparty.id, "cp-new");
+    assert.equal(createdPayload.name, "VK: Ирина Туржанская");
+    assert.equal(createdPayload.attributes[0].value, "222");
+  } finally {
+    restore();
+  }
+});
+
+test("ensureCounterparty reuses same-name counterparty only after matching VK ID detail", async () => {
+  let createCalled = false;
+  const fetchMock = createFetchMock((path, searchParams, init = {}) => {
+    if (path === "entity/counterparty/metadata/attributes") {
+      return jsonResponse({ rows: [{ id: "vk-attr", name: "VK ID" }] });
+    }
+    if (path === "entity/counterparty" && init.method === "POST") {
+      createCalled = true;
+      return jsonResponse({ id: "cp-new" });
+    }
+    if (path === "entity/counterparty" && searchParams.has("filter")) {
+      return jsonResponse({ rows: [] });
+    }
+    if (path === "entity/counterparty/cp-existing") {
+      return jsonResponse({
+        id: "cp-existing",
+        name: "VK: Ирина Туржанская",
+        attributes: [{ id: "vk-attr", value: "222" }],
+      });
+    }
+    if (path === "entity/counterparty") {
+      const search = searchParams.get("search") || "";
+      if (search === "VK: Ирина Туржанская") {
+        return jsonResponse({
+          rows: [{ id: "cp-existing", name: "VK: Ирина Туржанская" }],
+        });
+      }
+      if (search === "viewerId=222") {
+        return jsonResponse({ rows: [] });
+      }
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const counterparty = await client.ensureCounterparty({
+      viewerId: 222,
+      viewerName: "Ирина Туржанская",
+    });
+
+    assert.equal(counterparty.id, "cp-existing");
+    assert.equal(createCalled, false);
   } finally {
     restore();
   }

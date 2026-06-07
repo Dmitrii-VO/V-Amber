@@ -53,20 +53,12 @@ fixes landed:
   quiet (was a fixed 2 s). The shared VK queue (`server/vk.js`) now has two
   lanes: publishing (cards/price/replies/close) preempts `video.getComments`, so
   a polling burst no longer delays a buyer's reservation reply.
-- **Order merge independent of day.** A buyer's reservations append to their last
-  NON-closed order regardless of broadcast date. Open = Новый, Собран, Выставлен
-  счет, Оплачен, Копит, Заказ проведен; closed (→ new order) = Запакован,
-  Отправлен, Доставлен, Отменён. `findLatestOpenCustomerOrder`
-  (`server/moysklad.js`) excludes closed states via `state!=` filters; the
-  in-memory key dropped the date; the `#Эфир` marker stays for audit only.
-  Operator contract: to start a buyer's new order, move the current one to
-  «Запакован»+; otherwise reservations keep appending. See [[reservation-flow]].
-  The in-memory order cache is rechecked against MoySklad before each append
-  (`isCustomerOrderAppendable`): if the operator closed the cached order
-  mid-stream, the next reservation creates a new order instead of appending to a
-  closed one. The day digest (`getReservationDigestForDate`) uses the same
-  open/closed classification, so Копит/Оплачен/Собран orders are included (not
-  just Новый).
+- **Order merge independent of day — superseded 2026-06-08.** The 2026-06-05
+  decision appended a buyer's reservations to their last non-closed order
+  regardless of broadcast date. The 2026-06-08 audit showed this polluted old
+  and paid orders, so the live reservation path now reuses only same-day
+  `#Эфир <date>` orders and blocks append to `Оплачен` /
+  `Частично оплачен`. See [[reservation-flow]].
 - **Ambiguous/unmatched reservations escalate to the operator.** When a comment
   has a reservation keyword + code but maps to zero or to more than one open lot,
   the system does NOT auto-reserve and does NOT post a public VK comment — it

@@ -913,13 +913,28 @@ export function attachWsServer(httpServer, config, services = {}) {
         && openLotsBySessionId.get(lot?.lotSessionId) === lot;
     }
 
+    function buildCustomerOrderCacheKey(viewerId, broadcastDate) {
+      return `${viewerId}:${formatBroadcastDate(broadcastDate)}`;
+    }
+
+    function deleteCustomerOrderCacheForViewer(viewerId) {
+      const rawKey = String(viewerId);
+      const datedPrefix = `${rawKey}:`;
+      customerOrdersByViewerId.delete(rawKey);
+      for (const key of customerOrdersByViewerId.keys()) {
+        if (String(key).startsWith(datedPrefix)) {
+          customerOrdersByViewerId.delete(key);
+        }
+      }
+    }
+
     async function processReservationEvent(lot, event) {
       const state = ensureReservationState(lot);
       const reservationSessionVersion = customerOrderSessionVersion;
       const broadcastDate = formatBroadcastDate(new Date(event.createdAt || Date.now()));
-      // Заказы объединяются НЕЗАВИСИМО от дня (решение оператора): ключ — только
-      // зритель. broadcastDate ниже идёт лишь в описание заказа (#Эфир, аудит).
-      const customerOrderKey = `${event.viewerId}`;
+      // Заказы объединяются только внутри одного эфира. Иначе сегодняшняя
+      // бронь может попасть в старый или уже оплаченный заказ того же клиента.
+      const customerOrderKey = buildCustomerOrderCacheKey(event.viewerId, broadcastDate);
 
       if (isSafeMode()) {
         event.status = "safe_mode_logged";
@@ -1081,12 +1096,11 @@ export function attachWsServer(httpServer, config, services = {}) {
           }
         }
 
-        // Cross-session merge: in-memory map is wiped when the WebSocket
-        // closes or the operator restarts the stream, so the same viewer's
-        // next reservation looks "fresh" even when MoySklad already has an
-        // open order for them. Ask MoySklad as source of truth. День значения
-        // не имеет: берём последний НЕзакрытый заказ покупателя (открыт до
-        // «Запакован/Отправлен/Доставлен», «Отменён» тоже закрыт).
+        // Cross-session merge внутри текущего эфира: in-memory map is wiped
+        // when the WebSocket closes or the operator restarts the stream, so
+        // the same viewer's next reservation looks "fresh" even when
+        // MoySklad already has today's broadcast order. Ask MoySklad as source
+        // of truth, but only for the current #Эфир marker.
         if (!existingOrder?.id) {
           try {
             resolvedCounterparty = await moysklad.ensureCounterparty({
@@ -1094,8 +1108,9 @@ export function attachWsServer(httpServer, config, services = {}) {
               viewerName: event.viewerName,
             });
             if (resolvedCounterparty?.id) {
-              const found = await moysklad.findOpenCustomerOrderForCounterparty(
+              const found = await moysklad.findBroadcastCustomerOrderForCounterparty(
                 resolvedCounterparty.id,
+                { broadcastDate },
               );
               if (found?.id) {
                 existingOrder = found;
@@ -1104,7 +1119,8 @@ export function attachWsServer(httpServer, config, services = {}) {
                   lotSessionId: lot.lotSessionId,
                   viewerId: event.viewerId,
                   orderId: found.id,
-                  source: "cross_session_lookup",
+                  broadcastDate,
+                  source: "cross_session_broadcast_lookup",
                 });
               }
             }
@@ -2779,9 +2795,9 @@ export function attachWsServer(httpServer, config, services = {}) {
           state.acceptedUserIds.delete(event.viewerId);
           // Сбрасываем in-memory маппинг заказа этого зрителя, чтобы следующая
           // бронь переразрешилась через МойСклад, а не дописала позицию в заказ,
-          // из которого мы только что удалили позицию. Ключ — только зритель
-          // (объединение независимо от дня).
-          customerOrdersByViewerId.delete(`${event.viewerId}`);
+          // из которого мы только что удалили позицию. Чистим все dated-cache
+          // записи зрителя: после отмены безопаснее заново спросить МойСклад.
+          deleteCustomerOrderCacheForViewer(event.viewerId);
           const previousStatus = event.status;
           event.status = "cancelled";
 

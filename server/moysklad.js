@@ -24,6 +24,13 @@ const CLOSED_ORDER_STATE_NAMES = new Set([
   "отменен",
 ]);
 
+const APPEND_BLOCKING_ORDER_STATE_NAMES = new Set([
+  ...CLOSED_ORDER_STATE_NAMES,
+  "оплачен",
+  "частично оплачен",
+  "оплачен частично",
+]);
+
 function normalizeStateName(name) {
   return String(name || "").trim().toLowerCase().replace(/ё/g, "е");
 }
@@ -354,13 +361,13 @@ export function createMoySkladClient(config, options = {}) {
         .map((item) => item.name),
     });
 
-    // Статусы заказа клиента из метаданных. Нужны для двух вещей:
+    // Статусы заказа клиента из метаданных. Нужны для трёх вещей:
     //  1) href статуса «Новый» — под ним создаём заказ;
     //  2) множество «закрытых» статусов — после них заказ дополнять нельзя
-    //     (новая бронь покупателя → новый заказ). Открыт всё остальное.
+    //     для сводок/старых open-order проверок;
+    //  3) множество статусов, куда нельзя дописывать новые брони.
     // Тянем метаданные всегда (даже при заданном customerOrderStateId), иначе
-    // не из чего собрать множество закрытых статусов для объединения заказов
-    // независимо от дня (см. operator-feedback «Log review 2026-06-05»).
+    // не из чего собрать эти множества по именам статусов.
     let states = [];
     try {
       const metadata = await requestJson("entity/customerorder/metadata", {});
@@ -391,6 +398,13 @@ export function createMoySkladClient(config, options = {}) {
       closedNames: closedStates.map((item) => item?.name),
     });
 
+    const appendBlockedStates = states.filter((item) => APPEND_BLOCKING_ORDER_STATE_NAMES.has(normalizeStateName(item?.name)));
+    defaults.appendBlockedStateHrefs = new Set(appendBlockedStates.map((item) => item?.meta?.href).filter(Boolean));
+    logger.info("moysklad", "customer_order_append_blocking_states_resolved", {
+      blockedCount: defaults.appendBlockedStateHrefs.size,
+      blockedNames: appendBlockedStates.map((item) => item?.name),
+    });
+
     cachedDefaults = defaults;
     return defaults;
   }
@@ -402,6 +416,13 @@ export function createMoySkladClient(config, options = {}) {
     });
 
     return (payload.rows || []).find((item) => item.name === name) || null;
+  }
+
+  async function getCounterpartyById(counterpartyId) {
+    if (!counterpartyId) {
+      return null;
+    }
+    return requestJson(`entity/counterparty/${counterpartyId}`);
   }
 
   const configuredVkIdAttributeId = config.vkIdAttributeId || "";
@@ -506,6 +527,23 @@ export function createMoySkladClient(config, options = {}) {
       return true; // нет статуса — трактуем как открытый (как «Новый»)
     }
     return !closedHrefs.has(stateHref);
+  }
+
+  function isAppendableCustomerOrderState(order, defaults) {
+    const blockedHrefs = defaults?.appendBlockedStateHrefs instanceof Set ? defaults.appendBlockedStateHrefs : null;
+    const state = order?.state || null;
+    const stateName = String(state?.name || "").trim();
+    if (stateName) {
+      return !APPEND_BLOCKING_ORDER_STATE_NAMES.has(normalizeStateName(stateName));
+    }
+    const stateHref = state?.meta?.href || "";
+    if (!blockedHrefs || blockedHrefs.size === 0) {
+      return true;
+    }
+    if (!stateHref) {
+      return true;
+    }
+    return !blockedHrefs.has(stateHref);
   }
 
   function buildMoySkladCustomerOrderUrl(orderId) {
@@ -624,14 +662,14 @@ export function createMoySkladClient(config, options = {}) {
       return false;
     }
     const defaults = await resolveDefaults();
-    const closedHrefs = defaults.closedStateHrefs instanceof Set ? defaults.closedStateHrefs : null;
-    if (!closedHrefs || closedHrefs.size === 0) {
-      // Закрытые статусы резолвить не удалось → не блокируем (поведение как
-      // до объединения заказов независимо от дня).
+    const blockedHrefs = defaults.appendBlockedStateHrefs instanceof Set ? defaults.appendBlockedStateHrefs : null;
+    if (!blockedHrefs || blockedHrefs.size === 0) {
+      // Блокирующие статусы резолвить не удалось → не блокируем кэшированный
+      // append только из-за отсутствия метаданных.
       return true;
     }
     const order = await requestJson(`entity/customerorder/${orderId}`, { expand: "state" }, { source });
-    return isOpenCustomerOrderState(order, defaults);
+    return isAppendableCustomerOrderState(order, defaults);
   }
 
   async function findLatestBroadcastCustomerOrder(counterpartyId, { broadcastDate, source } = {}) {
@@ -640,26 +678,46 @@ export function createMoySkladClient(config, options = {}) {
     }
 
     const defaults = await resolveDefaults();
-    if (!defaults.customerOrderStateHref) {
+    const blockedHrefs = defaults.appendBlockedStateHrefs instanceof Set ? [...defaults.appendBlockedStateHrefs] : [];
+    if (blockedHrefs.length === 0 && !defaults.customerOrderStateHref) {
       logger.warn("moysklad", "broadcast_order_lookup_skipped_no_state", { counterpartyId });
       return null;
     }
 
     const marker = buildBroadcastMarker(broadcastDate);
     const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
-    const filter = [
-      `agent=${agentHref}`,
-      `state=${defaults.customerOrderStateHref}`,
-    ].join(";");
+    const filterParts = [`agent=${agentHref}`];
+    if (blockedHrefs.length > 0) {
+      filterParts.push(...blockedHrefs.map((href) => `state!=${href}`));
+    } else {
+      filterParts.push(`state=${defaults.customerOrderStateHref}`);
+    }
 
-    const payload = await requestJson("entity/customerorder", {
-      filter,
-      order: "moment,desc",
-      limit: 100,
-    }, { source });
+    const limit = 100;
+    let offset = 0;
+    let row = null;
+    while (true) {
+      const payload = await requestJson("entity/customerorder", {
+        filter: filterParts.join(";"),
+        order: "moment,desc",
+        limit,
+        offset,
+      }, { source });
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      row = rows
+        .filter((item) => isAppendableCustomerOrderState(item, defaults))
+        .find((item) => String(item?.description || "").includes(marker));
+      if (row) {
+        break;
+      }
 
-    const row = (payload.rows || [])
-      .find((item) => String(item?.description || "").includes(marker));
+      offset += rows.length;
+      const total = Number(payload?.meta?.size || 0);
+      if (rows.length === 0 || rows.length < limit || (total > 0 && offset >= total)) {
+        break;
+      }
+    }
+
     if (!row) {
       return null;
     }
@@ -1032,13 +1090,41 @@ export function createMoySkladClient(config, options = {}) {
         // 2. Fallback: поиск по имени `VK: <name>`.
         const byName = await findCounterpartyByName(counterpartyName);
         if (byName) {
-          logger.info("moysklad", "counterparty_reused", {
-            viewerId,
-            counterpartyId: byName.id,
-            counterpartyName,
-            source: "name",
-          });
-          return backfillIfMissing(byName, "name");
+          let byNameDetails = byName;
+          try {
+            byNameDetails = await getCounterpartyById(byName.id) || byName;
+          } catch (error) {
+            logger.warn("moysklad", "counterparty_name_detail_lookup_failed", {
+              viewerId,
+              counterpartyId: byName.id,
+              counterpartyName,
+              error,
+            });
+          }
+          const existingViewerId = extractViewerIdFromCounterparty(byNameDetails, attributeId);
+          if (existingViewerId === String(viewerId)) {
+            logger.info("moysklad", "counterparty_reused", {
+              viewerId,
+              counterpartyId: byNameDetails.id,
+              counterpartyName,
+              source: "name",
+            });
+            return backfillIfMissing(byNameDetails, "name");
+          }
+          if (existingViewerId) {
+            logger.warn("moysklad", "counterparty_name_collision_skipped", {
+              viewerId,
+              existingViewerId,
+              counterpartyId: byNameDetails.id,
+              counterpartyName,
+            });
+          } else {
+            logger.warn("moysklad", "counterparty_name_unverified_skipped", {
+              viewerId,
+              counterpartyId: byNameDetails.id,
+              counterpartyName,
+            });
+          }
         }
 
         // 3. Fallback: поиск по маркеру `viewerId=N` в description.

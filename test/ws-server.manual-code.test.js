@@ -496,6 +496,41 @@ test("cached order closed by operator mid-stream is not appended to (new order c
   }
 });
 
+test("reservation reuses only today's broadcast order, not an old open order", async () => {
+  let openLookupCalled = false;
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_03204 },
+    overrides: {
+      ensureCounterparty: async () => ({ id: "cp-1" }),
+      findOpenCustomerOrderForCounterparty: async () => {
+        openLookupCalled = true;
+        return { id: "co-old-open", name: "VK-old" };
+      },
+      findBroadcastCustomerOrderForCounterparty: async () => null,
+      appendPositionToCustomerOrder: async () => ({ orderId: "co-old-open", positionId: "pos-wrong" }),
+      createCustomerOrderReservation: async () => ({ id: "co-new", positionId: "pos-created-1" }),
+    },
+  });
+  const harness = await startHarness({ knownCodes: ["03204"], moysklad });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 901, fromId: 9001, text: "03204", firstName: "Надежда" });
+    await client.waitFor(hasReserved, { timeoutMs: 6000 });
+
+    assert.equal(openLookupCalled, false);
+    assert.equal(harness.moysklad.callsTo("findBroadcastCustomerOrderForCounterparty").length, 1);
+    assert.equal(harness.moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("stream stop skips remaining lot-close publishes when VK video is gone", async () => {
   const videoGoneError = new Error("VK API 15: Access denied: video not found");
   videoGoneError.vkErrorCode = 15;

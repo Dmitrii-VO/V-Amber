@@ -30,6 +30,8 @@ Live reservation orders use a daily broadcast marker in the order description,
 for example `#Эфир 2026-05-24`. Cross-session merging only reuses orders for
 the same counterparty and the same marker. Open MoySklad orders from earlier
 days or non-broadcast orders remain separate even when their state is `Новый`.
+Paid orders are not append targets: `Оплачен` and `Частично оплачен` force a
+new order for later reservations, even when the marker matches.
 
 ## Safe mode
 

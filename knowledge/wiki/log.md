@@ -354,3 +354,13 @@ original item price in `price` and the calculated percentage in MoySklad's
 `discount` field. MoySklad now owns the final `sum` calculation instead of the
 integration pre-subtracting the discount from the price. Updated
 [[moysklad-integration]].
+
+## [2026-06-08] fix | Reservation orders scoped back to broadcast day
+
+Fixed the 2026-06-08 audit finding where current broadcast reservations were
+appended to old or already paid MoySklad customer orders. The hot path now
+reuses only same-day `#Эфир <date>` orders, blocks append to `Оплачен` and
+`Частично оплачен`, and keys the in-memory order cache by buyer plus broadcast
+date. Also hardened counterparty fallback so a same-name MoySklad counterparty
+with another VK ID is skipped instead of reused. Updated [[reservation-flow]],
+[[moysklad-integration]], and [[operator-feedback]].

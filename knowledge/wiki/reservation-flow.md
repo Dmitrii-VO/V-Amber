@@ -114,35 +114,38 @@ creates or appends a customer order in MoySklad. Safe mode wraps external write
 methods so dry runs still log detected events without creating real external
 state.
 
-### Customer-order merging (day-agnostic, since 2026-06-06)
+### Customer-order merging by broadcast day
 
-A buyer's reservations merge into **one** MoySklad customer order **regardless
-of broadcast day** (operator decision, log review 2026-06-05). The first
-reservation creates an order (still stamped with a `#Эфир 2026-06-05` marker for
-audit); every later reservation by the same buyer appends to their latest
-**non-closed** order.
+A buyer's reservations merge into one MoySklad customer order only within the
+same broadcast day. The order description carries a marker such as
+`#Эфир 2026-06-08`; later reservations reuse an order only when that marker
+matches the current broadcast date.
 
-- **Open (append):** `Новый`, `Собран`, `Выставлен счет`, `Оплачен`, `Копит`,
-  `Заказ проведен`.
-- **Closed (→ new order):** `Запакован`, `Отправлен`, `Доставлен`, `Отменён`.
-- No age limit. `Копит` is the buyer's explicit "tab" status.
+- **Append allowed:** current-broadcast orders whose status is not blocked.
+- **Append blocked:** `Оплачен`, `Частично оплачен`, `Запакован`,
+  `Отправлен`, `Доставлен`, `Отменён`.
+- **New order:** no current-broadcast order exists, or the found order is in a
+  blocked status.
+
+This prevents today's reservations from being added to old or already paid
+customer orders. `Копит` can still be reused when it belongs to the current
+broadcast marker and is not paid.
 
 Implementation:
 
-- `moysklad.findLatestOpenCustomerOrder` filters by `agent` and excludes the
-  closed states via repeated `state!=<href>` filters (MoySklad combines them
-  with AND), `order=moment,desc&limit=1`. Closed-state hrefs are resolved once
-  in `resolveDefaults` from `entity/customerorder/metadata` into
-  `defaults.closedStateHrefs`; `CLOSED_ORDER_STATE_NAMES` is the name set. If the
-  closed states can't be resolved, it falls back to `Новый`-only (old behavior).
-- `ws-server.js` `customerOrderKey` is the bare `viewerId` (the date was
-  dropped). Cross-session lookup uses `findOpenCustomerOrderForCounterparty`.
-- **Operator contract:** to start a buyer's *new* order, move the current one to
-  `Запакован`+ ; otherwise all new reservations keep appending.
+- `moysklad.findLatestBroadcastCustomerOrder` filters by `agent`, excludes
+  append-blocking states with repeated `state!=<href>` filters, orders by latest
+  moment, and then keeps only rows whose description contains the current
+  `#Эфир <date>` marker.
+- `ws-server.js` keys the in-memory order cache by `viewerId+broadcastDate`, not
+  by viewer alone.
+- `moysklad.isCustomerOrderAppendable` checks append-blocking states. This is
+  separate from digest "open" logic, so paid orders can still appear in day
+  summaries while staying blocked for new reservation writes.
 
-**Stale-cache guard.** The in-memory `customerOrdersByViewerId` is only set when
-the bot *creates* an order, and it now lives for the whole session (no daily
-reset). Before appending to a cached order, `ws-server.js` re-checks it against
+**Stale-cache guard.** The in-memory `customerOrdersByViewerId` is scoped by
+viewer and broadcast date. Before appending to a cached order, `ws-server.js`
+re-checks it against
 MoySklad via `moysklad.isCustomerOrderAppendable(orderId)` — a direct read of
 that order's current state. If the operator closed it mid-stream (or the check
 fails), the cache entry is dropped and the reservation re-resolves through the
@@ -201,9 +204,9 @@ as `customerOrder.positionId`.
 
 On a confirmed delete the handler decrements `committedReservationCount`
 by `event.quantity`, removes the viewer from `acceptedUserIds` (so the
-same buyer can reserve again), drops the `customerOrdersByViewerId` entry
-(keyed by `viewerId`), and sets `event.status = "cancelled"`. The freed slot is available
-to the next buyer immediately. Safe mode blocks the delete: the handler
+same buyer can reserve again), drops that viewer's cached customer-order
+entries, and sets `event.status = "cancelled"`. The freed slot is available to
+the next buyer immediately. Safe mode blocks the delete: the handler
 re-checks `isSafeMode()` and replies with a warning without touching
 state, and `removePositionFromOrder` is also in the `wrapWithSafeMode`
 list. The cancel is silent to buyers (no public VK reply) to avoid the
