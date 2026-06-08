@@ -48,11 +48,19 @@ When a comment has a reservation keyword + code but maps to **zero or more than
 one** open lot, the system does **not** auto-reserve and does **not** post a
 public VK comment. Instead it escalates to the operator console: a
 `reservationAttention` WS message (`reason: "no_open_lot" | "ambiguous"`, with
-`viewerName`, `code`, `candidateCodes`, `text`) renders an amber "Брони требуют
-внимания" banner (`web-ui/app.js`, dismissible rows). The forensic
+`viewerName`, `code`, `originalCode`, `candidateCodes`, `text`) renders an amber
+"Брони требуют внимания" banner (`web-ui/app.js`, dismissible rows). If the raw
+comment code uniquely resolves through the product-code cache, `code` is the
+catalog code and `originalCode` keeps the buyer's raw form (`246` → `00246`).
+Ambiguous matches keep candidate codes for manual review. The forensic
 `reservation_no_open_lot` warn log is still emitted for the diagnostic bundle.
 This is the channel for typo/ambiguous bookings the operator must clarify
 («повтори бронь, Ирина»). Tests: `test/ws-server.manual-code.test.js`.
+
+The VK poller keeps a 30-second grace window after the final open lot closes.
+Reservation-like comments in that window still become `reservationAttention`
+rows with an empty `openLotCodes` list. They are not auto-reserved because there
+is no current lot to attach stock, price, and MoySklad writes to.
 
 ## Active lot state
 
@@ -91,6 +99,12 @@ Subsequent reservations on the same lot hit
 `committedReservationCount > 0` and are rejected as `out_of_stock`,
 unless a follow-up moment lands a real stock number that lifts the
 flag. See [[stock-synchronization]] and [[operator-feedback]].
+
+The unknown-stock gate is serialized per lot before `primaryReservation` and
+`committedReservationCount` are updated. If two first reservations arrive in the
+same poll batch while stock is still unknown, only the first can consume the
+single fallback slot; the second is rejected as `out_of_stock` and can move to
+wishlist.
 
 The guard now also respects per-event `quantity`: the request is rejected
 when `remainingStock < event.quantity`, and `committedReservationCount`

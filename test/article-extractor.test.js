@@ -158,6 +158,37 @@ test("detectArticle keeps exact known code before trying known prefixes", async 
   assert.equal(result.chosen?.code, "01022");
 });
 
+test("detectArticle resolves a spoken code without leading zeroes to the catalog code", async () => {
+  const result = await detectArticle(
+    "код товара два четыре три",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["00243"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "00243");
+  assert.equal(result.chosen?.originalCode, "243");
+  assert.equal(result.chosen?.knownCode, true);
+});
+
+test("detectArticle resolves a trailing size after a code without leading zeroes", async () => {
+  const result = await detectArticle(
+    "код товара два шесть два пятьдесят сантиметров",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["00262"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "00262");
+  assert.equal(result.chosen?.originalCode, "26250");
+});
+
+test("detectArticle does not choose an ambiguous leading-zero catalog match", async () => {
+  const result = await detectArticle(
+    "код товара два четыре три",
+    { ...baseConfig, triggers: ["код товара"], knownCodes: new Set(["00243", "000243"]) },
+  );
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "243");
+  assert.notEqual(result.chosen?.knownCode, true);
+});
+
 test("knownCodes accepts Array as well as Set", async () => {
   // normalizeKnownCodes must handle both — settings.json loaders typically
   // pass arrays, while productCodeCache.getCodes() returns a Set. Regression

@@ -31,6 +31,12 @@ const APPEND_BLOCKING_ORDER_STATE_NAMES = new Set([
   "оплачен частично",
 ]);
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function normalizeStateName(name) {
   return String(name || "").trim().toLowerCase().replace(/ё/g, "е");
 }
@@ -79,6 +85,18 @@ export function createMoySkladClient(config, options = {}) {
   // Bulk-операции (загрузка каталога продуктов на сотни/тысячи позиций)
   // выходят за горячий budget — у них отдельный потолок.
   const bulkRequestTimeoutMs = Math.max(requestTimeoutMs, Number(config?.bulkRequestTimeoutMs || 60000));
+  const getRetryAttempts = Math.max(1, Number(config?.getRetryAttempts || 3));
+  const getRetryBaseDelayMs = Math.max(0, Number(config?.getRetryBaseDelayMs || 500));
+
+  function isRetryableGetError(error, httpStatus) {
+    if ([429, 502, 503, 504].includes(httpStatus)) {
+      return true;
+    }
+    if (error?.code === "MOYSKLAD_TIMEOUT") {
+      return true;
+    }
+    return httpStatus === 0;
+  }
 
   async function fetchWithTimeout(url, init, label, timeoutMs) {
     const effectiveTimeoutMs = Math.max(1000, Number(timeoutMs || requestTimeoutMs));
@@ -105,33 +123,63 @@ export function createMoySkladClient(config, options = {}) {
     let errorMessage = null;
     let payload = null;
     const callSource = options.source || undefined;
+    const maxAttempts = Math.max(1, Number(options.retryAttempts || getRetryAttempts));
+    let attempts = 0;
     try {
-      const response = await fetchWithTimeout(
-        buildApiUrl(config.baseUrl, path, searchParams),
-        {
-          headers: {
-            Authorization: authHeader,
-            Accept: "application/json;charset=utf-8",
-          },
-        },
-        `GET ${path}`,
-        options.timeoutMs,
-      );
-      httpStatus = response.status;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        attempts = attempt;
+        try {
+          const response = await fetchWithTimeout(
+            buildApiUrl(config.baseUrl, path, searchParams),
+            {
+              headers: {
+                Authorization: authHeader,
+                Accept: "application/json;charset=utf-8",
+              },
+            },
+            `GET ${path}`,
+            options.timeoutMs,
+          );
+          httpStatus = response.status;
 
-      if (!response.ok) {
-        errorMessage = `MoySklad HTTP ${response.status}`;
-        throw new Error(errorMessage);
+          if (!response.ok) {
+            errorMessage = `MoySklad HTTP ${response.status}`;
+            const error = new Error(errorMessage);
+            error.httpStatus = response.status;
+            throw error;
+          }
+
+          payload = await response.json();
+          if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+            errorMessage = payload.errors.map((item) => item.error).join("; ");
+            throw new Error(errorMessage);
+          }
+
+          ok = true;
+          return payload;
+        } catch (error) {
+          errorMessage = errorMessage || (error instanceof Error ? error.message : String(error));
+          const retryable = isRetryableGetError(error, error?.httpStatus ?? httpStatus);
+          if (!retryable || attempt >= maxAttempts) {
+            throw error;
+          }
+          const delayMs = getRetryBaseDelayMs * 2 ** (attempt - 1);
+          logger.warn("moysklad", "get_retry_scheduled", {
+            path,
+            attempt,
+            nextAttempt: attempt + 1,
+            maxAttempts,
+            delayMs,
+            httpStatus: error?.httpStatus ?? httpStatus,
+            error,
+          });
+          errorMessage = null;
+          httpStatus = 0;
+          if (delayMs > 0) {
+            await delay(delayMs);
+          }
+        }
       }
-
-      payload = await response.json();
-      if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
-        errorMessage = payload.errors.map((item) => item.error).join("; ");
-        throw new Error(errorMessage);
-      }
-
-      ok = true;
-      return payload;
     } catch (error) {
       errorMessage = errorMessage || (error instanceof Error ? error.message : String(error));
       throw error;
@@ -143,6 +191,7 @@ export function createMoySkladClient(config, options = {}) {
         durationMs: Date.now() - startedAt,
         ok,
         httpStatus,
+        attempts,
         idsExtracted: extractIdsFromResponse(payload),
         errorMessage: ok ? null : errorMessage,
         source: callSource,

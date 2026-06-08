@@ -364,3 +364,23 @@ reuses only same-day `#Эфир <date>` orders, blocks append to `Оплачен
 date. Also hardened counterparty fallback so a same-name MoySklad counterparty
 with another VK ID is skipped instead of reused. Updated [[reservation-flow]],
 [[moysklad-integration]], and [[operator-feedback]].
+
+## [2026-06-08] parser | Product-code resolver handles missing leading zeroes
+
+Added a shared product-code resolver for voice detection, manual code entry, and
+reservation-attention diagnostics. Operator codes like `243` now resolve to the
+single matching catalog code such as `00243`; ambiguous leading-zero matches are
+rejected instead of guessed. `reservationAttention` now shows the resolved
+catalog code while preserving the buyer's raw `originalCode`. Updated
+[[live-commerce-flow]], [[reservation-flow]], and [[moysklad-integration]].
+
+## [2026-06-08] reliability | Harden VK, MoySklad, and unknown-stock edges
+
+Implemented the secondary-risk pass from the 2026-06-08 audit. VK comment
+polling now has a 30-second grace window after the last lot closes, so late
+between-lot bookings escalate to the operator instead of disappearing. MoySklad
+GET calls retry transient read failures, but write calls still avoid generic
+retry to prevent duplicate customer orders or positions. Unknown-stock first
+reservations are serialized per lot, so simultaneous comments can consume only
+one fallback slot. Updated [[vk-integration]], [[reservation-flow]], and
+[[moysklad-integration]].

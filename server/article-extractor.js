@@ -4,6 +4,11 @@ import {
   TENS_WORDS,
   HUNDREDS_WORDS,
 } from "./ru-numerals.js";
+import {
+  normalizeKnownCodes,
+  resolveKnownCode,
+  resolveKnownCodePrefix,
+} from "./product-code-resolver.js";
 
 // В артикулах ноль — значимая цифра, поэтому здесь UNIT_WORDS расширяет
 // базовый словарь (1-9) нулём. DIGIT_WORDS — строковое представление тех же
@@ -138,34 +143,6 @@ function filterCandidatesByLength(candidates, config) {
   return candidates.filter((candidate) => candidate.code.length >= minLength && candidate.code.length <= maxLength);
 }
 
-function normalizeKnownCodes(value) {
-  if (!value) {
-    return null;
-  }
-
-  if (value instanceof Set) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return new Set(value.map((code) => String(code || "").trim()).filter(Boolean));
-  }
-
-  return null;
-}
-
-function findKnownPrefix(code, knownCodes, config) {
-  const minLength = Math.max(1, Number(config?.minLength || 1));
-  for (let length = code.length - 1; length >= minLength; length -= 1) {
-    const prefix = code.slice(0, length);
-    if (knownCodes.has(prefix)) {
-      return prefix;
-    }
-  }
-
-  return "";
-}
-
 function applyKnownCodeHints(candidates, config) {
   const knownCodes = normalizeKnownCodes(config?.knownCodes);
   if (!knownCodes || knownCodes.size === 0) {
@@ -178,22 +155,26 @@ function applyKnownCodeHints(candidates, config) {
       continue;
     }
 
-    if (knownCodes.has(candidate.code)) {
+    const exact = resolveKnownCode(candidate.code, knownCodes);
+    if (exact.status === "matched") {
       hinted.push({
         ...candidate,
+        code: exact.code,
+        originalCode: exact.originalCode !== exact.code ? exact.originalCode : candidate.originalCode,
+        source: exact.reason === "leading_zeros" ? `${candidate.source || "unknown"}_known_zero_pad` : candidate.source,
         confidence: Math.max(candidate.confidence || 0, 0.99),
         knownCode: true,
       });
       continue;
     }
 
-    const prefix = findKnownPrefix(candidate.code, knownCodes, config);
-    if (prefix) {
+    const prefix = resolveKnownCodePrefix(candidate.code, knownCodes, config);
+    if (prefix.status === "matched") {
       hinted.push({
         ...candidate,
-        code: prefix,
+        code: prefix.code,
         originalCode: candidate.code,
-        source: `${candidate.source || "unknown"}_known_prefix`,
+        source: `${candidate.source || "unknown"}_${prefix.reason === "leading_zeros_prefix" ? "known_zero_pad_prefix" : "known_prefix"}`,
         confidence: Math.max(candidate.confidence || 0, 0.985),
         knownCode: true,
       });

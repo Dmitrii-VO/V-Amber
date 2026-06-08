@@ -27,6 +27,11 @@ so a polling burst never delays a reservation reply. The comment poll cadence in
 (was a fixed 2 s). Lot cards also degrade to text-only when a photo upload fails
 or VK returns `error_code 100`. Details in [[vk-comments]].
 
+Since 2026-06-08, the poller also stays alive for a 30-second grace window after
+the last open lot closes. Comments that look like reservations during that gap
+are escalated as `reservationAttention` with no automatic reservation, so the
+operator can handle late or between-lot bookings manually.
+
 ## Token routing (critical)
 
 All `video.*` methods — `video.getComments`, `video.createComment`,

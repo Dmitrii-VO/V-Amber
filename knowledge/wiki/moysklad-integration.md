@@ -16,6 +16,12 @@ The live-commerce flow uses spoken product codes to load a product card and
 stock data. The product-code cache helps disambiguate spoken article codes from
 sizes or prices.
 
+`server/product-code-resolver.js` normalizes catalog-code lookups shared by
+voice detection, manual code entry, and reservation-attention diagnostics. Exact
+codes win first. Missing leading zeroes can resolve to a single catalog code
+(`243` → `00243`), and ambiguous leading-zero matches are rejected rather than
+sent to MoySklad.
+
 ## Reservation orders
 
 For buyer reservations, the backend creates or appends customer orders and
@@ -32,6 +38,12 @@ the same counterparty and the same marker. Open MoySklad orders from earlier
 days or non-broadcast orders remain separate even when their state is `Новый`.
 Paid orders are not append targets: `Оплачен` and `Частично оплачен` force a
 new order for later reservations, even when the marker matches.
+
+Read calls to MoySklad (`GET`) retry transient failures: HTTP 429, 502, 503,
+504, network failures, and configured request timeouts. Write calls (`POST`,
+`PUT`, `DELETE`) are not retried by this generic layer, because customer-order
+creation and position appends are not idempotent without a MoySklad-side key.
+Diagnostic `moysklad_call` events include total attempts for retried reads.
 
 ## Safe mode
 

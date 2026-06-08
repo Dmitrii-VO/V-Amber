@@ -16,6 +16,14 @@ const CARD_03204 = {
   salePrice: 4500,
   availableStock: 7,
 };
+const CARD_00243 = {
+  id: "p-00243",
+  name: "Бусы янтарь",
+  code: "00243",
+  pathName: "Украшения/Бусы",
+  salePrice: 2800,
+  availableStock: 3,
+};
 
 // Гоняет голосовой путь: start → onFinal(транскрипт с триггером) → лот.
 async function openLotByVoice(client, harness, text = "код товара 03204") {
@@ -40,6 +48,24 @@ test("harness: voice-confirmed detection opens a lot and publishes a VK card", a
     assert.equal(state.activeLot.source, "regex");
     assert.equal(harness.vk.callsTo("publishLotCard").length, 1);
     assert.equal(harness.moysklad.callsTo("getProductCardByCode")[0].args[0], "03204");
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("voice: code without leading zeroes opens the matching catalog code", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "00243": CARD_00243 },
+    knownCodes: ["00243"],
+  });
+  const client = await harness.connect();
+  try {
+    const state = await openLotByVoice(client, harness, "код товара два четыре три");
+    assert.equal(state.activeLot.code, "00243");
+    assert.equal(state.activeLot.product.name, "Бусы янтарь");
+    assert.equal(harness.moysklad.callsTo("getProductCardByCode")[0].args[0], "00243");
+    assert.equal(harness.vk.callsTo("publishLotCard").length, 1);
   } finally {
     await client.close();
     await harness.close();

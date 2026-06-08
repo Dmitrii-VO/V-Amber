@@ -15,6 +15,7 @@ import { parseCancelCommand } from "./cancel-command-parser.js";
 import { parseQuantityCommand } from "./quantity-command-parser.js";
 import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
+import { resolveKnownCode } from "./product-code-resolver.js";
 import {
   sendJson,
   getVkPublicationCommentId,
@@ -214,6 +215,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // другая неустранимая ошибка. Любые публикации/опрос для такого лота —
     // no-op до конца сессии; пользователь увидит уведомление в UI один раз.
     const poisonedLotSessionIds = new Set();
+    const reservationStockGateByLotSessionId = new Map();
     // Однократные токены для голосовой команды «+N штук». Сервер выдаёт
     // actionId в voiceQuantityMatch и хранит проверенный target (lot, event,
     // quantity). При appendReservationQuantity клиент возвращает этот же
@@ -917,6 +919,24 @@ export function attachWsServer(httpServer, config, services = {}) {
       return `${viewerId}:${formatBroadcastDate(broadcastDate)}`;
     }
 
+    async function withReservationStockGate(lot, task) {
+      const lotSessionId = lot?.lotSessionId;
+      if (!lotSessionId) {
+        return task();
+      }
+
+      const previous = reservationStockGateByLotSessionId.get(lotSessionId) || Promise.resolve();
+      const current = previous.catch(() => {}).then(task);
+      reservationStockGateByLotSessionId.set(lotSessionId, current);
+      try {
+        return await current;
+      } finally {
+        if (reservationStockGateByLotSessionId.get(lotSessionId) === current) {
+          reservationStockGateByLotSessionId.delete(lotSessionId);
+        }
+      }
+    }
+
     function deleteCustomerOrderCacheForViewer(viewerId) {
       const rawKey = String(viewerId);
       const datedPrefix = `${rawKey}:`;
@@ -966,28 +986,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
-      if (state.primaryReservation) {
-        event.status = "waitlist_pending";
-        const waitlistPosition = state.events.filter((candidate) => candidate.status === "waitlist_pending").length;
-        logger.info("vk", "reservation_waitlist_pending", {
-          connectionId,
-          lotSessionId: lot.lotSessionId,
-          commentId: event.commentId,
-          viewerId: event.viewerId,
-          position: waitlistPosition,
-        });
-        sessionLog.logReservationWaitlist({
-          viewerName: event.viewerName,
-          viewerId: event.viewerId,
-          lotCode: lot.code,
-          position: waitlistPosition,
-        });
-        logReservationFinalized(lot, event, { waitlistPosition });
-        emitState();
-        notifyReservationStatus(lot, event);
-        return;
-      }
-
       if (!lot.product?.id) {
         event.status = "product_not_found";
         logger.warn("vk", "reservation_product_not_found", {
@@ -1003,61 +1001,92 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
-      // На первой брони со «склад=unknown» — однократная попытка дотянуть
-      // реальное число из MoySklad. Защищает от молчаливого over-sell в
-      // случаях, когда стартовая карточка лота вернула null/0.
-      await ensureStockKnownBeforeFirstReservation(lot, state);
-      if (openLotsBySessionId.get(lot?.lotSessionId) !== lot) {
-        // Лот закрыли, пока мы ждали MoySklad — выходим без побочных
-        // эффектов; processReservationEvent вызывался для закрытого лота.
-        return;
-      }
+      const gateResult = await withReservationStockGate(lot, async () => {
+        if (state.primaryReservation) {
+          event.status = "waitlist_pending";
+          const waitlistPosition = state.events.filter((candidate) => candidate.status === "waitlist_pending").length;
+          logger.info("vk", "reservation_waitlist_pending", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            position: waitlistPosition,
+          });
+          sessionLog.logReservationWaitlist({
+            viewerName: event.viewerName,
+            viewerId: event.viewerId,
+            lotCode: lot.code,
+            position: waitlistPosition,
+          });
+          logReservationFinalized(lot, event, { waitlistPosition });
+          emitState();
+          notifyReservationStatus(lot, event);
+          return { proceed: false };
+        }
 
-      const needed = Math.max(1, Number(event.quantity) || 1);
-      const remainingStock = getRemainingAvailableStock(lot, state);
-      if (remainingStock !== null && remainingStock < needed) {
-        event.status = "out_of_stock";
-        logger.info("vk", "reservation_out_of_stock", {
-          connectionId,
-          lotSessionId: lot.lotSessionId,
-          code: lot.code,
-          commentId: event.commentId,
-          viewerId: event.viewerId,
-          availableStock: lot.product?.availableStock ?? null,
-        });
-        sessionLog.logReservationOutOfStock({
-          viewerName: event.viewerName,
-          viewerId: event.viewerId,
-          lotCode: lot.code,
-        });
-        try {
-          const wishlistEntry = await addWishlistFromComment(lot, event, "out_of_stock_reservation");
-          if (wishlistEntry?.id) {
-            event.wishlistEntryId = wishlistEntry.id;
-          }
-        } catch (error) {
-          logger.warn("wishlist", "add_from_out_of_stock_reservation_failed", {
+        // На первой брони со «склад=unknown» — однократная попытка дотянуть
+        // реальное число из MoySklad. Защищает от молчаливого over-sell в
+        // случаях, когда стартовая карточка лота вернула null/0.
+        await ensureStockKnownBeforeFirstReservation(lot, state);
+        if (openLotsBySessionId.get(lot?.lotSessionId) !== lot) {
+          // Лот закрыли, пока мы ждали MoySklad — выходим без побочных
+          // эффектов; processReservationEvent вызывался для закрытого лота.
+          return { proceed: false };
+        }
+
+        const needed = Math.max(1, Number(event.quantity) || 1);
+        const remainingStock = getRemainingAvailableStock(lot, state);
+        if (remainingStock !== null && remainingStock < needed) {
+          event.status = "out_of_stock";
+          logger.info("vk", "reservation_out_of_stock", {
             connectionId,
             lotSessionId: lot.lotSessionId,
             code: lot.code,
             commentId: event.commentId,
             viewerId: event.viewerId,
-            error,
+            availableStock: lot.product?.availableStock ?? null,
           });
+          sessionLog.logReservationOutOfStock({
+            viewerName: event.viewerName,
+            viewerId: event.viewerId,
+            lotCode: lot.code,
+          });
+          try {
+            const wishlistEntry = await addWishlistFromComment(lot, event, "out_of_stock_reservation");
+            if (wishlistEntry?.id) {
+              event.wishlistEntryId = wishlistEntry.id;
+            }
+          } catch (error) {
+            logger.warn("wishlist", "add_from_out_of_stock_reservation_failed", {
+              connectionId,
+              lotSessionId: lot.lotSessionId,
+              code: lot.code,
+              commentId: event.commentId,
+              viewerId: event.viewerId,
+              error,
+            });
+          }
+          logReservationFinalized(lot, event, { wishlistEntryId: event.wishlistEntryId || null });
+          emitState();
+          notifyReservationStatus(lot, event);
+          return { proceed: false };
         }
-        logReservationFinalized(lot, event, { wishlistEntryId: event.wishlistEntryId || null });
+
+        state.primaryReservation = {
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+        };
+        event.status = "creating_order";
+        state.committedReservationCount = (state.committedReservationCount || 0) + needed;
         emitState();
-        notifyReservationStatus(lot, event);
+        return { proceed: true, needed };
+      });
+
+      if (!gateResult?.proceed) {
         return;
       }
 
-      state.primaryReservation = {
-        commentId: event.commentId,
-        viewerId: event.viewerId,
-      };
-      event.status = "creating_order";
-      state.committedReservationCount = (state.committedReservationCount || 0) + needed;
-      emitState();
+      const needed = gateResult.needed;
 
       let nextWaitlistEvent = null;
 
@@ -1391,21 +1420,32 @@ export function attachWsServer(httpServer, config, services = {}) {
       const ACTIVE_POLL_MS = 1500;
       const IDLE_POLL_STEP_MS = 1500;
       const IDLE_POLL_MAX_MS = 8000;
+      const NO_OPEN_LOT_GRACE_MS = 30000;
 
       void (async function pollLoop() {
         let initialized = false;
         let consecutiveFailures = 0;
         let quietCycles = 0;
+        let noOpenLotsSince = null;
         // VK user id самого бота: его комментарии (карточки, обновления цены,
         // подтверждения броней) нельзя переисследовать как чужие брони. 0 =
         // не удалось определить → фильтр выключен (поведение как раньше).
         const selfUserId = (await vk.getSelfUserId?.()) || 0;
 
-        while (generation === commentPollingGeneration && openLotsBySessionId.size > 0) {
+        while (generation === commentPollingGeneration) {
+          if (openLotsBySessionId.size > 0) {
+            noOpenLotsSince = null;
+          } else {
+            noOpenLotsSince = noOpenLotsSince || Date.now();
+            if (Date.now() - noOpenLotsSince > NO_OPEN_LOT_GRACE_MS) {
+              break;
+            }
+          }
+
           let activityThisCycle = false;
           try {
             const comments = await vk.getComments(100);
-            if (generation !== commentPollingGeneration || openLotsBySessionId.size === 0) {
+            if (generation !== commentPollingGeneration) {
               break;
             }
 
@@ -1457,6 +1497,13 @@ export function attachWsServer(httpServer, config, services = {}) {
                 const probe = parseReservationComment(comment.text);
                 if (probe.hasReservationKeyword && probe.code) {
                   const reason = target?.reason || "no_open_lot";
+                  const knownCodes = productCodeCache?.getCodes?.() || null;
+                  const probeCodeResolution = knownCodes && knownCodes.size > 0
+                    ? resolveKnownCode(probe.code, knownCodes)
+                    : { status: "no_catalog", code: probe.code, candidates: [] };
+                  const attentionCode = probeCodeResolution.status === "matched"
+                    ? probeCodeResolution.code
+                    : probe.code;
                   const openLotCodes = getOpenLots().map((lot) => lot.code);
                   const profileForAttention = profileMap.get(comment.from_id);
                   const viewerNameForAttention = profileForAttention
@@ -1470,6 +1517,8 @@ export function attachWsServer(httpServer, config, services = {}) {
                     reason,
                     text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
                     reservationCommentCode: probe.code,
+                    catalogCode: attentionCode,
+                    catalogMatchReason: probeCodeResolution.reason || null,
                     candidateCodes: target?.candidateCodes || [],
                     openLotCodes,
                   });
@@ -1479,9 +1528,10 @@ export function attachWsServer(httpServer, config, services = {}) {
                     commentId: comment.id,
                     viewerId: comment.from_id,
                     viewerName: viewerNameForAttention,
-                    code: probe.code,
+                    code: attentionCode,
+                    originalCode: attentionCode !== probe.code ? probe.code : undefined,
                     text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-                    candidateCodes: target?.candidateCodes || [],
+                    candidateCodes: target?.candidateCodes || probeCodeResolution.candidates || [],
                     openLotCodes,
                   });
                 }
@@ -2105,10 +2155,14 @@ export function attachWsServer(httpServer, config, services = {}) {
       // null-карточкой и оператор узнавал о промахе только по логам.
       // Параллель с ручным вводом (manualCode rejection above).
       const knownCodesForGate = productCodeCache?.getCodes?.() || null;
-      if (knownCodesForGate && knownCodesForGate.size > 0 && !knownCodesForGate.has(selectedCode)) {
+      const voiceCodeResolution = knownCodesForGate && knownCodesForGate.size > 0
+        ? resolveKnownCode(selectedCode, knownCodesForGate)
+        : { status: "no_catalog", code: selectedCode, candidates: [] };
+      if (knownCodesForGate && knownCodesForGate.size > 0 && voiceCodeResolution.status !== "matched") {
         logger.warn("article", "voice_code_rejected_unknown", {
           connectionId,
           code: selectedCode,
+          candidateCodes: voiceCodeResolution.candidates || [],
           source,
           transcript: detection?.transcript ?? null,
         });
@@ -2117,6 +2171,9 @@ export function attachWsServer(httpServer, config, services = {}) {
           message: `Код ${selectedCode} не найден в каталоге МойСклад`,
         });
         return;
+      }
+      if (voiceCodeResolution.status === "matched" && voiceCodeResolution.code !== selectedCode) {
+        selectedCode = voiceCodeResolution.code;
       }
 
       // Идемпотентная переразметка. Оператор регулярно проговаривает код
@@ -2623,10 +2680,12 @@ export function attachWsServer(httpServer, config, services = {}) {
             });
             return;
           }
-          if (!knownCodes.has(code)) {
+          const manualCodeResolution = resolveKnownCode(code, knownCodes);
+          if (manualCodeResolution.status !== "matched") {
             logger.warn("article", "manual_code_rejected_unknown", {
               connectionId,
               code,
+              candidateCodes: manualCodeResolution.candidates || [],
             });
             sendJson(websocket, {
               type: "warning",
@@ -2634,25 +2693,39 @@ export function attachWsServer(httpServer, config, services = {}) {
             });
             return;
           }
+          const resolvedCode = manualCodeResolution.code;
 
           const detectionId = `det-manual-${activeRunId}-${nextDetectionId++}`;
           const detection = {
             transcript: `manual:${code}`,
             matchedTrigger: false,
             status: "confirmed",
-            candidates: [{ code, source: "manual", confidence: 1, knownCode: true }],
-            chosen: { code, source: "manual", confidence: 1 },
+            candidates: [{
+              code: resolvedCode,
+              originalCode: code !== resolvedCode ? code : undefined,
+              source: "manual",
+              confidence: 1,
+              knownCode: true,
+            }],
+            chosen: {
+              code: resolvedCode,
+              originalCode: code !== resolvedCode ? code : undefined,
+              source: "manual",
+              confidence: 1,
+            },
             detectionId,
           };
 
           logger.info("article", "manual_code_submitted", {
             connectionId,
-            code,
+            code: resolvedCode,
+            originalCode: code !== resolvedCode ? code : undefined,
             detectionId,
             activeLotCode: activeLot?.code || null,
           });
           sessionLog.logManualCodeSubmitted({
-            code,
+            code: resolvedCode,
+            originalCode: code !== resolvedCode ? code : undefined,
             detectionId,
             activeLotCode: activeLot?.code || null,
             activeLotSessionId: activeLot?.lotSessionId || null,
@@ -2662,7 +2735,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           // кодом инвалидирует этот manual через expectedDetectionId, и
           // наоборот (см. concurrency-gate в handleConfirmedDetection).
           activeDetectionActionId = detectionId;
-          await handleConfirmedDetection(detection, code, "manual", {
+          await handleConfirmedDetection(detection, resolvedCode, "manual", {
             runId: activeRunId,
             enforceActiveRun: true,
             expectedDetectionId: detectionId,

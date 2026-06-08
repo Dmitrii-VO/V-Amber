@@ -14,6 +14,10 @@ const CARD_03199 = {
   id: "p-03199", name: "Кольцо янтарь", code: "03199",
   pathName: "Украшения/Кольца", salePrice: 3200, availableStock: 4,
 };
+const CARD_00243 = {
+  id: "p-00243", name: "Бусы янтарь", code: "00243",
+  pathName: "Украшения/Бусы", salePrice: 2800, availableStock: 3,
+};
 const CARD_03204_ONE_IN_STOCK = {
   id: "p-03204", name: "Серьги янтарь", code: "03204",
   pathName: "Украшения/Серьги", salePrice: 4500, availableStock: 1,
@@ -108,6 +112,39 @@ test("#14: manualCode on idle opens a new lot with source=manual", async () => {
     assert.equal(state.activeLot.product.name, "Серьги янтарь");
     assert.equal(harness.vk.callsTo("publishLotCard").length, 1);
     assert.equal(harness.moysklad.callsTo("getProductCardByCode")[0].args[0], "03204");
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("#14: manualCode resolves missing leading zeroes to a catalog code", async () => {
+  const harness = await startHarness({ cardsByCode: { "00243": CARD_00243 }, knownCodes: ["00243"] });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "243" });
+    const state = await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "00243");
+    assert.equal(state.activeLot.source, "manual");
+    assert.equal(state.activeLot.product.name, "Бусы янтарь");
+    assert.equal(harness.moysklad.callsTo("getProductCardByCode")[0].args[0], "00243");
+    assert.equal(harness.vk.callsTo("publishLotCard").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("#14: manualCode rejects ambiguous leading-zero catalog matches", async () => {
+  const harness = await startHarness({ knownCodes: ["00243", "000243"] });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "243" });
+    const warning = await client.waitFor("warning");
+    assert.match(warning.message, /не найден в каталоге/);
+    assert.equal(harness.moysklad.callsTo("getProductCardByCode").length, 0);
+    assert.equal(harness.vk.callsTo("publishLotCard").length, 0);
   } finally {
     await client.close();
     await harness.close();
@@ -222,6 +259,89 @@ test("unknown stock surfaces a stockUnknown flag and a warning to the operator",
     );
     assert.equal(flagged.activeLot.product.availableStock, null);
   } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("unknown stock processes simultaneous first reservations through one stock gate", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204_NO_STOCK },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 251, fromId: 6101, text: "03204", firstName: "Аня" });
+    harness.vk.pushComment({ id: 252, fromId: 6102, text: "03204", firstName: "Оля" });
+
+    const state = await client.waitFor((m) => {
+      const events = m.activeLot?.reservations?.events || [];
+      return m.type === "state"
+        && events.some((event) => event.status === "reserved")
+        && events.some((event) => event.status === "out_of_stock");
+    }, { timeoutMs: 8000 });
+    const events = state.activeLot.reservations.events;
+    assert.equal(events.filter((event) => event.status === "reserved").length, 1);
+    assert.equal(events.filter((event) => event.status === "out_of_stock").length, 1);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(harness.wishlistStore.calls.length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("known stock simultaneous reservations put the second viewer on waitlist", async () => {
+  let releaseOrder;
+  const firstOrderWrite = new Promise((resolve) => {
+    releaseOrder = resolve;
+  });
+  let createCalls = 0;
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_03204 },
+    overrides: {
+      createCustomerOrderReservation: async () => {
+        createCalls += 1;
+        if (createCalls === 1) {
+          await firstOrderWrite;
+        }
+        return { id: `co-test-${createCalls}`, positionId: `pos-created-${createCalls}` };
+      },
+    },
+  });
+  const harness = await startHarness({
+    knownCodes: ["03204"],
+    moysklad,
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 261, fromId: 6201, text: "03204", firstName: "Аня" });
+    harness.vk.pushComment({ id: 262, fromId: 6202, text: "03204", firstName: "Оля" });
+
+    const waitlisted = await client.waitFor((m) => {
+      const events = m.activeLot?.reservations?.events || [];
+      return m.type === "state"
+        && events.some((event) => event.commentId === 261 && event.status === "creating_order")
+        && events.some((event) => event.commentId === 262 && event.status === "waitlist_pending");
+    }, { timeoutMs: 8000 });
+    assert.equal(waitlisted.activeLot.reservations.committedReservationCount, 1);
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+
+    releaseOrder();
+    await client.waitFor((m) => {
+      const events = m.activeLot?.reservations?.events || [];
+      return m.type === "state" && events.some((event) => event.commentId === 262 && event.status === "reserved");
+    }, { timeoutMs: 8000 });
+  } finally {
+    releaseOrder?.();
     await client.close();
     await harness.close();
   }
@@ -392,6 +512,56 @@ test("reservation keyword with no matching open lot escalates to the operator", 
     assert.equal(attention.reason, "no_open_lot");
     assert.equal(attention.code, "09999");
     assert.equal(attention.viewerName, "Ирина");
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("reservation attention resolves a no-open-lot code to the catalog code", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204 },
+    knownCodes: ["03204", "00246"],
+  });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    harness.vk.pushComment({ id: 403, fromId: 8003, text: "бронь 246", firstName: "Елена" });
+
+    const attention = await client.waitFor((m) => m.type === "reservationAttention", { timeoutMs: 6000 });
+    assert.equal(attention.reason, "no_open_lot");
+    assert.equal(attention.code, "00246");
+    assert.equal(attention.originalCode, "246");
+    assert.equal(attention.viewerName, "Елена");
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("reservation after the last lot closes is still escalated during poll grace", async () => {
+  const harness = await startHarness({ cardsByCode: { "03204": CARD_03204 }, knownCodes: ["03204", "00246"] });
+  const client = await harness.connect();
+  try {
+    await startStream(client, harness);
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+    client.send({ type: "closeLot" });
+    await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
+
+    harness.vk.pushComment({ id: 404, fromId: 8004, text: "бронь 246", firstName: "Мария" });
+
+    const attention = await client.waitFor((m) => m.type === "reservationAttention", { timeoutMs: 8000 });
+    assert.equal(attention.reason, "no_open_lot");
+    assert.equal(attention.code, "00246");
+    assert.equal(attention.originalCode, "246");
+    assert.deepEqual(attention.openLotCodes, []);
     assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 0);
   } finally {
     await client.close();
