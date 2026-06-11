@@ -87,6 +87,9 @@ test("list() returns all or a filtered subset", async () => {
     assert.equal(store.list().length, 3);
     const subset = store.list([1, 3]);
     assert.deepEqual(subset.map((e) => e.viewerId).sort(), [1, 3]);
+    // Без flush фоновые append-ы гонятся с rm() темп-папки в withTempFile
+    // и роняют тест ENOTEMPTY (файл пересоздаётся между unlink и rmdir).
+    await store.flush();
   });
 });
 
