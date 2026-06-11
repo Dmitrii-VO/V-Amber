@@ -2340,12 +2340,84 @@ export function attachWsServer(httpServer, config, services = {}) {
           // теперь падает в .jsonl этой сессии (а не в server.log как unrouted).
           services.diagnosticRouter?.setActiveWriter?.(sessionLog.getJsonl());
           activeRunId = runId;
+
+          // Реактивное переподключение после gRPC-ошибки SpeechKit. Сетевые
+          // мигания приходят от grpc-js как событие error (UNAVAILABLE и
+          // т.п.), а не как чистый end, — раньше любой error немедленно
+          // закрывал ВСЕ открытые лоты в VK и заканчивал эфир. Теперь error
+          // получает те же шансы на reconnect, что и onEnd: до 3 попыток с
+          // нарастающей паузой; полный teardown — только когда они
+          // исчерпаны. Счётчик сбрасывается первым же транскриптом —
+          // значит, поток реально ожил.
+          const ERROR_RECONNECT_DELAYS_MS = Array.isArray(config.speechkit?.errorRetryDelaysMs)
+            && config.speechkit.errorRetryDelaysMs.length > 0
+            ? config.speechkit.errorRetryDelaysMs
+            : [500, 2000, 5000];
+          const ERROR_RECONNECT_MAX = ERROR_RECONNECT_DELAYS_MS.length;
+          let errorReconnectAttempts = 0;
+
+          // Полный демонтаж эфира после невосстановимого сбоя STT — бывшая
+          // вторая половина onError. Гард по epoch: пока шли await-ы (или
+          // решение о teardown зрело в таймере), сессию могла заменить
+          // проактивная ротация или новый start — тогда чужой стейт не трогаем.
+          const teardownAfterStreamFailure = async (error) => {
+            const epochAtEntry = speechKitEpoch;
+            clearProactiveReconnect();
+            await publishAllLotsClosed("stream_error");
+            await wishlistStore?.flush?.();
+            sessionLog.logSessionEnd({ reason: "stream_error" });
+            await sessionLog.flush();
+            if (runId !== activeRunId || epochAtEntry !== speechKitEpoch) {
+              return;
+            }
+            services.diagnosticRouter?.setActiveWriter?.(null);
+            activeRunId = null;
+            session?.close();
+            session = null;
+            resetCustomerOrders();
+            resetDetectionState();
+            emitState();
+            sendJson(websocket, { type: "error", message: error?.message || "STT-поток оборвался" });
+          };
+
+          const scheduleErrorReconnect = (error) => {
+            errorReconnectAttempts += 1;
+            const attempt = errorReconnectAttempts;
+            const delayMs = ERROR_RECONNECT_DELAYS_MS[
+              Math.min(attempt - 1, ERROR_RECONNECT_DELAYS_MS.length - 1)
+            ];
+            sendJson(websocket, {
+              type: "warning",
+              message: `Распознавание оборвалось, переподключаюсь (попытка ${attempt} из ${ERROR_RECONNECT_MAX})…`,
+            });
+            setTimeout(() => {
+              if (runId !== activeRunId) {
+                return;
+              }
+              try {
+                session = openSpeechKitSession(runId, makeHandlers);
+                logger.info("speechkit", "stream_reconnected_after_error", { connectionId, attempt });
+                sendJson(websocket, { type: "info", message: "STT-поток перезапущен" });
+              } catch (reopenError) {
+                logger.error("speechkit", "stream_error_reconnect_failed", { connectionId, attempt, error: reopenError });
+                if (errorReconnectAttempts < ERROR_RECONNECT_MAX) {
+                  scheduleErrorReconnect(error);
+                  return;
+                }
+                void teardownAfterStreamFailure(error).catch((teardownError) => {
+                  logger.error("speechkit", "stream_error_teardown_failed", { connectionId, error: teardownError });
+                });
+              }
+            }, delayMs);
+          };
+
           const makeHandlers = (epoch) => ({
             onPartial: ({ text, latencyMs }) => {
               if (runId !== activeRunId) {
                 return;
               }
 
+              errorReconnectAttempts = 0;
               sendJson(websocket, { type: "partial", text, latencyMs });
             },
             onFinal: ({ text, latencyMs, confidence = null }) => {
@@ -2353,6 +2425,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 return;
               }
 
+              errorReconnectAttempts = 0;
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs, confidence });
               sessionLog.logTranscriptFinal({ text, latencyMs, confidence });
               sendJson(websocket, { type: "final", text, latencyMs });
@@ -2551,32 +2624,20 @@ export function attachWsServer(httpServer, config, services = {}) {
                 return;
               }
 
-              clearProactiveReconnect();
-              await publishAllLotsClosed("stream_error");
-              await wishlistStore?.flush?.();
               logger.error("speechkit", "stream_error", { connectionId, error });
-              sessionLog.logSessionEnd({ reason: "stream_error" });
-              await sessionLog.flush();
-              // Пока шли await-ы выше, оператор мог перезапустить эфир (новый
-              // runId/epoch и свежая session). Не трогаем общий стейт, если нас
-              // уже сменили — иначе обнулим activeRunId и закроем чужую сессию.
-              if (runId !== activeRunId || epoch !== speechKitEpoch) {
+
+              // Сначала пробуем пережить сбой: закрываем мёртвую сессию и
+              // планируем переоткрытие. Демонтаж эфира (закрытие всех лотов
+              // в VK, сброс стейта — см. teardownAfterStreamFailure) — только
+              // когда попытки исчерпаны.
+              if (errorReconnectAttempts < ERROR_RECONNECT_MAX) {
+                session?.close();
+                session = null;
+                scheduleErrorReconnect(error);
                 return;
               }
-              services.diagnosticRouter?.setActiveWriter?.(null);
-              activeRunId = null;
-              session?.close();
-              session = null;
-              // Раньше после stream_error состояние оставалось «висеть»:
-              // activeLot не nullified, active-state.json не стирался. Если
-              // потом сокет закрывался, второй publishLotClosed дублировал
-              // orphan-флаш, а при перезапуске сервера срабатывало фейковое
-              // crash-recovery (state-файл с этой сессии). Чистим всё, как
-              // в обычных путях stop/socket_close.
-              resetCustomerOrders();
-              resetDetectionState();
-              emitState();
-              sendJson(websocket, { type: "error", message: error.message });
+
+              await teardownAfterStreamFailure(error);
             },
             onEnd: async () => {
               // On manual stop the handler clears activeRunId before close(),
