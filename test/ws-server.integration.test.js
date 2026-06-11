@@ -135,3 +135,57 @@ test("harness: closeLot clears the active lot and publishes lot-closed", async (
     await harness.close();
   }
 });
+
+// Анализ 2026-06-11: сериализация финалов. Раньше скидка применялась к
+// activeLot немедленно, до завершения открытия лота из той же (или
+// предыдущей) фразы — уценивался не тот лот (или никакой: activeLot=null).
+test("voice: code + discount in one phrase discounts the newly opened lot", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204 },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    const state = await openLotByVoice(
+      client, harness, "код товара 03204 скидка десять процентов",
+    );
+    assert.equal(state.activeLot.code, "03204");
+    const discounted = await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.discountAmount > 0,
+      { timeoutMs: 4000 },
+    );
+    // 10% от salePrice 4500 = 450.
+    assert.equal(discounted.activeLot.discountAmount, 450);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// Скидка отдельной фразой сразу после кода: очередь гарантирует, что
+// открытие лота уже завершилось, когда применяется скидка.
+test("voice: discount in the next final applies after the lot-open settles", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204 },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    const session = await harness.waitForSession();
+    // Две фразы подряд, без ожидания между ними — как в живой речи.
+    session.handlers.onFinal({ text: "код товара 03204", latencyMs: 10 });
+    session.handlers.onFinal({ text: "скидка пятьсот рублей", latencyMs: 10 });
+
+    const discounted = await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.code === "03204"
+        && m.activeLot?.discountAmount === 500,
+      { timeoutMs: 4000 },
+    );
+    assert.equal(discounted.activeLot.product.salePrice, 4500);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});

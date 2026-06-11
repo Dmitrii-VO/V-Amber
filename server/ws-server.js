@@ -2385,6 +2385,12 @@ export function attachWsServer(httpServer, config, services = {}) {
           const ERROR_RECONNECT_MAX = ERROR_RECONNECT_DELAYS_MS.length;
           let errorReconnectAttempts = 0;
 
+          // Очередь обработки финальных транскриптов этого эфира: детекция,
+          // цена и скидка применяются строго в порядке произнесения (см.
+          // комментарий у enqueue в onFinal). Ошибки гасятся в .catch каждого
+          // звена, так что цепочка не «залипает» после сбоя.
+          let finalProcessingChain = Promise.resolve();
+
           // Полный демонтаж эфира после невосстановимого сбоя STT — бывшая
           // вторая половина onError. Гард по epoch: пока шли await-ы (или
           // решение о teardown зрело в таймере), сессию могла заменить
@@ -2489,44 +2495,25 @@ export function attachWsServer(httpServer, config, services = {}) {
               voicePipeline.rememberFinal(text);
 
               const priceResult = detectPrice(text);
-
               const discountResult = detectDiscount(text, config.discount.triggers);
-              if (discountResult) {
-                // detectDiscount now returns { kind, value }. Pass the full
-                // descriptor so percent discounts are scaled by current
-                // salePrice — fixes the "скидка 30 процентов → 30₽" bug.
-                void applyDiscount(discountResult, text).catch((error) => {
-                  logger.error("discount", "apply_failed", { connectionId, text, error });
-                });
-              } else {
-                // Forensic: транскрипт содержит триггер скидки, но детектор
-                // не извлёк сумму. Без этого лога мы видели бы тишину и не
-                // понимали, что оператор хотел скидку (как в случае
-                // «скидка процентов тридцать» — порядок слов ломает regex).
-                const normalizedForDiscount = String(text || "").toLowerCase().replace(/ё/g, "е");
-                const matchedDiscountTrigger = config.discount.triggers.some((trigger) => {
-                  const nt = String(trigger || "").toLowerCase().replace(/ё/g, "е");
-                  return nt && new RegExp(`(?:^|\\s)${nt}(?:$|\\s)`).test(normalizedForDiscount);
-                });
-                if (matchedDiscountTrigger) {
-                  logger.warn("discount", "discount_skipped", {
-                    connectionId,
-                    text,
-                    reason: "trigger_matched_but_no_amount_extracted",
-                    lotSessionId: activeLot?.lotSessionId || null,
-                    code: activeLot?.code || null,
-                  });
-                  sessionLog.logDiscountSkipped({
-                    text,
-                    reason: "trigger_matched_but_no_amount_extracted",
-                    lotSessionId: activeLot?.lotSessionId || null,
-                    code: activeLot?.code || null,
-                  });
-                }
-              }
+              // Входы детекции собираем СРАЗУ (окно триггеров — функция
+              // времени произнесения), а обрабатываем — строго по очереди.
+              const detectionInputs = voicePipeline.buildDetectionInputs(text);
 
-              void (async () => {
-                const detectionInputs = voicePipeline.buildDetectionInputs(text);
+              // Сериализация финалов. Раньше каждый финал запускал
+              // независимый async-блок: медленная детекция (YandexGPT) могла
+              // завершиться ПОЗЖЕ быстрой следующей — и более старая фраза
+              // открывала лот последней, «побеждая» свежую. А скидка
+              // применялась к activeLot немедленно, пока открытие нового лота
+              // ещё шло, — уценивался предыдущий лот. Теперь команды
+              // применяются в порядке произнесения, и скидка идёт ПОСЛЕ
+              // детекции артикула: фраза «артикул 03204 скидка 10%» сначала
+              // открывает лот, затем уценивает его, а скидка отдельной фразой
+              // ждёт завершения открытия лота из предыдущей.
+              finalProcessingChain = finalProcessingChain.then(async () => {
+                if (runId !== activeRunId) {
+                  return;
+                }
                 let detection = null;
 
                 for (const input of detectionInputs) {
@@ -2618,12 +2605,46 @@ export function attachWsServer(httpServer, config, services = {}) {
                   });
                 }
 
+                if (discountResult) {
+                  // detectDiscount возвращает { kind, value }. Полный
+                  // дескриптор нужен, чтобы процентная скидка масштабировалась
+                  // от текущего salePrice (фикс «скидка 30 процентов → 30₽»).
+                  await applyDiscount(discountResult, text).catch((error) => {
+                    logger.error("discount", "apply_failed", { connectionId, text, error });
+                  });
+                } else {
+                  // Forensic: транскрипт содержит триггер скидки, но детектор
+                  // не извлёк сумму. Без этого лога мы видели бы тишину и не
+                  // понимали, что оператор хотел скидку (как в случае
+                  // «скидка процентов тридцать» — порядок слов ломает regex).
+                  const normalizedForDiscount = String(text || "").toLowerCase().replace(/ё/g, "е");
+                  const matchedDiscountTrigger = config.discount.triggers.some((trigger) => {
+                    const nt = String(trigger || "").toLowerCase().replace(/ё/g, "е");
+                    return nt && new RegExp(`(?:^|\\s)${nt}(?:$|\\s)`).test(normalizedForDiscount);
+                  });
+                  if (matchedDiscountTrigger) {
+                    logger.warn("discount", "discount_skipped", {
+                      connectionId,
+                      text,
+                      reason: "trigger_matched_but_no_amount_extracted",
+                      lotSessionId: activeLot?.lotSessionId || null,
+                      code: activeLot?.code || null,
+                    });
+                    sessionLog.logDiscountSkipped({
+                      text,
+                      reason: "trigger_matched_but_no_amount_extracted",
+                      lotSessionId: activeLot?.lotSessionId || null,
+                      code: activeLot?.code || null,
+                    });
+                  }
+                }
+
                 if (runId !== activeRunId) {
                   return;
                 }
 
                 emitState();
-              })().catch((error) => {
+              }).catch((error) => {
                 logger.error("article", "article_detection_failed", {
                   connectionId,
                   text,
