@@ -132,9 +132,11 @@ deferred for safety reasons.
 - Public-comment noise: wishlist confirmation and other service
   responses still publish as VK comments instead of DMs in some
   branches.
-- Short numeric price recognition (`цена два пять пять ноль → 2 ₽`)
-  — the voice-detector bug remains; the new manual-price override is a
-  workaround, not a fix.
+- ~~Short numeric price recognition (`цена два пять пять ноль → 2 ₽`)~~
+  Closed 2026-06-11: the word form was fixed earlier; the digit-token form
+  (`цена 2 5 5 0`, what SpeechKit actually emits) plus `1 500`-style groups,
+  `полторы тысячи`, and declined triggers are covered now. See
+  [[voice-price-parsing]] and `test/price-detector.test.js`.
 - Public wishlist hint: no auto-post of the `СПИСОК <код>` instruction
   during a broadcast.
 

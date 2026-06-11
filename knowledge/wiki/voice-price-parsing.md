@@ -5,11 +5,26 @@ to the active lot before publication or reservation.
 
 ## Current knowledge
 
-- Full phrases such as `две тысячи пятьсот пятьдесят` can resolve to `2550`.
-- Compact digit phrases need better handling. During the 2026-05-24 test,
-  `цена два пять пять ноль` was parsed as `2 ₽`, not `2550 ₽`.
+- Full phrases such as `две тысячи пятьсот пятьдесят` resolve to `2550`.
+- Compact digit phrases work in both word and digit form: `цена два пять пять
+  ноль` and `цена 2 5 5 0` → `2550`. SpeechKit normalizes spoken digits into
+  separate numeric tokens, so the detector joins bare digit-token runs (3–6
+  tokens) before falling back to a single token (fixed 2026-06-11; the
+  word-form fix alone had left the digit form returning `2 ₽`).
+- Thousands-separated digit groups are joined: `1 500` → `1500`,
+  `2 500 рублей` → `2500` (previously collapsed to the first token).
+- `полторы тысячи` → `1500` and `N с половиной тысячи` → `N*1000+500`
+  (previously silently wrong: `1000` and `2 ₽`). `parseMonetaryWords` now
+  lives in `server/ru-numerals.js` and is shared by price and discount
+  detectors (it was duplicated).
+- Declined trigger forms are accepted: `по цене 990`, `стоимостью 1200`.
+- Numbers followed by a non-money unit are rejected: `стоит посмотреть на
+  5 минут` no longer sets the price to `5 ₽` (see `NON_MONEY_UNITS` in
+  `server/price-detector.js`).
 - Operator feedback asks the system to publish price together with the lot card
-  when code and price are spoken in one phrase.
+  when code and price are spoken in one phrase — this works when both land in
+  one final (`handleConfirmedDetection` gets `voicePrice`); the EOU pause can
+  still split them (see [[speechkit-integration]] backlog).
 
 ## Discounts
 

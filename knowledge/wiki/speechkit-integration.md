@@ -38,6 +38,29 @@ See [[live-commerce-flow]].
   guard makes the retired session's `onEnd`/`onError` no-ops (no double
   reconnect). Covered by `test/ws-server.reconnect.test.js`. The reactive
   `onEnd` path remains a safety net if the proactive timer is missed.
+- **Reactive reconnect on stream errors (2026-06-11)** — grpc-js surfaces
+  network blips as the *error* event (UNAVAILABLE), not as a clean *end*.
+  `onError` used to publish «лот закрыт» to VK for every open lot and end the
+  broadcast immediately; it now retries `openSpeechKitSession` per
+  `config.speechkit.errorRetryDelaysMs` (default `[500, 2000, 5000]`; array
+  length = attempt budget, overridable in tests). The attempt counter resets
+  on the first recognized transcript. Full teardown
+  (`teardownAfterStreamFailure`) runs only when retries are exhausted, with
+  the same runId/epoch guards. Covered in `test/ws-server.reconnect.test.js`.
+- **Final-transcript serialization (2026-06-11)** — `onFinal` work (article
+  detection, voice price, discount) runs through a per-broadcast promise
+  chain (`finalProcessingChain`), so commands apply strictly in spoken order
+  and a slow YandexGPT fallback can no longer let an older utterance open its
+  lot *after* a newer one. Discounts apply after article detection, so
+  «артикул NNN скидка 10%» discounts the newly opened lot, and a discount in
+  the next phrase waits for the pending lot-open. Detection inputs are still
+  captured at utterance time (trigger window is wall-clock based).
+- **WS heartbeat (2026-06-11)** — the server pings every operator socket
+  (`config.wsHeartbeatIntervalMs`, default 30 s) and terminates those missing
+  a pong by the next sweep, so a half-dead connection no longer blocks
+  reconnect with 409 via the single-broadcast guard. The browser WebSocket
+  answers pings automatically. The web UI auto-reconnects after an unexpected
+  close with capped backoff (2–30 s) and skips the cache prompt on resume.
 - **Microphone level indicator** — `web-ui/` shows a VU meter in the transcript
   panel header (`#micMeter`), fed by the per-chunk RMS computed in the worklet
   `onmessage` handler (`updateMicLevel` / `computeRms` in `web-ui/app.js`). A
