@@ -249,6 +249,18 @@ async function main() {
       wishlistActive: wishlistStore.getActiveCount(),
     });
 
+    // Без API_TOKEN весь API и WS открыты любому устройству в локальной сети,
+    // когда сервер слушает не только loopback (дефолт 0.0.0.0 — для Docker).
+    // Origin-allowlist защищает только браузерные запросы.
+    const apiTokenSet = Boolean(process.env.API_TOKEN?.trim());
+    const loopbackOnly = ["127.0.0.1", "localhost", "::1"].includes(config.host);
+    if (!apiTokenSet && !loopbackOnly) {
+      logger.warn("http", "auth_disabled_on_lan", {
+        host: config.host,
+        hint: "Задайте API_TOKEN в .env или HOST=127.0.0.1 для локального доступа",
+      });
+    }
+
     // Счётчик подряд-фейлов refresh. Поднимаем уровень логирования с info до
      // warn после 3 неудач подряд, чтобы оператор увидел проблему с МойСкладом
      // в общем потоке логов, а не только в JSONL.
