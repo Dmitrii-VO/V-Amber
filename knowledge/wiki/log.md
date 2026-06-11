@@ -384,3 +384,45 @@ retry to prevent duplicate customer orders or positions. Unknown-stock first
 reservations are serialized per lot, so simultaneous comments can consume only
 one fallback slot. Updated [[vk-integration]], [[reservation-flow]], and
 [[moysklad-integration]].
+
+## [2026-06-08] analysis | Real MoySklad fields verified
+
+Checked real MoySklad data read-only against the 2026-06-08 plan. Existing
+customer-order positions confirm that `price` stores the base price in minor
+currency units, `discount` stores a percentage, and `reserve` carries the
+reserved quantity. Runtime appendability resolves real metadata states and
+blocks `Оплачен` while allowing `Новый`; the configured counterparty `VK ID`
+attribute exists as text metadata.
+
+The same check exposed an open integration risk: real order positions include
+`variant` assortments, while current product lookup and product-code cache query
+only `entity/product`. Variant-only codes can be missed, and duplicate numeric
+codes across variants and products can resolve to the wrong article. Recorded in
+[[moysklad-integration]] and [[documentation-drift]].
+
+## [2026-06-11] review | Full project review at 0.1.54
+
+Reviewed the whole repository: architecture, security, tests, CI, and docs.
+Suite is green (291/291) and the money paths (Бронь → customer order, safe
+mode, crash recovery) are deliberately guarded. Key findings: the Auto Release
+workflow cuts releases without running tests, so a red suite can still reach
+the operator's Mac; `npm audit` flags one high (axios via the Yandex SDK,
+clean fix available); with no `API_TOKEN` the API is open on the LAN while
+`HOST` defaults to `0.0.0.0`; `ws-server.js` regrew to 3119 LOC even though
+the WS integration scaffolding that blocked deeper splits now exists. The
+variant-lookup risk from 2026-06-08 remains the top open correctness item.
+Full write-up in [[../raw/project-review-2026-06-11|project-review-2026-06-11]];
+linked from [[index]].
+
+## [2026-06-11] fix | Review remediation: CI test gate, axios, LAN-auth warning
+
+Fixed the actionable findings from
+[[../raw/project-review-2026-06-11|project-review-2026-06-11]]. The Auto
+Release workflow now runs a `test` job (`npm ci && npm test` on Node 22 with a
+SpeechKit key placeholder) before the `release` job — a red suite can no
+longer ship to the operator's Mac. `npm audit fix` bumped transitive axios to
+1.17.0; audit is clean. `server/index.js` logs `WARN auth_disabled_on_lan` at
+startup when `API_TOKEN` is unset and `HOST` is not loopback. README test
+count updated (180 → 290+) and the CI gate documented; the "test command
+exists" drift item in [[documentation-drift]] is resolved. Verified by running
+the full suite without `.env` (CI conditions): 291/291 green.

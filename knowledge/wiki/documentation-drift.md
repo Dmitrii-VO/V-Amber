@@ -5,19 +5,10 @@ Use it to keep contradictions explicit instead of hiding them in wiki prose.
 
 ## Test command exists
 
-`README.md` still contains older language saying that no verified test command
-exists. `AGENTS.md` and `CLAUDE.md` were corrected on 2026-05-25. Current
-`package.json` contains:
-
-```json
-"test": "node --test \"test/**/*.test.js\""
-```
-
-The current `test/` directory includes article extractor, MoySklad order check,
-price detector, and reservation digest log tests.
-
-Recommended fix: update `README.md` so `npm test` is listed as a verified
-command.
+**Resolved 2026-06-11.** `README.md` now documents `npm test` with the current
+test count (290+) and notes the CI test gate in
+`.github/workflows/release.yml`. `AGENTS.md` and `CLAUDE.md` were corrected
+earlier, on 2026-05-25.
 
 ## Backend file list expanded
 
@@ -41,6 +32,24 @@ only the main modules.
 `TODO.md` describes the planned preorder workflow in detail. It must remain
 `planned` in this wiki until matching backend methods, HTTP endpoints, UI, and
 tests exist.
+
+## MoySklad variants are not covered by product lookup
+
+Real MoySklad customer-order positions checked on 2026-06-08 include both
+`assortment.type = "product"` and `assortment.type = "variant"`. Current
+runtime lookup in `server/moysklad.js` and the catalog-code cache query only
+`entity/product`, so variant-only article codes can be missing from voice/manual
+catalog validation.
+
+The same real-account check found a higher-risk collision: a numeric variant
+code can also exist as a different product code. In that case, current product
+lookup can resolve the buyer/operator code to the product while MoySklad orders
+show the intended article as a variant.
+
+Recommended fix: make product-card lookup and product-code cache
+variant-aware. Search `entity/variant` as well as `entity/product`, preserve the
+assortment `meta.type`, and reject or escalate duplicate codes across products
+and variants instead of guessing.
 
 ## Reservation parser audit (2026-05-25)
 

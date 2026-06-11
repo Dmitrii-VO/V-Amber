@@ -86,3 +86,8 @@ change.
   implementation plan from the 2026-06-05 broadcast log review (VK photo
   fallback, adaptive poll + queue priority, day-agnostic order merge, reservation
   escalation, discount tests). Implemented 2026-06-06.
+- [[../raw/project-review-2026-06-11|project-review-2026-06-11]] — Full project
+  review at `0.1.54`: 291/291 tests green, no CI test gate before releases,
+  axios audit finding, auth-off-by-default on `0.0.0.0`, god-module growth,
+  and the open variant-lookup risk. CI gate, axios, LAN-auth warning, and
+  README drift fixed same day; god-module split and variant lookup remain.

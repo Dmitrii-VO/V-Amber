@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "node_modules/yargs/README.md",
+                "file": "Добро пожаловать.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "README"
+              "title": "Добро пожаловать"
             }
           }
         ]
@@ -185,6 +185,7 @@
   },
   "active": "46d60808d93e62d1",
   "lastOpenFiles": [
+    "node_modules/yargs/README.md",
     "knowledge/wiki/index.md",
     "node_modules/nice-grpc-client-middleware-deadline/README.md",
     "node_modules/axios/lib/core/README.md",
