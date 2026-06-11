@@ -1,60 +1,6 @@
-import {
-  UNIT_WORDS,
-  TEEN_WORDS,
-  TENS_WORDS,
-  HUNDREDS_WORDS,
-  THOUSANDS_MULTIPLIERS,
-} from "./ru-numerals.js";
-
-function normalizeWord(w) {
-  return w.toLowerCase().replace(/ё/g, "е");
-}
-
-function parseMonetaryWords(words) {
-  const norm = words.map(normalizeWord);
-  let value = 0;
-  let i = 0;
-
-  if (
-    norm.length === 2
-    && UNIT_WORDS.has(norm[0])
-    && HUNDREDS_WORDS.has(norm[1])
-  ) {
-    return UNIT_WORDS.get(norm[0]) * 1000 + HUNDREDS_WORDS.get(norm[1]);
-  }
-
-  if (i < norm.length && /^тысяч[ауи]?$/.test(norm[i])) {
-    value += 1000;
-    i++;
-  } else if (i + 1 < norm.length && /^тысяч[ауи]?$/.test(norm[i + 1])) {
-    const mult = THOUSANDS_MULTIPLIERS.get(norm[i]);
-    if (mult !== undefined) {
-      value += mult * 1000;
-      i += 2;
-    }
-  }
-
-  if (i < norm.length && HUNDREDS_WORDS.has(norm[i])) {
-    value += HUNDREDS_WORDS.get(norm[i]);
-    i++;
-  }
-
-  if (i < norm.length && TEEN_WORDS.has(norm[i])) {
-    value += TEEN_WORDS.get(norm[i]);
-    i++;
-  } else {
-    if (i < norm.length && TENS_WORDS.has(norm[i])) {
-      value += TENS_WORDS.get(norm[i]);
-      i++;
-    }
-    if (i < norm.length && UNIT_WORDS.has(norm[i])) {
-      value += UNIT_WORDS.get(norm[i]);
-      i++;
-    }
-  }
-
-  return value > 0 && i === norm.length ? value : null;
-}
+// parseMonetaryWords раньше был локальной копией — теперь живёт в
+// ru-numerals.js рядом со словарями (единственный источник для price/discount).
+import { parseMonetaryWords } from "./ru-numerals.js";
 
 function tokenize(normalized) {
   // Сначала отделяем «%» от цифр («30%» → «30 %»), иначе склеенный

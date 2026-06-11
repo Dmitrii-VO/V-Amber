@@ -72,3 +72,58 @@ test("detectPrice handles «тысячу» (accusative form)", () => {
     trigger: "стоимость",
   });
 });
+
+// Анализ 2026-06-11: SpeechKit нормализует слова-цифры в цифровые токены,
+// и посимвольная форма бага «два пять пять ноль → 2 ₽» воспроизводилась
+// в цифровом виде: одиночный токен «2» побеждал до склейки.
+test("detectPrice joins bare digit tokens («2 5 5 0» = 2550)", () => {
+  assert.deepEqual(detectPrice("цена 2 5 5 0"), {
+    value: 2550,
+    trigger: "цена",
+  });
+});
+
+test("detectPrice joins thousands-separated digit groups («1 500», «2 500 рублей»)", () => {
+  assert.deepEqual(detectPrice("цена 1 500"), {
+    value: 1500,
+    trigger: "цена",
+  });
+  assert.deepEqual(detectPrice("стоимость 2 500 рублей"), {
+    value: 2500,
+    trigger: "стоимость",
+  });
+});
+
+// «полторы тысячи» раньше схлопывалось в 1000 (слово «полторы» молча
+// пропускалось), «две с половиной тысячи» — в 2 ₽. Обе формы — живая
+// операторская речь, и обе ошибки тихие: в эфир уходила неверная цена.
+test("detectPrice handles «полторы тысячи» and «N с половиной тысячи»", () => {
+  assert.deepEqual(detectPrice("цена полторы тысячи"), {
+    value: 1500,
+    trigger: "цена",
+  });
+  assert.deepEqual(detectPrice("цена две с половиной тысячи"), {
+    value: 2500,
+    trigger: "цена",
+  });
+});
+
+// «по цене 990» — триггер в дательном падеже; раньше null.
+test("detectPrice accepts declined trigger forms («по цене», «стоимостью»)", () => {
+  assert.deepEqual(detectPrice("по цене 990"), {
+    value: 990,
+    trigger: "цене",
+  });
+  assert.deepEqual(detectPrice("стоимостью 1200"), {
+    value: 1200,
+    trigger: "стоимостью",
+  });
+});
+
+// «стоит посмотреть на 5 минут» давало цену 5 ₽: слабый триггер «стоит»
+// плюс любое число в окне. Число с не-денежной единицей сразу после —
+// не цена.
+test("detectPrice ignores numbers followed by non-money units", () => {
+  assert.equal(detectPrice("это стоит посмотреть на 5 минут"), null);
+  assert.equal(detectPrice("цена упала на 30 процентов"), null);
+});

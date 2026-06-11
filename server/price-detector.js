@@ -1,17 +1,32 @@
-import {
-  UNIT_WORDS,
-  TEEN_WORDS,
-  TENS_WORDS,
-  HUNDREDS_WORDS,
-  THOUSANDS_MULTIPLIERS,
-} from "./ru-numerals.js";
+import { UNIT_WORDS, parseMonetaryWords } from "./ru-numerals.js";
 
 // Ноль обрабатывается отдельно от UNIT_WORDS: при посимвольном чтении цифр
 // «ноль» даёт «0», но в parseMonetaryWords нулём числительное не наращивают.
 const ZERO_WORDS = new Set(["ноль", "нуль"]);
 
-const PRICE_TRIGGERS = new Set(["стоимость", "цена", "ценник", "стоит"]);
+// Триггеры — с падежными формами: «по цене 990» и «стоимостью 1500» раньше
+// молча давали null, потому что принимались только именительные формы.
+const PRICE_TRIGGERS = new Set([
+  "стоимость", "стоимости", "стоимостью",
+  "цена", "цены", "цене", "цену", "ценой", "ценник",
+  "стоит",
+]);
 const FILLER_WORDS = new Set(["такая", "такой", "такое", "то", "вот", "будет", "рублей", "рубля", "рубль", "руб"]);
+
+// Не-денежные единицы измерения сразу после числа: «стоит посмотреть на
+// 5 минут» — это НЕ цена 5 ₽. Точные токены, а не префиксы, чтобы случайно
+// не зарезать легитимную цену перед началом новой фразы («1500 штука
+// классная» не должна пострадать — «штука» здесь не в списке).
+const NON_MONEY_UNITS = new Set([
+  "минут", "минуты", "минуту", "минутки", "секунд", "секунды",
+  "час", "часа", "часов", "дня", "дней", "день",
+  "недели", "недель", "месяц", "месяца", "месяцев",
+  "лет", "год", "года", "раз", "раза",
+  "процент", "процента", "процентов",
+  "штук", "штуки", "пар", "пары",
+  "грамм", "граммов", "карат", "каратов",
+  "сантиметра", "сантиметров", "миллиметра", "миллиметров",
+]);
 
 function normalizeWord(word) {
   return word.toLowerCase().replace(/ё/g, "е");
@@ -21,10 +36,15 @@ function tokenize(text) {
   return String(text || "").toLowerCase().replace(/ё/g, "е").match(/[a-zа-я0-9]+/gi) || [];
 }
 
-// Посимвольное чтение цифр: «два пять пять ноль» → 2550.
-// Требуем минимум 3 цифр-слова, чтобы «два пять» не превращалось в 25
-// (оператор сказал бы «двадцать пять»). Верхняя граница 6 — артикулы и
-// длинные последовательности в цены не пускаем.
+function isNonMoneyUnit(token) {
+  return token !== undefined && NON_MONEY_UNITS.has(token);
+}
+
+// Посимвольное чтение цифр: «два пять пять ноль» → 2550. Принимает и
+// цифровые токены вперемешку со словами («2 пять 5 0»), потому что SpeechKit
+// нормализует часть слов в цифры. Требуем минимум 3 токена, чтобы «два пять»
+// не превращалось в 25 (оператор сказал бы «двадцать пять»). Верхняя граница
+// 6 — артикулы и длинные последовательности в цены не пускаем.
 function parseSpokenDigits(words) {
   const norm = words.map(normalizeWord);
   if (norm.length < 3 || norm.length > 6) return null;
@@ -44,50 +64,20 @@ function parseSpokenDigits(words) {
   return value > 0 ? value : null;
 }
 
-function parseMonetaryWords(words) {
-  const norm = words.map(normalizeWord);
-  let value = 0;
-  let i = 0;
-
-  if (
-    norm.length === 2
-    && UNIT_WORDS.has(norm[0])
-    && HUNDREDS_WORDS.has(norm[1])
-  ) {
-    return UNIT_WORDS.get(norm[0]) * 1000 + HUNDREDS_WORDS.get(norm[1]);
+// Цифровая запись с пробелом-разделителем тысяч: SpeechKit отдаёт «1 500» /
+// «2 500 рублей» отдельными токенами, и раньше цена схлопывалась в первый
+// токен (1 ₽ вместо 1500 ₽ — реальные кейсы из транскриптов). Голова — 1-3
+// цифры без ведущего нуля, дальше одна-две группы ровно по 3 цифры.
+function parseGroupedDigits(tokens, start) {
+  if (!/^[1-9]\d{0,2}$/.test(tokens[start] || "")) return null;
+  let raw = tokens[start];
+  let consumed = 1;
+  while (consumed <= 2 && /^\d{3}$/.test(tokens[start + consumed] || "")) {
+    raw += tokens[start + consumed];
+    consumed += 1;
   }
-
-  if (i < norm.length && /^тысяч[ауи]?$/.test(norm[i])) {
-    value += 1000;
-    i += 1;
-  } else if (i + 1 < norm.length && /^тысяч[ауи]?$/.test(norm[i + 1])) {
-    const mult = THOUSANDS_MULTIPLIERS.get(norm[i]);
-    if (mult !== undefined) {
-      value += mult * 1000;
-      i += 2;
-    }
-  }
-
-  if (i < norm.length && HUNDREDS_WORDS.has(norm[i])) {
-    value += HUNDREDS_WORDS.get(norm[i]);
-    i += 1;
-  }
-
-  if (i < norm.length && TEEN_WORDS.has(norm[i])) {
-    value += TEEN_WORDS.get(norm[i]);
-    i += 1;
-  } else {
-    if (i < norm.length && TENS_WORDS.has(norm[i])) {
-      value += TENS_WORDS.get(norm[i]);
-      i += 1;
-    }
-    if (i < norm.length && UNIT_WORDS.has(norm[i])) {
-      value += UNIT_WORDS.get(norm[i]);
-      i += 1;
-    }
-  }
-
-  return value > 0 && i === norm.length ? value : null;
+  if (consumed === 1) return null;
+  return { value: Number.parseInt(raw, 10), consumed };
 }
 
 function parseNumericToken(token) {
@@ -103,20 +93,28 @@ export function detectPrice(text) {
     for (let j = i + 1; j < Math.min(tokens.length, i + 8); j += 1) {
       if (FILLER_WORDS.has(tokens[j])) continue;
 
-      const digitValue = parseNumericToken(tokens[j]);
-      if (digitValue && digitValue > 0) {
-        return { value: digitValue, trigger: tokens[i] };
-      }
-
-      // Пробуем сначала «цифровой» разбор (два пять пять ноль), он жаднее
-      // и точнее для длинных последовательностей.
+      // Сначала «цифровой» разбор (два пять пять ноль / 2 5 5 0): он жаднее
+      // и точнее для длинных последовательностей. Идёт ДО одиночного
+      // цифрового токена, иначе «цена 2 5 5 0» вернула бы 2 ₽ — словесная
+      // форма этого бага была закрыта раньше, а цифровая (SpeechKit
+      // нормализует слова в цифры) воспроизводилась до этого фикса.
       for (let len = Math.min(6, tokens.length - j); len >= 3; len -= 1) {
         const words = tokens.slice(j, j + len);
         if (words.some((word) => FILLER_WORDS.has(word))) continue;
         const value = parseSpokenDigits(words);
-        if (value && value > 0) {
+        if (value && value > 0 && !isNonMoneyUnit(tokens[j + len])) {
           return { value, trigger: tokens[i] };
         }
+      }
+
+      const grouped = parseGroupedDigits(tokens, j);
+      if (grouped && !isNonMoneyUnit(tokens[j + grouped.consumed])) {
+        return { value: grouped.value, trigger: tokens[i] };
+      }
+
+      const digitValue = parseNumericToken(tokens[j]);
+      if (digitValue && digitValue > 0 && !isNonMoneyUnit(tokens[j + 1])) {
+        return { value: digitValue, trigger: tokens[i] };
       }
 
       // Стандартный разбор (тысяча пятьсот пятьдесят).
@@ -124,13 +122,14 @@ export function detectPrice(text) {
       // и аналогичные полные формы не теряли последнее слово — до этого
       // лимит 4 срезал «пять» из 2295 и отдавал 2290 (см. транскрипт
       // 2026-05-24 19:37:29 «пятёрку почему-то не распознаёт на конце»).
-      // parseMonetaryWords требует i === norm.length, так что окно нельзя
-      // расширить «случайным» хвостом — оно либо съест всё, либо вернёт null.
+      // parseMonetaryWords требует полного потребления окна, так что окно
+      // нельзя расширить «случайным» хвостом — оно либо съест всё, либо
+      // вернёт null.
       for (let len = Math.min(6, tokens.length - j); len >= 1; len -= 1) {
         const words = tokens.slice(j, j + len);
         if (words.some((word) => FILLER_WORDS.has(word))) continue;
         const value = parseMonetaryWords(words);
-        if (value && value > 0) {
+        if (value && value > 0 && !isNonMoneyUnit(tokens[j + len])) {
           return { value, trigger: tokens[i] };
         }
       }
@@ -139,4 +138,3 @@ export function detectPrice(text) {
 
   return null;
 }
-
