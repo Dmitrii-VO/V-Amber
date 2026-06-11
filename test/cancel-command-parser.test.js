@@ -109,3 +109,20 @@ test("empty / null input is safe", () => {
   assert.equal(parseCancelCommand("").matched, false);
   assert.equal(parseCancelCommand(null).matched, false);
 });
+
+// Анализ 2026-06-11: цифровой поиск кода шёл по всему тексту, и цена,
+// названная ДО команды, перехватывала код брони — подсветилась бы не та
+// строка. Код теперь ищется только после триггера.
+test("price mentioned before the trigger does not hijack the code", () => {
+  assert.deepEqual(
+    parseCancelCommand("за 2500 галина прокофьева отмена брони ноль три три три два два"),
+    { matched: true, name: "галина прокофьева", code: "033322" },
+  );
+});
+
+test("no match when the only digits are before the trigger", () => {
+  assert.equal(
+    parseCancelCommand("за 2500 галина прокофьева отмена брони").matched,
+    false,
+  );
+});

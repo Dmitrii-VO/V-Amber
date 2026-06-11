@@ -515,6 +515,21 @@ export function attachWsServer(httpServer, config, services = {}) {
       state.events = state.events.slice(-20);
     }
 
+    // Поиск открытого лота по произнесённому коду для voice cancel/quantity.
+    // Оператор вслух обычно опускает ведущие нули («два четыре три» → «243»
+    // при лоте «00243»), а строгое сравнение отвечало «нет лота» — путь
+    // детекции и покупательские комментарии такой допуск уже имеют. Exact
+    // всегда побеждает; иначе — codesEquivalent, но только при РОВНО одном
+    // кандидате (как в findCommentTarget): двусмысленность → отказ, не угадываем.
+    function findOpenLotBySpokenCode(code) {
+      const lots = getOpenLots();
+      const exact = lots.find((candidate) => String(candidate.code) === String(code));
+      if (exact) return { lot: exact, ambiguous: false };
+      const padded = lots.filter((candidate) => codesEquivalent(String(code), String(candidate.code)));
+      if (padded.length === 1) return { lot: padded[0], ambiguous: false };
+      return { lot: null, ambiguous: padded.length > 1 };
+    }
+
     // Голосовая отмена брони (W3). Находит подтверждённую бронь по имени и
     // просит клиента подсветить строку. НИКОГДА не отменяет сама — реальное
     // удаление позиции в МойСкладе делает оператор кнопкой «× отменить»
@@ -524,8 +539,15 @@ export function attachWsServer(httpServer, config, services = {}) {
       const spokenName = command.name;
       const code = command.code;
 
-      const lot = getOpenLots().find((candidate) => String(candidate.code) === String(code)) || null;
+      const { lot, ambiguous } = findOpenLotBySpokenCode(code);
 
+      if (ambiguous) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Код ${code} подходит нескольким открытым лотам — отмените нужную бронь кнопкой «× отменить»`,
+        });
+        return;
+      }
       if (!lot) {
         sendJson(websocket, {
           type: "warning",
@@ -606,7 +628,14 @@ export function attachWsServer(httpServer, config, services = {}) {
       const requested = Number.isFinite(command.requested) ? command.requested : quantity;
       const capped = requested > quantity;
 
-      const lot = getOpenLots().find((candidate) => String(candidate.code) === String(code)) || null;
+      const { lot, ambiguous } = findOpenLotBySpokenCode(code);
+      if (ambiguous) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Код ${code} подходит нескольким открытым лотам — добавьте количество кнопкой`,
+        });
+        return;
+      }
       if (!lot) {
         sendJson(websocket, {
           type: "warning",
@@ -2327,7 +2356,6 @@ export function attachWsServer(httpServer, config, services = {}) {
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs, confidence });
               sessionLog.logTranscriptFinal({ text, latencyMs, confidence });
               sendJson(websocket, { type: "final", text, latencyMs });
-              voicePipeline.rememberFinal(text);
 
               // Голосовая отмена брони (W3): «<Имя Фамилия> отмена лота #код».
               // НЕ исполняем отмену из речи — только находим бронь и просим
@@ -2350,6 +2378,13 @@ export function attachWsServer(httpServer, config, services = {}) {
                 handleVoiceQuantityCommand(quantityCommand, text);
                 return;
               }
+
+              // rememberFinal — ПОСЛЕ early-return команд отмены/количества.
+              // Фраза «отмена брони код 03204» содержит триггер «код»; попав
+              // в окно триггеров, она склеивалась со СЛЕДУЮЩИМ финалом в
+              // buildDetectionInputs и могла заново открыть лот 03204 — тот
+              // самый, бронь которого оператор только что отменял.
+              voicePipeline.rememberFinal(text);
 
               const priceResult = detectPrice(text);
 

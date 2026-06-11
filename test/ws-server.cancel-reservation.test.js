@@ -163,3 +163,27 @@ test("#16: after cancel the same buyer can reserve again", async () => {
     await harness.close();
   }
 });
+
+// Анализ 2026-06-11: оператор вслух опускает ведущие нули («отмена брони
+// два четыре три» при лоте «00243»), а строгое сравнение кода отвечало
+// «нет открытого лота 243». Голосовой поиск лота теперь использует ту же
+// толерантность к ведущим нулям, что и покупательские комментарии.
+test("voice cancel matches a lot when spoken code lacks leading zeros", async () => {
+  const card = { ...CARD_03204, id: "p-00243", code: "00243" };
+  const harness = await startHarness({ cardsByCode: { "00243": card }, knownCodes: ["00243"] });
+  const client = await harness.connect();
+  try {
+    await openLotAndReserve(harness, client, { code: "00243", commentId: 101 });
+
+    harness.getLastSpeechKitSession().handlers.onFinal({
+      text: "Аня отмена брони два четыре три",
+      latencyMs: 10,
+    });
+    const match = await client.waitFor((m) => m.type === "voiceCancelMatch", { timeoutMs: 6000 });
+    assert.equal(match.code, "243");
+    assert.equal(match.viewerId, 5001);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
