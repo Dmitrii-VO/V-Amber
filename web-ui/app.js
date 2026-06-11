@@ -490,7 +490,13 @@ function renderActiveLot(lot) {
   elements.lotName.textContent = product.name || "—";
   elements.lotArticleValue.textContent = product.code || code;
   const lotPrice = product.salePrice > 0 ? product.salePrice : product.voicePrice;
-  elements.lotPrice.textContent = lotPrice != null ? formatPrice(lotPrice) : "—";
+  // Пока оператор редактирует цену инлайн, НЕ перезаписываем поле: каждый
+  // state-push (любая бронь/комментарий) иначе сносил <input> из DOM без
+  // blur — набранная цена терялась, dataset.editing застревал в "1" и
+  // редактор переставал открываться до перезагрузки страницы.
+  if (elements.lotPrice.dataset.editing !== "1") {
+    elements.lotPrice.textContent = lotPrice != null ? formatPrice(lotPrice) : "—";
+  }
 
   const stock = product.availableStock;
   const stockUnknown = product.stockUnknown === true && typeof stock !== "number";
@@ -842,9 +848,19 @@ function convertFloatToInt16(float32Array) {
   return result;
 }
 
+// Адрес WS выводим из location: захардкоженный ws://localhost:8080 в hidden
+// input ломал консоль, открытую с другого устройства в LAN, и blocked mixed
+// content за HTTPS. Hidden input остаётся фоллбеком для не-http контекстов.
+function resolveWsUrl() {
+  const { protocol, host } = window.location;
+  if (protocol === "https:") return `wss://${host}/ws/stt`;
+  if (protocol === "http:") return `ws://${host}/ws/stt`;
+  return elements.wsUrlInput.value.trim();
+}
+
 function connectSocket() {
   return new Promise((resolve, reject) => {
-    const url = elements.wsUrlInput.value.trim();
+    const url = resolveWsUrl();
     elements.endpointLabel.textContent = url;
     const websocket = new WebSocket(url);
     websocket.binaryType = "arraybuffer";
@@ -877,11 +893,12 @@ function connectSocket() {
         logEvent("Эфир остановлен. Связь с сервером закрыта.", "info");
         return;
       }
-      logEvent("Связь с сервером оборвалась. Нажмите «Перезапустить» для возобновления.", "warn");
+      logEvent("Связь с сервером оборвалась. Пробую восстановить автоматически…", "warn");
       showConnectionBanner();
       if (state.lifecycle !== "idle" || state.audioContext || state.mediaStream) {
         void cleanupStreamingResources();
       }
+      scheduleAutoReconnect();
     });
 
     websocket.addEventListener("error", (event) => {
@@ -1096,8 +1113,47 @@ function hideConnectionBanner() {
 
 document.getElementById("connectionBannerStart")?.addEventListener("click", () => {
   hideConnectionBanner();
+  cancelAutoReconnect();
   if (state.lifecycle === "idle") void startStreaming();
 });
+
+// ===== Автопереподключение после неожиданного обрыва WS =====
+// Раньше обрыв сети посреди эфира оставлял баннер «Нажмите Перезапустить»
+// и ждал человека; теперь пробуем восстановить эфир сами, с нарастающей
+// паузой и без повторного вопроса про кэш кодов. Останавливаемся, когда
+// эфир восстановлен или оператор вмешался (старт/стоп вручную).
+const AUTO_RECONNECT_DELAYS_MS = [2000, 4000, 8000, 16000, 30000];
+let autoReconnectTimer = null;
+let autoReconnectAttempt = 0;
+
+function cancelAutoReconnect() {
+  if (autoReconnectTimer) {
+    window.clearTimeout(autoReconnectTimer);
+    autoReconnectTimer = null;
+  }
+  autoReconnectAttempt = 0;
+}
+
+function scheduleAutoReconnect() {
+  if (autoReconnectTimer) return;
+  const delay = AUTO_RECONNECT_DELAYS_MS[
+    Math.min(autoReconnectAttempt, AUTO_RECONNECT_DELAYS_MS.length - 1)
+  ];
+  logEvent(`Автопереподключение через ${Math.round(delay / 1000)} с (попытка ${autoReconnectAttempt + 1})…`, "warn");
+  autoReconnectTimer = window.setTimeout(async () => {
+    autoReconnectTimer = null;
+    if (state.lifecycle !== "idle") return; // оператор уже запустил эфир сам
+    autoReconnectAttempt += 1;
+    await startStreaming({ autoResume: true });
+    if (state.lifecycle === "streaming") {
+      autoReconnectAttempt = 0;
+      hideConnectionBanner();
+      logEvent("Эфир восстановлен автоматически. Лоты прошлой сессии закрыты — назовите код заново.", "ok");
+    } else {
+      scheduleAutoReconnect();
+    }
+  }, delay);
+}
 
 // Non-blocking inline replacement for window.confirm — used at the start of a
 // session for product-code cache and during streaming for one-off operator
@@ -1151,8 +1207,12 @@ async function refreshProductCodeCacheIfRequested() {
   logEvent(`Коды товаров загружены: ${payload.count || 0}`, "ok");
 }
 
-async function startStreaming() {
+async function startStreaming(options = {}) {
   if (state.lifecycle !== "idle") return;
+  const autoResume = options.autoResume === true;
+  // Ручной старт отменяет цикл автопереподключения, чтобы таймер не
+  // сработал поверх живого эфира.
+  if (!autoResume) cancelAutoReconnect();
 
   const setupGeneration = state.setupGeneration + 1;
   state.setupGeneration = setupGeneration;
@@ -1160,7 +1220,9 @@ async function startStreaming() {
 
   try {
     try {
-      await refreshProductCodeCacheIfRequested();
+      // При автовосстановлении вопрос про кэш кодов пропускаем: выбор уже
+      // был сделан при первом старте, а баннер ждал бы клика посреди эфира.
+      if (!autoResume) await refreshProductCodeCacheIfRequested();
     } catch (cacheError) {
       // Fall through: streaming proceeds without the cache. The operator
       // sees the warning in the event log; abandoning the start mid-flight
@@ -1193,15 +1255,38 @@ async function startStreaming() {
       return;
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: state.selectedDeviceId ? { exact: state.selectedDeviceId } : undefined,
-        channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    });
+    const baseAudioConstraints = {
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    };
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: state.selectedDeviceId ? { exact: state.selectedDeviceId } : undefined,
+          ...baseAudioConstraints,
+        },
+      });
+    } catch (gumError) {
+      // Сохранённый микрофон мог исчезнуть (BT-гарнитура разрядилась,
+      // USB вынут): { exact } тогда кидает OverconstrainedError, и старт
+      // падал с сырой английской ошибкой. Откатываемся на системный микрофон.
+      const recoverable = gumError?.name === "OverconstrainedError" || gumError?.name === "NotFoundError";
+      if (!recoverable || !state.selectedDeviceId) throw gumError;
+      logEvent("Выбранный микрофон недоступен — использую системный по умолчанию", "warn");
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { ...baseAudioConstraints } });
+    }
+
+    // Отвал устройства ПОСЛЕ старта (гарнитура отключилась): трек тихо
+    // умирает, а пилюля остаётся «Live». Даём оператору явный сигнал.
+    for (const track of stream.getAudioTracks()) {
+      track.addEventListener("ended", () => {
+        if (state.mediaStream !== stream || state.lifecycle !== "streaming") return;
+        logEvent("Микрофон отключился (устройство пропало) — звук не идёт. Переподключите гарнитуру и перезапустите эфир.", "err");
+      });
+    }
 
     if (state.setupGeneration !== setupGeneration || state.lifecycle !== "starting") {
       stream.getTracks().forEach((t) => t.stop());
@@ -1266,6 +1351,10 @@ async function startStreaming() {
   }
 }
 
+// ВАЖНО: cancelAutoReconnect здесь НЕ вызывается — stopStreaming служит и
+// внутренней уборкой после неудачного startStreaming (в т.ч. неудачной
+// попытки автовосстановления), и сброс счётчика/таймера тут убил бы backoff.
+// Отмена по явному намерению оператора — в обработчиках кнопки и пробела.
 async function stopStreaming() {
   if (state.lifecycle === "idle") return;
   state.setupGeneration += 1;
@@ -1502,8 +1591,11 @@ elements.toggleAdvanced.addEventListener("click", () => {
 });
 
 elements.refreshDevicesButton.addEventListener("click", loadInputDevices);
-elements.startButton.addEventListener("click", startStreaming);
-elements.stopButton.addEventListener("click", stopStreaming);
+elements.startButton.addEventListener("click", () => { void startStreaming(); });
+elements.stopButton.addEventListener("click", () => {
+  cancelAutoReconnect();
+  void stopStreaming();
+});
 
 function closeLot(lot = state.activeLot) {
   if (state.websocket && state.websocket.readyState === 1) {
@@ -2953,10 +3045,15 @@ document.addEventListener("keydown", (event) => {
 
   if ((event.key === " " || event.code === "Space") && !isEditableTarget(event.target)) {
     if (openModals().length > 0) return;
+    // После любого клика фокус остаётся на кнопке, и «пробел» нажимал бы её
+    // И останавливал эфир. Случайный стоп посреди продажи дороже, чем лишнее
+    // нажатие мыши, поэтому с фокусом на кнопке шорткат не работает.
+    if (event.target?.tagName === "BUTTON") return;
     event.preventDefault();
     if (state.lifecycle === "idle") {
       void startStreaming();
     } else if (state.lifecycle === "streaming") {
+      cancelAutoReconnect();
       void stopStreaming();
     }
   }
