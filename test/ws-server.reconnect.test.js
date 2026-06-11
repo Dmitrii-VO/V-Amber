@@ -153,3 +153,45 @@ test("persistent stream errors exhaust retries and tear the session down", async
     await harness.close();
   }
 });
+
+// Heartbeat: зомби-сокет (клиент перестал отвечать на ping) должен быть
+// прибит сервером, иначе он вечно блокирует реконнект оператора через
+// single-broadcast guard (409). Живой клиент (auto-pong) выживает.
+test("heartbeat terminates a client that stops answering pings", async () => {
+  const harness = await startHarness({
+    config: { wsHeartbeatIntervalMs: 25 },
+  });
+  // Клиент с отключённым auto-pong имитирует полумёртвое соединение.
+  const { WebSocket } = await import("ws");
+  const deadWs = new WebSocket(harness.url, { autoPong: false });
+  await new Promise((resolve, reject) => {
+    deadWs.once("open", resolve);
+    deadWs.once("error", reject);
+  });
+  try {
+    const closed = new Promise((resolve) => deadWs.once("close", resolve));
+    await Promise.race([
+      closed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("not terminated")), 2000)),
+    ]);
+  } finally {
+    deadWs.close();
+    await harness.close();
+  }
+});
+
+test("heartbeat keeps a responsive client connected", async () => {
+  const harness = await startHarness({
+    config: { wsHeartbeatIntervalMs: 25 },
+  });
+  const client = await harness.connect();
+  try {
+    let closed = false;
+    client.ws.once("close", () => { closed = true; });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(closed, false, "живой клиент не должен отключаться heartbeat-ом");
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});

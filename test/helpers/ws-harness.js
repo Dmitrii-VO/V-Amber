@@ -121,6 +121,9 @@ export function createWishlistStoreMock() {
 
 function buildConfig(overrides = {}) {
   return {
+    // Скалярные ключи верхнего уровня (wsHeartbeatIntervalMs и т.п.)
+    // проходят как есть; структурные группы ниже мержатся поверх.
+    ...overrides,
     articleExtraction: {
       triggers: ["код товара", "артикул", "код"],
       minLength: 1,

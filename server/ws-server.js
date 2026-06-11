@@ -88,6 +88,30 @@ export function attachWsServer(httpServer, config, services = {}) {
     socket.destroy();
   }
 
+  // Heartbeat: полумёртвый TCP (Wi-Fi роуминг, NAT-таймаут) держит
+  // readyState OPEN минутами. Такой зомби-сокет блокировал реконнект
+  // оператора через single-broadcast guard (409 «эфир уже запущен»), пока
+  // тот не догадается про ?force=1. Пингуем всех клиентов; не ответивший
+  // pong к следующему проходу — terminate, дальше штатный путь close.
+  const heartbeatIntervalMs = Number(config.wsHeartbeatIntervalMs) > 0
+    ? Number(config.wsHeartbeatIntervalMs)
+    : 30_000;
+  const heartbeatTimer = setInterval(() => {
+    for (const client of wsServer.clients) {
+      if (client.isAlive === false) {
+        logger.warn("ws", "heartbeat_timeout_terminate", {
+          connectionId: client.connectionId || null,
+        });
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      try { client.ping(); } catch { /* ignore */ }
+    }
+  }, heartbeatIntervalMs);
+  heartbeatTimer.unref?.();
+  httpServer.on("close", () => clearInterval(heartbeatTimer));
+
   httpServer.on("upgrade", (request, socket, head) => {
     let url;
 
@@ -139,6 +163,11 @@ export function attachWsServer(httpServer, config, services = {}) {
 
   wsServer.on("connection", (websocket) => {
     const connectionId = `ws-${nextConnectionId++}`;
+    // Для heartbeat-свипа: pong возвращает клиента в живые. ws-клиент
+    // браузера отвечает на ping автоматически, отдельного кода в UI не надо.
+    websocket.isAlive = true;
+    websocket.connectionId = connectionId;
+    websocket.on("pong", () => { websocket.isAlive = true; });
     const sessionLog = createSessionLogImpl();
     let session = null;
     let activeLot = null;
