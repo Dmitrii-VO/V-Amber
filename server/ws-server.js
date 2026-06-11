@@ -777,7 +777,17 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
-      if (!activeLot?.product || !priceResult?.value) {
+      if (!priceResult?.value) {
+        return false;
+      }
+      // Тихие no-op здесь стоили оператору уверенности: он называет цену,
+      // система молчит — и только в логах видно почему. Теперь каждый отказ
+      // отвечает warning'ом в UI.
+      if (!activeLot?.product) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Распознал цену ${priceResult.value} ₽, но открытого лота нет — цена не применена`,
+        });
         return false;
       }
 
@@ -789,6 +799,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           voicePrice: priceResult.value,
           code: activeLot.code,
           lotSessionId: activeLot.lotSessionId,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Цена ${priceResult.value} ₽ из речи не применена: у лота ${activeLot.code} уже есть цена ${activeLot.product.salePrice} ₽ из МойСклад. Изменить можно кликом по цене лота`,
         });
         return false;
       }
@@ -820,6 +834,10 @@ export function attachWsServer(httpServer, config, services = {}) {
             connectionId,
             lotSessionId: activeLot?.lotSessionId,
             error,
+          });
+          sendJson(websocket, {
+            type: "warning",
+            message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${activeLot?.code || ""}`.trim(),
           });
         });
       }
@@ -1908,6 +1926,10 @@ export function attachWsServer(httpServer, config, services = {}) {
       // последующая бронь уже уйдёт с правильной ценой. Публикацию апдейта
       // в VK выполняем ниже, только если карточка туда вообще опубликована.
       if (!activeLot?.product) {
+        sendJson(websocket, {
+          type: "warning",
+          message: "Распознал скидку, но открытого лота нет — скидка не применена",
+        });
         return;
       }
 
@@ -1918,6 +1940,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           reason: "no_sale_price",
           salePrice,
           lotSessionId: activeLot.lotSessionId,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Скидка не применена: у лота ${activeLot.code} нет цены — назовите или введите цену сначала`,
         });
         return;
       }
@@ -1930,6 +1956,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         const percent = Number(descriptor.value);
         if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
           logger.warn("discount", "invalid_discount", { connectionId, kind: "percent", value: descriptor.value });
+          sendJson(websocket, {
+            type: "warning",
+            message: `Скидка не применена: процент вне диапазона (${descriptor.value})`,
+          });
           return;
         }
         amount = Math.floor((salePrice * percent) / 100);
@@ -1945,6 +1975,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           kind: descriptor?.kind,
           rawValue: descriptor?.value,
           lotSessionId: activeLot.lotSessionId,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Скидка ${Number.isFinite(amount) ? `${amount} ₽` : ""} не применена: сумма больше или равна цене лота (${salePrice} ₽)`.replace(/\s+/g, " "),
         });
         return;
       }
@@ -1984,6 +2018,10 @@ export function attachWsServer(httpServer, config, services = {}) {
             connectionId,
             lotSessionId: activeLot?.lotSessionId,
             error,
+          });
+          sendJson(websocket, {
+            type: "warning",
+            message: `Скидка применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${activeLot?.code || ""}`.trim(),
           });
         });
       }
@@ -2319,12 +2357,29 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     logger.info("ws", "client_connected", { connectionId });
 
+    // Однократное (на эфир) предупреждение «говорите в пустоту»: клиент шлёт
+    // аудио, а STT-сессии нет (упала и не переподнялась, или start не прошёл).
+    // Раньше чанки молча выбрасывались, и оператор узнавал о проблеме по
+    // отсутствию транскриптов.
+    let warnedAudioWithoutSession = false;
+
     websocket.on("message", async (message, isBinary) => {
       try {
         if (isBinary) {
           if (!session) {
+            // activeRunId !== null означает окно реактивного reconnect —
+            // о нём оператор уже предупреждён отдельным сообщением.
+            if (!warnedAudioWithoutSession && activeRunId === null) {
+              warnedAudioWithoutSession = true;
+              sendJson(websocket, {
+                type: "warning",
+                message: "Аудио приходит, но распознавание не запущено — речь не обрабатывается. Перезапустите эфир",
+              });
+              logger.warn("ws", "audio_without_session", { connectionId });
+            }
             return;
           }
+          warnedAudioWithoutSession = false;
 
           session.pushAudio(Buffer.from(message));
           return;

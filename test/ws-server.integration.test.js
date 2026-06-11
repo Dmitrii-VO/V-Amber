@@ -189,3 +189,26 @@ test("voice: discount in the next final applies after the lot-open settles", asy
     await harness.close();
   }
 });
+
+// Тихие no-op больше не тихие: цена из речи при существующей цене МойСклад
+// раньше игнорировалась только с logger.info — оператор не понимал, почему
+// «цена две тысячи» ничего не сделала.
+test("voice: ignored voice price sends an operator warning", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_03204 },
+    knownCodes: ["03204"],
+  });
+  const client = await harness.connect();
+  try {
+    await openLotByVoice(client, harness);
+    harness.getLastSpeechKitSession().handlers.onFinal({ text: "цена 2000", latencyMs: 10 });
+    const warning = await client.waitFor(
+      (m) => m.type === "warning" && /не применена/.test(m.message || ""),
+      { timeoutMs: 4000 },
+    );
+    assert.match(warning.message, /4500/);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
