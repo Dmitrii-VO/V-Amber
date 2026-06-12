@@ -2736,6 +2736,11 @@ export function attachWsServer(httpServer, config, services = {}) {
               // в VK, сброс стейта — см. teardownAfterStreamFailure) — только
               // когда попытки исчерпаны.
               if (errorReconnectAttempts < ERROR_RECONNECT_MAX) {
+                // Таймер плановой ротации мог бы сработать внутри окна
+                // retry и открыть параллельную сессию, которую retry затем
+                // молча перезаписал бы (осиротевший gRPC-стрим). Успешный
+                // openSpeechKitSession переармирует ротацию сам.
+                clearProactiveReconnect();
                 session?.close();
                 session = null;
                 scheduleErrorReconnect(error);
