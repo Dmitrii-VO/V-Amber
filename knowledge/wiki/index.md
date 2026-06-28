@@ -50,6 +50,8 @@ change.
 - [[wishlist]] — Buyer waiting list and supplier-order draft workflow.
 - [[operator-feedback]] — Durable operator requests collected from test
   sessions.
+- [[voice-control-hardening-plan]] — Reliability plan for STT segmentation,
+  catalog gating, voice price/discount safety, benchmarking, and module splits.
 - [[voice-price-parsing]] — Spoken price extraction and compact digit phrases.
 - [[stock-synchronization]] — Visible stock refresh and known unknown-stock
   risks.
@@ -73,6 +75,11 @@ change.
 - [[analytics-tracking-plan]] — Measurement contract for operator workflow,
   conversion, and reliability analytics.
 - [[service-scripts]] — One-off diagnostic and recovery scripts.
+- [[order-recovery-from-logs]] — Rebuild MoySklad customer orders + supplier PO
+  from эфир session logs after a mid-broadcast MoySklad auth failure.
+- [[log-verification-checklist]] — Step-by-step checklist to verify an эфир from
+  its log bundle (MoySklad call health, order structure, pricing, waitlist,
+  wishlist) with the read-only `analyze-broadcast-logs` helper.
 - [[reservation-digests]] — VK DM summaries for open live-commerce reservations.
 
 ## Source snapshots

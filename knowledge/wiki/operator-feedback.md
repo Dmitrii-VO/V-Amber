@@ -316,10 +316,46 @@ Source: `logs/v-amber-logs-2026-05-30T21-02-01-424Z.zip`. Walkthrough on
   (`VK_GROUP_TOKEN` указывает на не ту группу). [server/vk.js:167-176](server/vk.js:167)
   уже корректно использует group token. Зафиксировать в runbook, не в коде.
 
+## Operator wishes 2026-06-23 (Roman — discounts + cross-project boundary)
+
+Source: VK chat between Dmitry (developer) and Roman (operator), 2026-06-23.
+The operator described a buyer self-service cabinet (view order, remove
+positions, request a payment link, coupons, free-shipping progress, and a
+"strip the discount" penalty for removing too much from an unpaid order).
+
+- **Boundary clarified — most of this is NOT V-Amber.** The buyer cabinet,
+  self-edit, payment link, and discount-strip penalty belong to the separate
+  **AuctionBot Amberry** project, which reads the `#Эфир <date>` customer orders
+  directly from the **shared MoySklad** after the broadcast ends (operator
+  confirmed "вариант А" — no explicit handoff from V-Amber). Those wishes and
+  their open questions are recorded in the AuctionBot vault:
+  `Amberry39/knowledge/wiki/operator-wishes-2026-06-23-buyer-vk-cabinet.md`.
+- **V-Amber's only part — rules-based discounts (OPEN, to be designed).** Today
+  the operator dictates the discount by voice each lot ("скидка 50%"), which is
+  tedious ("всегда говорить — залупа") and sometimes mis-recognised. He wants a
+  rules-driven discount instead, so the discount is already correct in MoySklad
+  when the order is created. Candidate shapes raised but **not decided**:
+  - a single default broadcast discount applied to every lot, with voice as an
+    override; and/or
+  - per-article rules ("на товар X скидка Y").
+  - **Decided 2026-06-23 — priority:** a discount voiced during the broadcast
+    **always wins** over any rule (broadcast default or per-article). Rules only
+    fill in where the operator did not voice a discount. Voice discount input
+    therefore **stays**.
+  - Open: where rules are authored/stored (panel UI, config, or a MoySklad
+    attribute), and the rest of the rule shape (default vs per-article).
+  - **Status 2026-06-23: deferred — operator wants to think the discount system
+    through first ("скидочную систему нужно продумать").** No implementation
+    until the design is settled. Builds on `server/discount-detector.js` and the
+    MoySklad position `discount` percentage contract (see
+    [[voice-price-parsing#Discounts]], [[moysklad-integration#Reservation
+    orders]]).
+
 ## Related pages
 
 - [[live-commerce-flow]]
 - [[reservation-flow]]
 - [[web-dashboard]]
 - [[wishlist]]
+- [[voice-price-parsing]]
 - [[../raw/log-review-2026-05-24-18-45|log-review-2026-05-24-18-45]]
