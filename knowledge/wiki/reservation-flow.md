@@ -128,31 +128,64 @@ creates or appends a customer order in MoySklad. Safe mode wraps external write
 methods so dry runs still log detected events without creating real external
 state.
 
-### Customer-order merging by broadcast day
+### Customer-order merging across campaign days
 
-A buyer's reservations merge into one MoySklad customer order only within the
-same broadcast day. The order description carries a marker such as
-`#Эфир 2026-06-08`; later reservations reuse an order only when that marker
-matches the current broadcast date.
+Эфиры идут несколько дней подряд = одна кампания. A buyer's reservations merge
+into **one** MoySklad customer order **across all campaign days**: later
+reservations (even on a different day) reuse the buyer's latest **open**
+`#Эфир` order instead of creating a new one per day. Each day still stamps its
+own `#Эфир <date>` marker into the order description, so one campaign order
+accumulates lines like `#Эфир 2026-06-27`, `#Эфир 2026-06-28` — the marker is a
+per-day audit tag, **not** the merge key.
 
-- **Append allowed:** current-broadcast orders whose status is not blocked.
+- **Append allowed:** the buyer's latest order that carries **any** `#Эфир`
+  marker and whose status is not append-blocked.
 - **Append blocked:** `Оплачен`, `Частично оплачен`, `Запакован`,
   `Отправлен`, `Доставлен`, `Отменён`.
-- **New order:** no current-broadcast order exists, or the found order is in a
-  blocked status.
+- **New order:** the buyer has no open `#Эфир` order **within the campaign
+  window**, the previous one was closed/packed/paid by the operator, or the buyer
+  has no `#Эфир` order at all.
 
-This prevents today's reservations from being added to old or already paid
-customer orders. `Копит` can still be reused when it belongs to the current
-broadcast marker and is not paid.
+The campaign has **two** boundaries:
+
+1. **Status** — while the order is open it accumulates; closing it
+   (pack/ship/pay) ends the campaign for that buyer.
+2. **Recency window** (`campaignMaxGapDays`, default **3**) — merge only when the
+   order's most recent `#Эфир <date>` marker is within that many days of the new
+   reservation. A week-old open order is treated as a *different* campaign, so a
+   new order is started even if the old one was never closed. Each append stamps
+   the current day's marker, so the window slides with activity (эфиры on
+   consecutive days, even with a 1-2 day gap, stay one order; a 7-day gap does
+   not).
+
+Matching on `#Эфир ` (not on a bare open order) ensures campaign merge never
+hijacks an unrelated manual/non-эфир open order.
+
+**Config / rollback.**
+- `config.moysklad.crossDayOrderMerge` (env `MOYSKLAD_CROSS_DAY_ORDER_MERGE`,
+  default **on**). `=0` restores the legacy **per-date** behaviour (reuse only an
+  order whose marker matches *today's* date; new order every new day).
+- `config.moysklad.campaignMaxGapDays` (env `MOYSKLAD_CAMPAIGN_MAX_GAP_DAYS`,
+  default **3**) — the recency window above.
+
+After-the-fact reconciliation of orders that split across days is
+`scripts/merge-broadcast-orders.mjs` (see [[service-scripts]]).
 
 Implementation:
 
 - `moysklad.findLatestBroadcastCustomerOrder` filters by `agent`, excludes
   append-blocking states with repeated `state!=<href>` filters, orders by latest
-  moment, and then keeps only rows whose description contains the current
+  moment, and then (campaign mode) keeps the latest row whose description
+  contains an `#Эфир ` marker **whose newest date is within `campaignMaxGapDays`
+  of the reservation**; in legacy mode it keeps only rows matching the current
   `#Эфир <date>` marker.
-- `ws-server.js` keys the in-memory order cache by `viewerId+broadcastDate`, not
-  by viewer alone.
+- `appendPositionToCustomerOrder` → `ensureOrderHasBroadcastDescription` stamps
+  the current day's `#Эфир <date>` marker on each append, so every campaign day
+  is recorded on the surviving order.
+- `ws-server.js` keys the in-memory order cache by `viewerId+broadcastDate`; the
+  cache is a per-day/per-session fast path, while the MoySklad lookup above is
+  the cross-day/cross-session source of truth (a day rollover just falls through
+  to one extra lookup, which finds and reuses the open order).
 - `moysklad.isCustomerOrderAppendable` checks append-blocking states. This is
   separate from digest "open" logic, so paid orders can still appear in day
   summaries while staying blocked for new reservation writes.

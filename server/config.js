@@ -71,6 +71,19 @@ export const config = {
     // 60с обычно хватает на ~3-5 тысяч позиций; если каталог больше или
     // сеть медленная — поднимите вручную через MOYSKLAD_BULK_REQUEST_TIMEOUT_MS.
     bulkRequestTimeoutMs: parseIntEnv(process.env.MOYSKLAD_BULK_REQUEST_TIMEOUT_MS, 60000),
+    // Эфиры идут несколько дней подряд = одна кампания. При включённом флаге
+    // брони клиента дописываются в его ПОСЛЕДНИЙ открытый #Эфир-заказ независимо
+    // от дня (а не создаётся новый заказ на каждую дату). Новый заказ заводится
+    // только когда у клиента нет открытого #Эфир-заказа (оператор закрыл/упаковал
+    // прошлый → следующая бронь начинает новый). Откат к прежнему поведению
+    // (мердж только в пределах одной даты): MOYSKLAD_CROSS_DAY_ORDER_MERGE=0.
+    // См. reservation-flow.md «Customer-order merging across campaign days».
+    crossDayOrderMerge: process.env.MOYSKLAD_CROSS_DAY_ORDER_MERGE !== "0",
+    // Окно кампании в днях: при crossDayOrderMerge бронь дописывается в
+    // существующий заказ, только если последняя активность в нём (самый свежий
+    // маркер `#Эфир <дата>`) была не дальше этого числа дней. Заказ старше →
+    // новая кампания → новый заказ. Покрывает эфиры подряд с пропуском 1-2 дней.
+    campaignMaxGapDays: parseIntEnv(process.env.MOYSKLAD_CAMPAIGN_MAX_GAP_DAYS, 3),
   },
   articleExtraction: {
     triggers: parseArticleTriggers(process.env.VOICE_ARTICLE_TRIGGERS),

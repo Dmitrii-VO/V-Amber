@@ -320,7 +320,7 @@ test("findBroadcastCustomerOrderForCounterparty excludes paid orders from append
   }
 });
 
-test("findBroadcastCustomerOrderForCounterparty searches beyond first page", async () => {
+test("findBroadcastCustomerOrderForCounterparty searches beyond first page (date-scoped, legacy)", async () => {
   const fetchMock = createFetchMock((path, searchParams) => {
     const defaults = defaultsResponseFull(path);
     if (defaults) return defaults;
@@ -351,7 +351,9 @@ test("findBroadcastCustomerOrderForCounterparty searches beyond first page", asy
   });
   const restore = installFetchMock(fetchMock);
   try {
-    const client = createMoySkladClient(baseConfig);
+    // Pagination to find TODAY's marker only matters in the legacy date-scoped
+    // mode; campaign mode reuses the latest open #Эфир order from page 1.
+    const client = createMoySkladClient({ ...baseConfig, crossDayOrderMerge: false });
     const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", {
       broadcastDate: "2026-05-24",
     });
@@ -363,6 +365,115 @@ test("findBroadcastCustomerOrderForCounterparty searches beyond first page", asy
         .map((call) => call.searchParams.get("offset")),
       ["0", "100"],
     );
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty reuses a prior-day #Эфир order across campaign days (default on)", async () => {
+  // Multi-day эфир: buyer has only YESTERDAY's open #Эфир order, none for today.
+  // crossDayOrderMerge is on by default → reuse it so the campaign accumulates
+  // into one order per buyer.
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({
+        rows: [{ id: "yesterday-live", name: "VK00003", description: "#Эфир 2026-05-23\nVK reservation" }],
+      });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", { broadcastDate: "2026-05-24" });
+    assert.equal(result?.id, "yesterday-live");
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty does NOT reuse an order older than the campaign window", async () => {
+  // A week-old open #Эфир order is a different campaign (gap 7 > default 3) →
+  // start a fresh order instead of appending to stale one.
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({ rows: [{ id: "stale", name: "VK00099", description: "#Эфир 2026-05-17\nVK reservation" }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", { broadcastDate: "2026-05-24" });
+    assert.equal(result, null);
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty reuses an order at the campaign-window boundary", async () => {
+  // Gap of exactly 3 days is inclusive (default maxGapDays=3) → still merge.
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({ rows: [{ id: "recent", name: "VK00100", description: "#Эфир 2026-05-21\nVK reservation" }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", { broadcastDate: "2026-05-24" });
+    assert.equal(result?.id, "recent");
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty stays date-scoped when crossDayOrderMerge is off", async () => {
+  // Legacy behaviour: with the flag disabled, a prior-day order is NOT reused —
+  // only an order carrying today's marker counts, so this returns null.
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({
+        rows: [{ id: "yesterday-live", name: "VK00003", description: "#Эфир 2026-05-23\nVK reservation" }],
+      });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient({ ...baseConfig, crossDayOrderMerge: false });
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", { broadcastDate: "2026-05-24" });
+    assert.equal(result, null);
+  } finally {
+    restore();
+  }
+});
+
+test("findBroadcastCustomerOrderForCounterparty does not reuse a non-эфир open order (campaign mode)", async () => {
+  // Safety: campaign merge must target эфир orders only, never hijack an
+  // unrelated manual open order without any #Эфир marker.
+  const fetchMock = createFetchMock((path) => {
+    const defaults = defaultsResponse(path);
+    if (defaults) return defaults;
+    if (path === "entity/customerorder") {
+      return jsonResponse({ rows: [{ id: "manual-open", name: "VK00010", description: "Ручной заказ по телефону" }] });
+    }
+    return jsonResponse({ rows: [] });
+  });
+  const restore = installFetchMock(fetchMock);
+  try {
+    const client = createMoySkladClient(baseConfig);
+    const result = await client.findBroadcastCustomerOrderForCounterparty("cp-1", { broadcastDate: "2026-05-24" });
+    assert.equal(result, null);
   } finally {
     restore();
   }

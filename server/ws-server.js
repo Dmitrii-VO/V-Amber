@@ -1201,11 +1201,14 @@ export function attachWsServer(httpServer, config, services = {}) {
           }
         }
 
-        // Cross-session merge внутри текущего эфира: in-memory map is wiped
-        // when the WebSocket closes or the operator restarts the stream, so
-        // the same viewer's next reservation looks "fresh" even when
-        // MoySklad already has today's broadcast order. Ask MoySklad as source
-        // of truth, but only for the current #Эфир marker.
+        // Cross-session / cross-day merge: the in-memory map is wiped when the
+        // WebSocket closes or the operator restarts the stream (and is keyed by
+        // day), so the same viewer's next reservation looks "fresh" even when
+        // MoySklad already has their open broadcast order. Ask MoySklad as the
+        // source of truth. With config.crossDayOrderMerge on (default), the
+        // lookup reuses the viewer's latest OPEN #Эфир order regardless of which
+        // campaign day created it — multi-day эфиры accumulate into one order
+        // per buyer; a new order starts only once the operator closes the old.
         if (!existingOrder?.id) {
           try {
             resolvedCounterparty = await moysklad.ensureCounterparty({

@@ -734,6 +734,30 @@ export function createMoySkladClient(config, options = {}) {
     }
 
     const marker = buildBroadcastMarker(broadcastDate);
+    // Эфиры идут несколько дней подряд = одна кампания. В campaign-режиме
+    // (config.crossDayOrderMerge, по умолчанию вкл.) дописываем в последний
+    // открытый заказ клиента с ЛЮБЫМ маркером `#Эфир <дата>`, а не только с
+    // маркером сегодняшнего дня — так заказы клиента за разные дни кампании
+    // объединяются в один. Матчим именно по `#Эфир `, чтобы не дописывать в
+    // посторонние (ручные/не-эфирные) открытые заказы контрагента. Закрытые/
+    // оплаченные статусы уже отсечены фильтром state!= и isAppendable ниже, так
+    // что после закрытия заказа оператором следующая бронь начнёт новый.
+    const campaignMode = config.crossDayOrderMerge !== false;
+    const maxGapDays = Number.isFinite(config.campaignMaxGapDays) ? config.campaignMaxGapDays : 3;
+    const todayStr = formatBroadcastDate(broadcastDate);
+    const toUtcDay = (s) => { const [y, m, d] = String(s).split("-").map(Number); return Date.UTC(y, m - 1, d); };
+    const dayGap = (a, b) => Math.abs(Math.round((toUtcDay(a) - toUtcDay(b)) / 86400000));
+    const matchesBroadcast = (item) => {
+      const description = String(item?.description || "");
+      if (!campaignMode) return description.includes(marker);
+      // Окно кампании: дописываем только если последняя активность в заказе
+      // (самый свежий маркер `#Эфир <дата>`) была не дальше maxGapDays от текущей
+      // брони. Заказ недельной давности → это уже другая кампания → новый заказ.
+      const dates = [...description.matchAll(/#Эфир\s+(\d{4}-\d{2}-\d{2})/g)].map((mm) => mm[1]);
+      if (dates.length === 0) return false;
+      const latest = dates.sort().at(-1);
+      return dayGap(latest, todayStr) <= maxGapDays;
+    };
     const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
     const filterParts = [`agent=${agentHref}`];
     if (blockedHrefs.length > 0) {
@@ -755,7 +779,7 @@ export function createMoySkladClient(config, options = {}) {
       const rows = Array.isArray(payload?.rows) ? payload.rows : [];
       row = rows
         .filter((item) => isAppendableCustomerOrderState(item, defaults))
-        .find((item) => String(item?.description || "").includes(marker));
+        .find(matchesBroadcast);
       if (row) {
         break;
       }
