@@ -216,6 +216,35 @@
         </div>
 
         <div class="col col--right">
+          <section id="streamPanel" class="panel" hidden>
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Стрим</span>
+              </div>
+              <span class="stream-status-text">
+                <span id="streamDot" class="dot"></span>
+                <span id="streamStatusLabel">не настроено</span>
+              </span>
+            </div>
+            <div class="panel-body">
+              <div class="stream-field">
+                <label for="streamRtmpUrl">RTMP-адрес</label>
+                <input id="streamRtmpUrl" type="text" readonly />
+                <button class="btn btn--ghost stream-copy" data-copy-target="streamRtmpUrl" type="button">Копировать</button>
+              </div>
+              <div class="stream-field">
+                <label for="streamKey">Ключ публикации</label>
+                <input id="streamKey" type="password" readonly />
+                <button class="btn btn--ghost stream-copy" data-copy-target="streamKey" type="button">Копировать</button>
+              </div>
+              <div class="stream-field">
+                <label for="streamViewerUrl">Ссылка для зрителей</label>
+                <input id="streamViewerUrl" type="text" readonly />
+                <button class="btn btn--ghost stream-copy" data-copy-target="streamViewerUrl" type="button">Копировать</button>
+              </div>
+            </div>
+          </section>
+
           <section class="panel">
             <div class="panel-head">
               <div class="panel-title">

@@ -65,6 +65,8 @@ change.
   API backoff.
 - [[moysklad-integration]] — Product lookup, stock, counterparties, orders,
   reservations, product-code cache, and diagnostic scripts.
+- [[stream-integration]] — Self-hosted MediaMTX RTMP/HLS stream as a VK
+  Live alternative: cloud deployment, config, status API, dashboard panel.
 
 ## Operations
 
