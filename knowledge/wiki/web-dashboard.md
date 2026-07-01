@@ -79,6 +79,17 @@ changes:
 - `#openLotsList` — compact list of all open lots. The current `activeLot` is
   highlighted; each row has a close button for that specific lot.
 
+## Stream panel
+
+`#streamPanel` (right column, above "Брони") shows connection info and
+live status for the self-hosted MediaMTX stream — an alternative to VK
+Live. Hidden entirely unless `STREAM_MEDIAMTX_API_URL` is configured.
+Shows RTMP URL, publish key, and viewer link (each with a "Копировать"
+button) plus a status dot polled every 5s (`В эфире · N зрителей` /
+`Стрим не запущен` / `Ошибка связи с сервером`). MVP only: does not start
+or stop OBS — the operator still starts the RTMP push manually. See
+[[stream-integration]].
+
 ## Wishlist modal
 
 The dashboard has a full wishlist modal with active/archive/settings tabs,
@@ -108,3 +119,4 @@ which clients to message, and send VK DMs through
 - [[wishlist]]
 - [[reservation-digests]]
 - [[logging-and-diagnostics]]
+- [[stream-integration]]

@@ -52,6 +52,18 @@ Article parsing:
 - `VOICE_ARTICLE_MIN_LENGTH`
 - `VOICE_ARTICLE_MAX_LENGTH`
 
+Stream (MediaMTX, added 2026-07-02) — optional self-hosted RTMP/HLS
+alternative to VK Live, see [[stream-integration]]:
+
+- `STREAM_MEDIAMTX_API_URL` — base URL of the MediaMTX control API
+  (e.g. an SSH-tunnel local endpoint). Feature is disabled/hidden when unset.
+- `STREAM_PATH_NAME` — MediaMTX path name, default `live`.
+- `STREAM_RTMP_URL` — RTMP ingest URL shown to the operator for OBS setup.
+- `STREAM_PUBLISH_USER` / `STREAM_PUBLISH_PASS` — publish credentials shown
+  to the operator as the "stream key". Real values must stay in `.env` only.
+- `STREAM_VIEWER_URL` — HLS playback URL shared with viewers.
+- `STREAM_STATUS_TIMEOUT_MS` — timeout for the status poll, default 3000.
+
 Server bind and access control (added 2026-05-29):
 
 - `HOST` — listen address. Defaults to `0.0.0.0` (needed for Docker port

@@ -116,6 +116,17 @@ export const config = {
     descriptionTemplate: process.env.WISHLIST_DESCRIPTION_TEMPLATE?.trim()
       || "Предзаказ из эфира {date}. Артикулы: {codes}",
   },
+  // Собственный RTMP/HLS-стрим (MediaMTX) как альтернатива VK Live.
+  // Опционально: без STREAM_MEDIAMTX_API_URL панель "Стрим" в дашборде скрыта.
+  stream: {
+    apiUrl: process.env.STREAM_MEDIAMTX_API_URL?.trim() || "",
+    pathName: process.env.STREAM_PATH_NAME?.trim() || "live",
+    rtmpUrl: process.env.STREAM_RTMP_URL?.trim() || "",
+    publishUser: process.env.STREAM_PUBLISH_USER?.trim() || "",
+    publishPass: process.env.STREAM_PUBLISH_PASS?.trim() || "",
+    viewerUrl: process.env.STREAM_VIEWER_URL?.trim() || "",
+    statusTimeoutMs: parseIntEnv(process.env.STREAM_STATUS_TIMEOUT_MS, 3000),
+  },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),
     folderId: process.env.YANDEX_SPEECHKIT_FOLDER_ID?.trim() || "",
