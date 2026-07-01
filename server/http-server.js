@@ -9,6 +9,7 @@ import { isSafeMode, setSafeMode } from "./safe-mode.js";
 import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 import { createReservationDigestLog } from "./reservation-digest-log.js";
 import { createAuth } from "./auth.js";
+import { getStreamStatus } from "./stream-status.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 const SEND_LOGS_TIMEOUT_MS = 60 * 1000;
@@ -424,6 +425,47 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         jsonResponse(response, 200, { ok: true, ...result });
       } catch (error) {
         jsonResponse(response, 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/stream/config") {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      if (!config?.stream?.apiUrl) {
+        jsonResponse(response, 200, { configured: false });
+        return;
+      }
+      // Публикационный пароль MediaMTX — реальная инфраструктурная секрета.
+      // Без API_TOKEN /api/* не защищён никак (см. auth.enabled в server/auth.js),
+      // поэтому отдаём креды только когда сервер сам требует токен на вход —
+      // иначе любой, кто достучится до дашборда, получил бы ключ публикации.
+      if (!auth.enabled) {
+        jsonResponse(response, 200, {
+          configured: true,
+          credentialsHidden: true,
+          rtmpUrl: config.stream.rtmpUrl,
+          viewerUrl: config.stream.viewerUrl,
+        });
+        return;
+      }
+      jsonResponse(response, 200, {
+        configured: true,
+        rtmpUrl: config.stream.rtmpUrl,
+        publishUser: config.stream.publishUser,
+        publishPass: config.stream.publishPass,
+        viewerUrl: config.stream.viewerUrl,
+      });
+      return;
+    }
+
+    if (pathname === "/api/stream/status") {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      try {
+        const result = await getStreamStatus();
+        jsonResponse(response, 200, result);
+      } catch (error) {
+        logger.error("http", "stream_status_failed", { error: error?.message || String(error) });
+        jsonResponse(response, 500, { configured: true, live: false, error: error?.message || String(error) });
       }
       return;
     }

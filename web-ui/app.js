@@ -121,6 +121,13 @@ const elements = {
   wishlistConfirmText: $("wishlistConfirmText"),
   wishlistConfirmCancel: $("wishlistConfirmCancel"),
   wishlistConfirmOk: $("wishlistConfirmOk"),
+
+  streamPanel: $("streamPanel"),
+  streamDot: $("streamDot"),
+  streamStatusLabel: $("streamStatusLabel"),
+  streamRtmpUrl: $("streamRtmpUrl"),
+  streamKey: $("streamKey"),
+  streamViewerUrl: $("streamViewerUrl"),
 };
 
 const state = {
@@ -156,6 +163,7 @@ const state = {
   lastVoiceAt: 0,
   micCheckTimer: null,
   micSilent: false,
+  streamStatusTimer: null,
 };
 
 const digestState = {
@@ -1416,6 +1424,74 @@ async function fetchSafeModeInitial() {
   }
 }
 
+function setStreamStatus(kind, label) {
+  elements.streamDot.className = "dot";
+  if (kind === "live") elements.streamDot.classList.add("dot--live");
+  else if (kind === "warn") elements.streamDot.classList.add("dot--warn");
+  else if (kind === "err") elements.streamDot.classList.add("dot--err");
+  elements.streamStatusLabel.textContent = label;
+}
+
+async function pollStreamStatus() {
+  try {
+    const response = await fetch("/api/stream/status");
+    const payload = await response.json();
+    if (!payload.configured) return;
+    if (payload.error) {
+      setStreamStatus("err", "Ошибка связи с сервером");
+    } else if (payload.live) {
+      setStreamStatus("live", `В эфире · ${payload.readers ?? 0} зрителей`);
+    } else {
+      setStreamStatus("warn", "Стрим не запущен");
+    }
+  } catch {
+    setStreamStatus("err", "Ошибка связи с сервером");
+  }
+}
+
+async function initStreamPanel() {
+  try {
+    const response = await fetch("/api/stream/config");
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (!payload.configured) return;
+
+    elements.streamRtmpUrl.value = payload.rtmpUrl || "";
+    elements.streamViewerUrl.value = payload.viewerUrl || "";
+    if (payload.credentialsHidden) {
+      elements.streamKey.value = "";
+      elements.streamKey.placeholder = "Задайте API_TOKEN в .env, чтобы увидеть ключ";
+      const keyCopyButton = document.querySelector('[data-copy-target="streamKey"]');
+      if (keyCopyButton) keyCopyButton.disabled = true;
+    } else {
+      elements.streamKey.value = payload.publishPass || "";
+    }
+    elements.streamPanel.hidden = false;
+    setStreamStatus("", "проверка…");
+
+    await pollStreamStatus();
+    state.streamStatusTimer = setInterval(pollStreamStatus, 5000);
+  } catch (error) {
+    handleError(error, "Не удалось загрузить настройки стрима");
+  }
+}
+
+document.querySelectorAll(".stream-copy").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const targetId = button.dataset.copyTarget;
+    const input = document.getElementById(targetId);
+    if (!input?.value) return;
+    try {
+      await navigator.clipboard.writeText(input.value);
+      const original = button.textContent;
+      button.textContent = "Скопировано";
+      setTimeout(() => { button.textContent = original; }, 1500);
+    } catch (error) {
+      handleError(error, "Не удалось скопировать в буфер обмена");
+    }
+  });
+});
+
 elements.safeModeToggle.addEventListener("change", (event) => {
   const desired = event.target.checked;
   logEvent(desired ? "Safe mode: запрос на включение" : "Safe mode: запрос на выключение", "info");
@@ -1869,6 +1945,7 @@ elements.endpointLabel.textContent = elements.wsUrlInput.value;
 setSessionPill("", "Idle");
 renderSafeMode();
 fetchSafeModeInitial();
+initStreamPanel();
 
 navigator.mediaDevices.addEventListener("devicechange", loadInputDevices);
 loadInputDevices();

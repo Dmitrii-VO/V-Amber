@@ -215,6 +215,12 @@ a { color: inherit; }
 .col--left { grid-template-rows: minmax(0, max-content) 1fr; }
 .col--left > .panel:first-child { max-height: 38vh; }
 .col--right { grid-template-rows: 1fr 1fr; }
+/* #streamPanel is hidden (display:none) unless the stream feature is
+   configured — it drops out of grid flow entirely, so the 3-row layout
+   only applies while it's actually a visible grid item. Without :has(),
+   the unconfigured (default) case would auto-place the remaining 2 panels
+   into 3 explicit tracks and leave dead empty space in the last one. */
+.col--right:has(#streamPanel:not([hidden])) { grid-template-rows: auto 1fr 1fr; }
 
 .panel { background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
 .panel-head {
@@ -231,6 +237,19 @@ a { color: inherit; }
 .panel-title .count { font-family: var(--font-mono); color: var(--text-dim); font-weight: 500; letter-spacing: 0; }
 .panel-body { padding: var(--gap-5); overflow: auto; flex: 1; min-height: 0; }
 .panel-body--flush { padding: 0; }
+
+/* ===== Stream panel ===== */
+.stream-field {
+  display: flex; align-items: center; gap: var(--gap-2);
+  margin-bottom: var(--gap-2);
+}
+.stream-field label {
+  flex: 0 0 130px; font-size: var(--fs-xs); color: var(--text-dim);
+}
+.stream-field input {
+  flex: 1; font-family: var(--font-mono); font-size: var(--fs-sm);
+}
+.stream-status-text { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-muted); }
 
 .statusbar {
   display: flex; align-items: center; gap: var(--gap-5);
@@ -434,6 +453,7 @@ a { color: inherit; }
 @media (max-width: 900px) {
   .main { grid-template-columns: 1fr; }
   .col--right { grid-template-rows: auto auto; }
+  .col--right:has(#streamPanel:not([hidden])) { grid-template-rows: auto auto auto; }
   .lot { grid-template-columns: 160px 1fr; }
 }
 
