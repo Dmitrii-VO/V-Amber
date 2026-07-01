@@ -1457,8 +1457,15 @@ async function initStreamPanel() {
     if (!payload.configured) return;
 
     elements.streamRtmpUrl.value = payload.rtmpUrl || "";
-    elements.streamKey.value = payload.publishPass || "";
     elements.streamViewerUrl.value = payload.viewerUrl || "";
+    if (payload.credentialsHidden) {
+      elements.streamKey.value = "";
+      elements.streamKey.placeholder = "Задайте API_TOKEN в .env, чтобы увидеть ключ";
+      const keyCopyButton = document.querySelector('[data-copy-target="streamKey"]');
+      if (keyCopyButton) keyCopyButton.disabled = true;
+    } else {
+      elements.streamKey.value = payload.publishPass || "";
+    }
     elements.streamPanel.hidden = false;
     setStreamStatus("", "проверка…");
 
