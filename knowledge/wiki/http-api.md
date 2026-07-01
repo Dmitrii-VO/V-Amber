@@ -20,7 +20,7 @@ V-Amber serves the browser UI and local operator APIs from
 | `/api/settings` | `PATCH` | Deep-merges settings and persists them under `logs/settings.json`. |
 | `/api/moysklad/suppliers` | `GET` | Returns cached MoySklad suppliers for wishlist purchase orders. |
 | `/api/moysklad/stores` | `GET` | Returns cached MoySklad stores for wishlist purchase orders. |
-| `/api/stream/config` | `GET` | Returns MediaMTX RTMP URL, publish credentials, and viewer URL for the dashboard "Стрим" panel, or `{configured:false}` when `STREAM_MEDIAMTX_API_URL` is unset. See [[stream-integration]]. |
+| `/api/stream/config` | `GET` | Returns MediaMTX RTMP URL, publish credentials, and viewer URL for the dashboard "Стрим" panel, or `{configured:false}` when `STREAM_MEDIAMTX_API_URL` is unset. Publish credentials (`publishUser`/`publishPass`) are omitted (`credentialsHidden:true` instead) when `API_TOKEN` is not set — `/api/*` has no auth at all in that mode, so the publish password would otherwise be readable by anyone reaching the dashboard. See [[stream-integration]]. |
 | `/api/stream/status` | `GET` | Returns `{configured, live, readers, error?}` by polling the MediaMTX control API. Degrades to `live:false` on any failure — never throws. |
 
 ## Wishlist routes

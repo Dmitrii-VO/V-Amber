@@ -435,6 +435,19 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         jsonResponse(response, 200, { configured: false });
         return;
       }
+      // Публикационный пароль MediaMTX — реальная инфраструктурная секрета.
+      // Без API_TOKEN /api/* не защищён никак (см. auth.enabled в server/auth.js),
+      // поэтому отдаём креды только когда сервер сам требует токен на вход —
+      // иначе любой, кто достучится до дашборда, получил бы ключ публикации.
+      if (!auth.enabled) {
+        jsonResponse(response, 200, {
+          configured: true,
+          credentialsHidden: true,
+          rtmpUrl: config.stream.rtmpUrl,
+          viewerUrl: config.stream.viewerUrl,
+        });
+        return;
+      }
       jsonResponse(response, 200, {
         configured: true,
         rtmpUrl: config.stream.rtmpUrl,

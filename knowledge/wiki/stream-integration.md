@@ -55,10 +55,18 @@ requirement — not done in this MVP.
   (mirrors the `fetchWithTimeout` pattern in `server/moysklad.js`) and
   degrades to `{ live: false, error }` on any failure — this is a
   best-effort UI indicator, not a critical path.
-- `server/http-server.js` routes (both auto-protected by the existing
-  `API_TOKEN` middleware, see [[http-api]]):
+- `server/http-server.js` routes (covered by the existing `API_TOKEN`
+  middleware *only when API_TOKEN is set* — see [[http-api]] and the
+  credentials note below for what happens when it isn't):
   - `GET /api/stream/config` — returns RTMP URL, publish user/pass, and
     viewer URL for the dashboard to display, or `{configured:false}`.
+    **Fails closed on credentials**: when `API_TOKEN` is unset, `/api/*`
+    has no authentication at all (see [[configuration-and-secrets]]), so
+    this route omits `publishUser`/`publishPass` and returns
+    `credentialsHidden: true` instead — otherwise the MediaMTX publish
+    password would be readable by anyone who can reach the dashboard.
+    The dashboard shows a placeholder telling the operator to set
+    `API_TOKEN` to unlock the key field.
   - `GET /api/stream/status` — returns `{configured, live, readers, error?}`.
 
 ## Dashboard panel
