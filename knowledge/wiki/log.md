@@ -575,3 +575,43 @@ Reviewed the current voice-control pipeline and recorded a reliability plan in
 pause, explicit catalogless mode, confirmation or undo for voice discounts,
 voice-price observability, an STT benchmark harness for SpeechKit versus
 Whisper, and staged extraction of voice orchestration out of `ws-server.js`.
+
+## [2026-07-02] feature | Self-hosted MediaMTX stream panel (MVP), PR #8
+
+Operator's VK Live had reliability problems. Landed an optional "Стрим" panel
+as an alternative video path, independent of the existing VK-comment order
+flow. New page [[stream-integration]] has the full design and deploy record;
+summary here for the log trail.
+
+**Infra.** MediaMTX (Docker, `bluenviron/mediamtx`) deployed on the shared
+`cloud` host (176.108.255.4, cloud.ru — also runs auctionbot/pay-service/n8n)
+with `cpus: 0.5` / `mem_limit: 512m` so a busy эфир can't starve the payment
+service on the same box. Only RTMP (1935) + HLS (8888) + loopback-only API
+(9997) are enabled; RTSP/WebRTC/SRT/MoQ off. Verified end-to-end with a
+throwaway ffmpeg publish → `ready:true` → working HLS playlist → status
+flips back on stop. `ufw` opened 1935/8888; **cloud.ru's own security-group
+firewall still needs opening by the account owner** — noted but not done.
+
+**Code.** `config.stream` (optional, hidden when unconfigured) +
+`server/stream-status.js` (`getStreamStatus()`, mirrors `moysklad.js`'s
+`fetchWithTimeout`) + two routes (`/api/stream/config`, `/api/stream/status`)
++ dashboard panel (RTMP/key/viewer-link fields with copy buttons, 5s-polled
+live indicator). `npm test`: 311/311.
+
+**Review (medium-effort, 8 finder angles + verify) found two priority bugs,
+both fixed same day (fdb20fb):**
+- `.col--right`'s `grid-template-rows` assumed the stream panel was always a
+  grid item — broke the 50/50 "Брони"/"События" split for every deployment
+  where the feature is unconfigured (the default), since the hidden panel
+  drops out of grid flow but the CSS still declared 3 tracks. Fixed with
+  `:has(#streamPanel:not([hidden]))`.
+- `GET /api/stream/config` returned the MediaMTX publish password gated only
+  by the *optional* `API_TOKEN` — with it unset (the shipped default),
+  `/api/*` has no auth at all, so the credential was readable by anyone
+  reaching the dashboard. Now fails closed: omits `publishUser`/`publishPass`
+  (`credentialsHidden:true`) unless `API_TOKEN` is configured.
+
+Five lower-severity findings (URL trailing-slash normalization, collapsed
+error states hurting live-incident triage, a poll race with no in-flight
+guard, an inconsistent error-response shape, a real prod IP pasted into the
+wiki) left open as a PR comment for a follow-up pass — not blocking the MVP.
