@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Прямой эфир · Янтарь</title>
+<style>
+  :root {
+    --bg: #14100c;
+    --panel: #1f1913;
+    --text: #f2e8da;
+    --muted: #a89880;
+    --amber: #e8a33d;
+    --live: #e0523f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    width: 100%;
+    max-width: 960px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  .badge {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    color: #fff;
+    background: var(--live);
+    border-radius: 4px;
+    padding: 3px 8px;
+  }
+  .badge.on { display: inline-flex; }
+  .badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #fff;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: .35; } }
+  main { width: 100%; max-width: 960px; padding: 0 16px 24px; }
+  .player {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  video { width: 100%; height: 100%; display: block; }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-align: center;
+    padding: 24px;
+    background: var(--panel);
+  }
+  .overlay.hidden { display: none; }
+  .overlay .icon { font-size: 40px; }
+  .overlay .title { font-size: 18px; font-weight: 600; }
+  .overlay .hint { font-size: 14px; color: var(--muted); }
+  .unmute {
+    position: absolute;
+    left: 50%; bottom: 18px;
+    transform: translateX(-50%);
+    display: none;
+    border: 0;
+    border-radius: 999px;
+    padding: 10px 18px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #241a0d;
+    background: var(--amber);
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,.45);
+  }
+  .unmute.show { display: block; }
+  footer {
+    width: 100%;
+    max-width: 960px;
+    padding: 10px 16px 22px;
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Прямой эфир</h1>
+  <span id="liveBadge" class="badge"><span class="dot"></span>В ЭФИРЕ</span>
+</header>
+<main>
+  <div class="player">
+    <video id="video" playsinline autoplay muted></video>
+    <div id="overlay" class="overlay">
+      <div class="icon">🕯️</div>
+      <div id="overlayTitle" class="title">Эфир ещё не начался</div>
+      <div id="overlayHint" class="hint">Страница обновится сама, когда начнётся трансляция</div>
+    </div>
+    <button id="unmute" class="unmute">🔊 Включить звук</button>
+  </div>
+</main>
+<footer>Если видео не запускается — обновите страницу</footer>
+
+<script src="./hls.min.js"></script>
+<script>
+(function () {
+  var SRC = '/live/index.m3u8';
+  var RETRY_MS = 7000;
+
+  var video = document.getElementById('video');
+  var overlay = document.getElementById('overlay');
+  var overlayTitle = document.getElementById('overlayTitle');
+  var overlayHint = document.getElementById('overlayHint');
+  var badge = document.getElementById('liveBadge');
+  var unmuteBtn = document.getElementById('unmute');
+
+  var hls = null;
+  var retryTimer = null;
+
+  function showOffline() {
+    overlay.classList.remove('hidden');
+    overlayTitle.textContent = 'Эфир ещё не начался';
+    overlayHint.textContent = 'Страница обновится сама, когда начнётся трансляция';
+    badge.classList.remove('on');
+  }
+
+  function showLive() {
+    overlay.classList.add('hidden');
+    badge.classList.add('on');
+  }
+
+  function scheduleRetry() {
+    if (retryTimer) return;
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      start();
+    }, RETRY_MS);
+  }
+
+  function stopHls() {
+    if (hls) { hls.destroy(); hls = null; }
+  }
+
+  function start() {
+    stopHls();
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({
+        liveDurationInfinity: true,
+        // короткий буфер — эфир торговый, важна близость к реальному времени
+        maxBufferLength: 12
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, function () {
+        showLive();
+        video.play().catch(function () {});
+      });
+      hls.on(Hls.Events.ERROR, function (_e, data) {
+        if (!data.fatal) return;
+        // нет манифеста = эфир не идёт; всё остальное тоже лечим перезапуском
+        stopHls();
+        showOffline();
+        scheduleRetry();
+      });
+      hls.loadSource(SRC);
+      hls.attachMedia(video);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari / iOS: нативный HLS
+      video.src = SRC + '?_=' + Date.now();
+      video.play().then(showLive).catch(function () {});
+      video.onerror = function () {
+        video.removeAttribute('src');
+        video.load();
+        showOffline();
+        scheduleRetry();
+      };
+      video.onplaying = showLive;
+    } else {
+      overlayTitle.textContent = 'Браузер не поддерживает трансляцию';
+      overlayHint.textContent = 'Откройте страницу в Safari, Chrome или Яндекс.Браузере';
+    }
+  }
+
+  // автовоспроизведение разрешено только без звука — предлагаем включить
+  video.addEventListener('playing', function () {
+    if (video.muted) unmuteBtn.classList.add('show');
+  });
+  unmuteBtn.addEventListener('click', function () {
+    video.muted = false;
+    unmuteBtn.classList.remove('show');
+  });
+
+  showOffline();
+  start();
+})();
+</script>
+</body>
+</html>

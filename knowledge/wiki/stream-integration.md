@@ -161,6 +161,24 @@ right column above "Брони", styled with the existing `.panel` classes.
   `ws://127.0.0.1:4455`), `OBS_WEBSOCKET_PASSWORD`, `OBS_TIMEOUT_MS`.
   V-Amber and OBS run on the same operator machine, so localhost is right.
 
+## Viewer page (2026-07-05)
+
+`deploy/stream-viewer/` holds the public watch page: a single dark-themed
+`index.html` plus a **vendored** `hls.min.js` (hls.js 1.6 — vendored rather
+than CDN because the audience is in RU where jsdelivr is unreliable). It is
+served by the same host nginx on `cloud` at
+`https://www.xn--80azkg6cn.space/efir/`; the HLS stream is proxied
+same-origin via `location /live/ → 127.0.0.1:8888` (no mixed content, no
+CORS). Deploy steps and the nginx snippet live in
+`deploy/stream-viewer/README.md` / `nginx-locations.conf`.
+
+Page behavior: autoplay starts muted (browser policy) with an
+«Включить звук» button; when no stream is up it shows «Эфир ещё не начался»
+and silently retries every 7s, so viewers can open the link before the
+broadcast starts. Safari/iOS uses native HLS, everything else hls.js.
+`STREAM_VIEWER_URL` in the operator `.env` should point to `/efir/`, not to
+the raw `.m3u8`.
+
 ## Deliberately out of scope
 
 - Installing OBS automatically — a `fail` step links the operator to
