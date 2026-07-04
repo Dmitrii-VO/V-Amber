@@ -102,7 +102,9 @@
       "Bash(dir _ext1 _ext2)",
       "PowerShell(New-Item *)",
       "Bash(git *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(unzip -l v-amber-logs-2026-06-27T18-02-13-153Z.zip)",
+      "Bash(unzip -l v-amber-logs-2026-06-27T20-03-28-871Z.zip)"
     ]
   }
 }

@@ -4,8 +4,11 @@ import { logger } from "./logger.js";
 async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = config.stream.apiToken
+    ? { "X-Stream-Token": config.stream.apiToken }
+    : undefined;
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { signal: controller.signal, headers });
   } finally {
     clearTimeout(timer);
   }

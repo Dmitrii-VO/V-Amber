@@ -119,13 +119,25 @@ export const config = {
   // Собственный RTMP/HLS-стрим (MediaMTX) как альтернатива VK Live.
   // Опционально: без STREAM_MEDIAMTX_API_URL панель "Стрим" в дашборде скрыта.
   stream: {
-    apiUrl: process.env.STREAM_MEDIAMTX_API_URL?.trim() || "",
+    apiUrl: process.env.STREAM_MEDIAMTX_API_URL?.trim().replace(/\/+$/, "") || "",
+    // Токен reverse-proxy на cloud (nginx location /mediamtx/): уходит в
+    // заголовок X-Stream-Token. Пустой = прямой доступ без авторизации
+    // (например, локальный SSH-туннель до 127.0.0.1:9997).
+    apiToken: process.env.STREAM_MEDIAMTX_API_TOKEN?.trim() || "",
     pathName: process.env.STREAM_PATH_NAME?.trim() || "live",
     rtmpUrl: process.env.STREAM_RTMP_URL?.trim() || "",
     publishUser: process.env.STREAM_PUBLISH_USER?.trim() || "",
     publishPass: process.env.STREAM_PUBLISH_PASS?.trim() || "",
     viewerUrl: process.env.STREAM_VIEWER_URL?.trim() || "",
     statusTimeoutMs: parseIntEnv(process.env.STREAM_STATUS_TIMEOUT_MS, 3000),
+  },
+  // OBS Studio на машине оператора (obs-websocket, встроен в OBS 28+).
+  // Нужен для кнопки «Запустить эфир»: V-Amber сам прописывает адрес/ключ
+  // и стартует трансляцию. Пароль — в OBS: Сервис → Настройки WebSocket.
+  obs: {
+    wsUrl: process.env.OBS_WEBSOCKET_URL?.trim() || "ws://127.0.0.1:4455",
+    wsPassword: process.env.OBS_WEBSOCKET_PASSWORD?.trim() || "",
+    timeoutMs: parseIntEnv(process.env.OBS_TIMEOUT_MS, 4000),
   },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),

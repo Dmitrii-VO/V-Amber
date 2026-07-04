@@ -242,6 +242,12 @@
                 <input id="streamViewerUrl" type="text" readonly />
                 <button class="btn btn--ghost stream-copy" data-copy-target="streamViewerUrl" type="button">Копировать</button>
               </div>
+              <div class="stream-actions">
+                <button id="streamStartButton" class="btn btn--primary" type="button" hidden>Запустить эфир</button>
+                <button id="streamStopButton" class="btn btn--danger" type="button" hidden>Остановить</button>
+                <button id="streamCheckButton" class="btn btn--ghost" type="button" hidden>Проверить эфир</button>
+              </div>
+              <div id="streamChecklist" class="stream-checklist" hidden></div>
             </div>
           </section>
 
