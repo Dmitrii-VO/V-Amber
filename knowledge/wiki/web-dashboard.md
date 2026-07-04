@@ -85,10 +85,14 @@ changes:
 live status for the self-hosted MediaMTX stream — an alternative to VK
 Live. Hidden entirely unless `STREAM_MEDIAMTX_API_URL` is configured.
 Shows RTMP URL, publish key, and viewer link (each with a "Копировать"
-button) plus a status dot polled every 5s (`В эфире · N зрителей` /
-`Стрим не запущен` / `Ошибка связи с сервером`). MVP only: does not start
-or stop OBS — the operator still starts the RTMP push manually. See
-[[stream-integration]].
+button), a status dot (`В эфире · N зрителей` / `Стрим не запущен` /
+`Ошибка связи с сервером`) and, since 2026-07-03, one-button broadcast
+control: «Запустить эфир» runs the server-side orchestrator (preflight
+with auto-fix → OBS start → MediaMTX confirmation) and renders its step
+list in `#streamChecklist`; «Остановить» stops the OBS output;
+«Проверить эфир» toggles an on-demand 5s status poll that auto-stops
+after 3 consecutive offline cycles (there is no always-on background
+poll). See [[stream-integration]].
 
 ## Wishlist modal
 

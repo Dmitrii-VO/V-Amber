@@ -55,14 +55,31 @@ Article parsing:
 Stream (MediaMTX, added 2026-07-02) — optional self-hosted RTMP/HLS
 alternative to VK Live, see [[stream-integration]]:
 
-- `STREAM_MEDIAMTX_API_URL` — base URL of the MediaMTX control API
-  (e.g. an SSH-tunnel local endpoint). Feature is disabled/hidden when unset.
+- `STREAM_MEDIAMTX_API_URL` — base URL of the MediaMTX control API.
+  Since 2026-07-03 this is the authenticated nginx reverse-proxy on `cloud`
+  (`https://<domain>/mediamtx`); an SSH-tunnel local endpoint still works
+  as a fallback. Feature is disabled/hidden when unset.
+- `STREAM_MEDIAMTX_API_TOKEN` — secret expected by that proxy in the
+  `X-Stream-Token` header; omitted from requests when empty (tunnel mode).
+  Real value lives only in `.env` and the nginx config on `cloud`.
 - `STREAM_PATH_NAME` — MediaMTX path name, default `live`.
-- `STREAM_RTMP_URL` — RTMP ingest URL shown to the operator for OBS setup.
-- `STREAM_PUBLISH_USER` / `STREAM_PUBLISH_PASS` — publish credentials shown
-  to the operator as the "stream key". Real values must stay in `.env` only.
+- `STREAM_RTMP_URL` — RTMP server URL for OBS, **bare, no path**
+  (`rtmp://<host>:1935`). OBS's Server/Stream-Key split has no separate
+  username field, so MediaMTX's `user`+`pass` travel together as query
+  params on the path — the dashboard builds that combined value
+  server-side (`obsStreamKey` in `GET /api/stream/config`) and shows it as
+  the "Ключ публикации" field. Do not put `/live` on `STREAM_RTMP_URL`
+  itself or OBS's Server+"/"+Key concatenation ends up with a stray slash
+  before the query string and MediaMTX rejects the path.
+- `STREAM_PUBLISH_USER` / `STREAM_PUBLISH_PASS` — publish credentials.
+  Real values must stay in `.env` only.
 - `STREAM_VIEWER_URL` — HLS playback URL shared with viewers.
 - `STREAM_STATUS_TIMEOUT_MS` — timeout for the status poll, default 3000.
+- `OBS_WEBSOCKET_URL` / `OBS_WEBSOCKET_PASSWORD` / `OBS_TIMEOUT_MS` —
+  obs-websocket endpoint on the operator machine (default
+  `ws://127.0.0.1:4455`, timeout 4000ms) for the one-button broadcast
+  start/stop; see [[stream-integration]]. Password comes from OBS: Сервис
+  → Настройки сервера WebSocket.
 
 Server bind and access control (added 2026-05-29):
 

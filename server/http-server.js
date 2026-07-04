@@ -10,6 +10,7 @@ import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 import { createReservationDigestLog } from "./reservation-digest-log.js";
 import { createAuth } from "./auth.js";
 import { getStreamStatus } from "./stream-status.js";
+import { preflightBroadcast, startBroadcast, stopBroadcast } from "./stream-orchestrator.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 const SEND_LOGS_TIMEOUT_MS = 60 * 1000;
@@ -453,6 +454,12 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         rtmpUrl: config.stream.rtmpUrl,
         publishUser: config.stream.publishUser,
         publishPass: config.stream.publishPass,
+        // MediaMTX's authInternalUsers checks user AND pass together, but
+        // OBS's "Server"/"Stream Key" split has no separate user field —
+        // both must travel in the key as query params on the path name.
+        // STREAM_RTMP_URL is expected to be the bare server (no path) so
+        // OBS's Server+"/"+Key concatenation lands on the right path.
+        obsStreamKey: `${config.stream.pathName}?user=${encodeURIComponent(config.stream.publishUser)}&pass=${encodeURIComponent(config.stream.publishPass)}`,
         viewerUrl: config.stream.viewerUrl,
       });
       return;
@@ -464,9 +471,39 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         const result = await getStreamStatus();
         jsonResponse(response, 200, result);
       } catch (error) {
+        // getStreamStatus() degrades internally on any network/API failure,
+        // so this only fires on a bug in getStreamStatus itself. Keep the
+        // response shape identical to its normal error payload so callers
+        // never need to branch on status code.
         logger.error("http", "stream_status_failed", { error: error?.message || String(error) });
-        jsonResponse(response, 500, { configured: true, live: false, error: error?.message || String(error) });
+        jsonResponse(response, 200, {
+          configured: true,
+          live: false,
+          readers: 0,
+          error: error?.message || String(error),
+        });
       }
+      return;
+    }
+
+    // Оркестрация эфира «одной кнопкой». Все три роута никогда не бросают:
+    // stream-orchestrator.js возвращает структурированный {ok, steps[]} в
+    // любом исходе — сбой стрима не должен задевать остальной дашборд.
+    if (pathname === "/api/stream/preflight") {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      jsonResponse(response, 200, await preflightBroadcast({ fix: false }));
+      return;
+    }
+
+    if (pathname === "/api/stream/start") {
+      if (request.method !== "POST") return methodNotAllowed(response, "POST");
+      jsonResponse(response, 200, await startBroadcast());
+      return;
+    }
+
+    if (pathname === "/api/stream/stop") {
+      if (request.method !== "POST") return methodNotAllowed(response, "POST");
+      jsonResponse(response, 200, await stopBroadcast());
       return;
     }
 

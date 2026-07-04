@@ -3,6 +3,116 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-03] feat | one-button broadcast: nginx proxy + OBS orchestration
+
+Two changes that together turn the stream panel from "connection info +
+status indicator" into a one-button start/stop for the operator. See
+[[stream-integration]] for the full design.
+
+**MediaMTX API proxy (infra)**: the SSH-tunnel requirement is gone. Added
+`location /mediamtx/` to `cloud`'s host nginx 443 vhost
+(`amberapp_domain.conf`, backed up per local `*.bak.<epoch>` convention)
+→ `127.0.0.1:9997`, gated by an `X-Stream-Token` header check (401
+otherwise; verified externally both ways). Token lives in the nginx conf
+and `.env` (`STREAM_MEDIAMTX_API_TOKEN`) only. `getStreamStatus()` sends
+the header when the token is set. Gotcha: `sites-enabled/*.bak.*` files
+are parsed by nginx and cause pre-existing "conflicting server name"
+warnings on `nginx -t` — harmless.
+
+**Orchestration**: `server/obs-client.js` (obs-websocket v5 over existing
+`ws` dep, short-lived connection per op, `ObsError` codes) +
+`server/stream-orchestrator.js` (`preflightBroadcast`/`startBroadcast`/
+`stopBroadcast`, never throws, `{ok, steps[]}` with per-step
+ok/fixed/fail + operator hints, auto-launches OBS and writes RTMP
+server/key). Routes `/api/stream/preflight|start|stop`. UI: «Запустить
+эфир»/«Остановить»/«Проверить эфир» buttons + `#streamChecklist` step
+list; the page-load 5s status poll is replaced by an on-demand loop that
+auto-stops after 3 offline cycles (kills the `status_poll_failed` WARN
+spam when MediaMTX is deliberately off). Stream failures stay isolated
+from the voice/lot/reservation flow: every stream path degrades to a
+structured response, nothing propagates.
+
+## [2026-07-02] fix | stream-panel layout bug + manual end-to-end verification
+
+Follow-up to the OBS-auth-gap fix and firewall work logged below same day
+— this entry covers the dashboard layout bug found while manually
+verifying the panel, plus the verification outcome itself.
+
+**Layout bug**: `.stream-field` (label + input + "Копировать" button)
+clipped the button in the 380px right column regardless of window size —
+two separate flexbox min-width gotchas (grid column not shrinking below
+child min-content; text `<input>`'s browser-default intrinsic min-width
+ignoring its `flex:1`). Rather than chase exact pixel budgets, restructured
+to stack label above input+button (`flex-wrap: wrap` + `flex-basis: 100%`
+on the label) so the row always has the full column width to work with.
+
+**Manually verified end-to-end on this dev machine** (local `.env` with
+real `STREAM_*`/`API_TOKEN` values, SSH tunnel to `cloud`'s loopback-only
+MediaMTX API): dashboard panel renders correctly, `/api/stream/config` and
+`/api/stream/status` return expected shapes, `obsStreamKey` matches the
+publish URL form already confirmed to work via ffmpeg. Clarified for the
+operator that there's no in-dashboard "start stream" button — video
+publish happens from OBS (or any RTMP encoder) pushing to MediaMTX
+directly; the panel only displays connection info and polls status.
+Browser-based (WebRTC/WHIP) publish was discussed and deliberately
+deferred — would need enabling WebRTC ingest on `cloud` (currently off)
+plus getUserMedia/WHIP client work; out of scope for this MVP.
+
+## [2026-07-02] fix | stream panel follow-up: firewall open, 5 review findings closed
+
+**Firewall.** Operator opened the cloud.ru security-group rules for
+`1935:1935/tcp` and `8888:8888/tcp` on `0.0.0.0/0` (console: `Группы
+безопасности` → `SSH-access_ru.AZ-2`). Confirmed externally reachable with
+a raw TCP connect from outside `cloud` on both ports, and independently by
+MediaMTX's own logs already showing unsolicited internet-scanner RTMP
+connections the same day. RTMP publish auth verified too: a throwaway
+`mwader/static-ffmpeg` container published successfully using
+`rtmp://<host>:1935/live?user=publisher&pass=<publishPass>` — the
+`user:pass@host` URL form fails DNS resolution in ffmpeg's native RTMP
+muxer, so the query-string form is the one to document/use. Infra blocker
+from [[stream-integration]] is now closed.
+
+**Code — closed the 5 lower-severity findings left open from the PR #8
+review (fdb20fb / 18c7560):**
+- `server/config.js` — `config.stream.apiUrl` now strips a trailing slash
+  so `STREAM_MEDIAMTX_API_URL` with a trailing `/` can't produce a
+  double-slash request path in `stream-status.js`.
+- `web-ui/app.js` `pollStreamStatus()` — error label now includes the
+  actual error text (`Ошибка связи с сервером: <detail>`) instead of a
+  generic string, so an operator mid-incident can see *why* the stream
+  indicator is red, not just that it is.
+- `web-ui/app.js` — added `state.streamStatusPolling` in-flight guard so
+  a slow `/api/stream/status` request can't overlap with the next 5s
+  `setInterval` tick.
+- `server/http-server.js` `/api/stream/status` — the catch-all error path
+  (only reachable if `getStreamStatus()` itself throws, which it
+  shouldn't since it catches internally) now returns the same `200` shape
+  as the normal payload instead of a differently-shaped `500`, so callers
+  never need to branch on status code.
+- Wiki — the real prod IP (`176.108.255.4`) is no longer pasted in
+  [[stream-integration]] or this log; references now point to the `cloud`
+  SSH alias.
+
+**Found + fixed a real OBS-auth gap while planning manual verification.**
+`mediamtx.yml`'s `authInternalUsers` requires `user` **and** `pass`
+together to publish, but the dashboard only ever surfaced `publishPass` as
+the OBS "Stream Key" — `publishUser` was never sent to the operator
+anywhere, so a real OBS session would have hit the same
+`authentication failed` I got when testing with no credentials at all.
+Fixed: `GET /api/stream/config` now returns `obsStreamKey` =
+`${pathName}?user=${publishUser}&pass=${publishPass}`, and the dashboard
+shows that instead of the raw password. Convention changed:
+`STREAM_RTMP_URL` must now be the **bare** server (`rtmp://<host>:1935`,
+no `/live`) so OBS's Server+"/"+Key concatenation lands on the right
+path — `.env.example` and [[configuration-and-secrets]] updated.
+**Action needed on the Mac deployment**: `STREAM_RTMP_URL` in the
+operator's `.env` still has the old `/live`-suffixed form and must be
+trimmed to the bare server after this code ships (see
+[[deploy-topology]] — code changes there only take effect via
+push→release→manual update).
+
+`npm test`: 311/311.
+
 ## [2026-06-29] feature | day-agnostic merge заказов через дни кампании
 
 **Запрос оператора.** Эфиры идут несколько дней подряд = одна кампания; у клиента
@@ -584,7 +694,8 @@ flow. New page [[stream-integration]] has the full design and deploy record;
 summary here for the log trail.
 
 **Infra.** MediaMTX (Docker, `bluenviron/mediamtx`) deployed on the shared
-`cloud` host (176.108.255.4, cloud.ru — also runs auctionbot/pay-service/n8n)
+`cloud` host (cloud.ru — also runs auctionbot/pay-service/n8n; IP withheld
+from wiki, see deploy notes)
 with `cpus: 0.5` / `mem_limit: 512m` so a busy эфир can't starve the payment
 service on the same box. Only RTMP (1935) + HLS (8888) + loopback-only API
 (9997) are enabled; RTSP/WebRTC/SRT/MoQ off. Verified end-to-end with a

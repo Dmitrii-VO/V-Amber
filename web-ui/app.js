@@ -128,6 +128,10 @@ const elements = {
   streamRtmpUrl: $("streamRtmpUrl"),
   streamKey: $("streamKey"),
   streamViewerUrl: $("streamViewerUrl"),
+  streamCheckButton: $("streamCheckButton"),
+  streamStartButton: $("streamStartButton"),
+  streamStopButton: $("streamStopButton"),
+  streamChecklist: $("streamChecklist"),
 };
 
 const state = {
@@ -164,6 +168,8 @@ const state = {
   micCheckTimer: null,
   micSilent: false,
   streamStatusTimer: null,
+  streamStatusPolling: false,
+  streamOfflineCycles: 0,
 };
 
 const digestState = {
@@ -1432,20 +1438,146 @@ function setStreamStatus(kind, label) {
   elements.streamStatusLabel.textContent = label;
 }
 
+// После скольких подряд циклов «не в эфире»/ошибки проверка сама
+// останавливается — чтобы не долбить MediaMTX (и не спамить WARN
+// status_poll_failed на сервере), когда стрим намеренно выключен.
+const STREAM_OFFLINE_MAX_CYCLES = 3;
+
+// Возвращает исход опроса ("live" | "offline" | "error" | "unconfigured" |
+// null при пропуске из-за in-flight guard), чтобы вызывающий цикл мог решить,
+// продолжать ли поллинг.
 async function pollStreamStatus() {
+  if (state.streamStatusPolling) return null;
+  state.streamStatusPolling = true;
   try {
     const response = await fetch("/api/stream/status");
     const payload = await response.json();
-    if (!payload.configured) return;
+    if (!payload.configured) return "unconfigured";
     if (payload.error) {
-      setStreamStatus("err", "Ошибка связи с сервером");
+      setStreamStatus("err", `Ошибка связи с сервером: ${payload.error}`);
+      return "error";
     } else if (payload.live) {
       setStreamStatus("live", `В эфире · ${payload.readers ?? 0} зрителей`);
+      return "live";
     } else {
       setStreamStatus("warn", "Стрим не запущен");
+      return "offline";
     }
-  } catch {
-    setStreamStatus("err", "Ошибка связи с сервером");
+  } catch (error) {
+    setStreamStatus("err", `Ошибка связи с сервером: ${error?.message || String(error)}`);
+    return "error";
+  } finally {
+    state.streamStatusPolling = false;
+  }
+}
+
+function stopStreamPolling() {
+  if (state.streamStatusTimer) {
+    window.clearInterval(state.streamStatusTimer);
+    state.streamStatusTimer = null;
+  }
+  state.streamOfflineCycles = 0;
+  elements.streamCheckButton.textContent = "Проверить эфир";
+}
+
+function startStreamPolling() {
+  if (state.streamStatusTimer) return;
+  state.streamOfflineCycles = 0;
+  elements.streamCheckButton.textContent = "Остановить проверку";
+
+  const tick = async () => {
+    const outcome = await pollStreamStatus();
+    if (outcome === "live") {
+      // Пока стрим в эфире — держим опрос, чтобы обновлять число зрителей.
+      state.streamOfflineCycles = 0;
+    } else if (outcome === "offline" || outcome === "error") {
+      state.streamOfflineCycles += 1;
+      if (state.streamOfflineCycles >= STREAM_OFFLINE_MAX_CYCLES) {
+        stopStreamPolling();
+      }
+    }
+    // outcome === null (пропуск) / "unconfigured" — счётчик не трогаем.
+  };
+
+  void tick();
+  state.streamStatusTimer = window.setInterval(tick, 5000);
+}
+
+function toggleStreamPolling() {
+  if (state.streamStatusTimer) stopStreamPolling();
+  else startStreamPolling();
+}
+
+// --- Запуск/остановка эфира одной кнопкой (см. server/stream-orchestrator.js) ---
+
+const STREAM_STEP_ICON = { ok: "✓", fixed: "⚙", fail: "✗" };
+
+// Рисует пошаговый чек-лист {label, status, detail, hint} от оркестратора.
+function renderStreamChecklist(steps, pendingLabel) {
+  const box = elements.streamChecklist;
+  box.innerHTML = "";
+  for (const item of steps) {
+    const row = document.createElement("div");
+    row.className = `stream-step stream-step--${item.status}`;
+    row.textContent = `${STREAM_STEP_ICON[item.status] || "•"} ${item.label}${item.detail ? ` — ${item.detail}` : ""}`;
+    box.appendChild(row);
+    if (item.status === "fail" && item.hint) {
+      const hint = document.createElement("div");
+      hint.className = "stream-step-hint";
+      hint.textContent = item.hint;
+      box.appendChild(hint);
+    }
+  }
+  if (pendingLabel) {
+    const row = document.createElement("div");
+    row.className = "stream-step stream-step--pending";
+    row.textContent = `⏳ ${pendingLabel}`;
+    box.appendChild(row);
+  }
+  box.hidden = steps.length === 0 && !pendingLabel;
+}
+
+function setStreamButtonsBusy(busy) {
+  elements.streamStartButton.disabled = busy;
+  elements.streamStopButton.disabled = busy;
+}
+
+async function startBroadcastFromUi() {
+  setStreamButtonsBusy(true);
+  stopStreamPolling();
+  renderStreamChecklist([], "запускаем эфир… (проверки + OBS, до минуты)");
+  setStreamStatus("", "запуск…");
+  try {
+    // Сервер сам проверит готовность, при необходимости запустит OBS,
+    // пропишет адрес/ключ и дождётся подтверждения от MediaMTX.
+    const response = await fetch("/api/stream/start", { method: "POST" });
+    const result = await response.json();
+    renderStreamChecklist(result.steps || []);
+    if (result.ok) {
+      startStreamPolling();
+    } else {
+      setStreamStatus("err", "запуск не удался — см. шаги ниже");
+    }
+  } catch (error) {
+    renderStreamChecklist([{ label: "Запуск эфира", status: "fail", detail: error?.message || String(error) }]);
+    setStreamStatus("err", "запуск не удался");
+  } finally {
+    setStreamButtonsBusy(false);
+  }
+}
+
+async function stopBroadcastFromUi() {
+  setStreamButtonsBusy(true);
+  try {
+    const response = await fetch("/api/stream/stop", { method: "POST" });
+    const result = await response.json();
+    renderStreamChecklist(result.steps || []);
+    stopStreamPolling();
+    setStreamStatus(result.ok ? "warn" : "err", result.ok ? "эфир остановлен" : "не удалось остановить — см. шаги ниже");
+  } catch (error) {
+    setStreamStatus("err", `Ошибка: ${error?.message || String(error)}`);
+  } finally {
+    setStreamButtonsBusy(false);
   }
 }
 
@@ -1464,13 +1596,19 @@ async function initStreamPanel() {
       const keyCopyButton = document.querySelector('[data-copy-target="streamKey"]');
       if (keyCopyButton) keyCopyButton.disabled = true;
     } else {
-      elements.streamKey.value = payload.publishPass || "";
+      // OBS's Server/Stream-Key split has no separate username field, so
+      // the key must carry MediaMTX's user+pass as query params on the
+      // path — see server/http-server.js's obsStreamKey comment.
+      elements.streamKey.value = payload.obsStreamKey || "";
     }
     elements.streamPanel.hidden = false;
-    setStreamStatus("", "проверка…");
-
-    await pollStreamStatus();
-    state.streamStatusTimer = setInterval(pollStreamStatus, 5000);
+    setStreamStatus("", "нажмите «Запустить эфир»");
+    elements.streamCheckButton.hidden = false;
+    elements.streamCheckButton.addEventListener("click", toggleStreamPolling);
+    elements.streamStartButton.hidden = false;
+    elements.streamStartButton.addEventListener("click", startBroadcastFromUi);
+    elements.streamStopButton.hidden = false;
+    elements.streamStopButton.addEventListener("click", stopBroadcastFromUi);
   } catch (error) {
     handleError(error, "Не удалось загрузить настройки стрима");
   }
