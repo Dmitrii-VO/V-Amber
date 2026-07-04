@@ -105,6 +105,56 @@ export function createProductCodeCacheMock(codes = []) {
   };
 }
 
+// Мок чат-клиента /efir/ (server/chat-client.js). pushMessage кладёт
+// сообщение зрителя в фид; сервисные ответы бота копятся в serviceMessages.
+// Семантика курсора как у реального сервиса: fetchFeed(null) отдаёт только
+// latestSeq (инициализация, историю не переигрываем), fetchFeed(n) — всё
+// новее n.
+export function createChatClientMock() {
+  const ID_BASE = 9_000_000_000;
+  const queue = [];
+  const serviceMessages = [];
+  const feedCalls = [];
+  let latestSeq = 0;
+  return {
+    enabled: true,
+    async fetchFeed(afterSeq) {
+      feedCalls.push(afterSeq);
+      if (afterSeq === null || afterSeq === undefined) {
+        return { latestSeq, messages: [] };
+      }
+      return { latestSeq, messages: queue.filter((m) => m.seq > afterSeq) };
+    },
+    async postServiceMessage(text) {
+      serviceMessages.push(text);
+      return { ok: true };
+    },
+    pushMessage({ viewerId, name, phone = "", text }) {
+      latestSeq += 1;
+      queue.push({
+        seq: latestSeq,
+        commentId: ID_BASE + latestSeq,
+        viewerId,
+        name,
+        phone,
+        text,
+        ts: Date.now(),
+      });
+    },
+    // Ждём инициализацию курсора поллера (первый fetchFeed) — сообщения,
+    // запушенные до неё, по контракту не переигрываются.
+    async waitForFeedInit({ timeoutMs = 2000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (feedCalls.length === 0) {
+        if (Date.now() > deadline) throw new Error("waitForFeedInit timed out");
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    },
+    serviceMessages,
+    feedCalls,
+  };
+}
+
 export function createWishlistStoreMock() {
   const calls = [];
   return {
@@ -179,6 +229,7 @@ export async function startHarness({
   knownCodes = [],
   moysklad: moyskladOverride,
   vk: vkOverride,
+  chatClient,
   wishlistStore: wishlistStoreOverride,
   config: configOverride = {},
   createSessionLog: createSessionLogOverride,
@@ -208,6 +259,7 @@ export async function startHarness({
   attachWsServer(httpServer, buildConfig(configOverride), {
     vk,
     moysklad,
+    ...(chatClient ? { chatClient } : {}),
     productCodeCache,
     wishlistStore,
     createSpeechKitSession,

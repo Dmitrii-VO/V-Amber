@@ -131,6 +131,17 @@ export const config = {
     viewerUrl: process.env.STREAM_VIEWER_URL?.trim() || "",
     statusTimeoutMs: parseIntEnv(process.env.STREAM_STATUS_TIMEOUT_MS, 3000),
   },
+  // Чат зрителей на странице /efir/ (deploy/chat-service на cloud).
+  // Опционально: без STREAM_CHAT_URL чат-поллер не запускается, брони
+  // принимаются только из VK-комментариев.
+  chat: {
+    apiUrl: process.env.STREAM_CHAT_URL?.trim().replace(/\/+$/, "") || "",
+    // Секрет операторского фида (заголовок X-Chat-Token): только с ним
+    // сервис отдаёт телефоны зрителей и принимает сервисные сообщения бота.
+    apiToken: process.env.STREAM_CHAT_TOKEN?.trim() || "",
+    timeoutMs: parseIntEnv(process.env.STREAM_CHAT_TIMEOUT_MS, 3000),
+    pollMs: parseIntEnv(process.env.STREAM_CHAT_POLL_MS, 3000),
+  },
   // OBS Studio на машине оператора (obs-websocket, встроен в OBS 28+).
   // Нужен для кнопки «Запустить эфир»: V-Amber сам прописывает адрес/ключ
   // и стартует трансляцию. Пароль — в OBS: Сервис → Настройки WebSocket.

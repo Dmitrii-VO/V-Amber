@@ -73,8 +73,19 @@ alternative to VK Live, see [[stream-integration]]:
   before the query string and MediaMTX rejects the path.
 - `STREAM_PUBLISH_USER` / `STREAM_PUBLISH_PASS` — publish credentials.
   Real values must stay in `.env` only.
-- `STREAM_VIEWER_URL` — HLS playback URL shared with viewers.
+- `STREAM_VIEWER_URL` — public viewer page URL (`https://<domain>/efir/`,
+  deploy/stream-viewer/), not the raw `.m3u8`.
 - `STREAM_STATUS_TIMEOUT_MS` — timeout for the status poll, default 3000.
+- `STREAM_CHAT_URL` — base URL of the viewer chat service
+  (`https://<domain>/chat`, deploy/chat-service/ on `cloud`). Second
+  reservation source alongside VK comments; the chat poller never starts
+  when unset. See [[stream-integration]].
+- `STREAM_CHAT_TOKEN` — secret for the operator feed / service replies
+  (`X-Chat-Token`; equals the chat service's `OPERATOR_TOKEN`). Real value
+  in `.env` and the service's env on `cloud` only — the feed exposes viewer
+  phone numbers.
+- `STREAM_CHAT_TIMEOUT_MS` / `STREAM_CHAT_POLL_MS` — request timeout and
+  poll interval, both default 3000.
 - `OBS_WEBSOCKET_URL` / `OBS_WEBSOCKET_PASSWORD` / `OBS_TIMEOUT_MS` —
   obs-websocket endpoint on the operator machine (default
   `ws://127.0.0.1:4455`, timeout 4000ms) for the one-button broadcast
