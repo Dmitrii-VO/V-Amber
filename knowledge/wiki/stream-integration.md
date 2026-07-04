@@ -179,6 +179,48 @@ broadcast starts. Safari/iOS uses native HLS, everything else hls.js.
 `STREAM_VIEWER_URL` in the operator `.env` should point to `/efir/`, not to
 the raw `.m3u8`.
 
+## Viewer chat as a second reservation source (2026-07-05)
+
+Own chat on `/efir/` so buyers can write «бронь 03204» without VK. It is
+**additive**: the VK comment poller is untouched and both sources run in
+parallel — one lot, one stock gate, one MoySklad order path; a broadcast can
+take reservations from VK and the chat simultaneously.
+
+- **`deploy/chat-service/`** — zero-dependency node:http service on `cloud`
+  (docker, `127.0.0.1:8890`, nginx `location /chat/`). Viewers join with
+  **name + phone** (a бронь without a contact is useless; the phone is shown
+  only to the operator feed, never to the public chat). Endpoints, rate
+  limits, and deploy steps in its README. Viewer ids / comment ids are
+  numeric in the **9e9+ range** (`ID_BASE = 9_000_000_000`) so they can never
+  collide with real VK ids (< 2^31) and the whole money path (counterparty,
+  dedup, cancel by `viewerId+commentId`) works unchanged.
+- **`server/chat-client.js`** — V-Amber-side client: `fetchFeed(afterSeq)`
+  (`afterSeq === null` → cursor init only, history is never replayed —
+  mirrors the VK poller's last-comment-id init) and best-effort
+  `postServiceMessage(text)`. Auth via `X-Chat-Token`.
+- **`server/ws-server.js`** — the per-comment processing that used to live
+  inline in the VK poll loop is extracted into `ingestViewerComment(comment)`
+  taking the normalized shape `{id, viewerId, viewerName, text, createdAt,
+  source: "vk"|"chat", phone?}`; the VK loop and the new chat poll loop both
+  call it, so parsing/matching/stock/MoySklad are literally the same code.
+  `startChatPolling()` mirrors the VK poller lifecycle (starts on lot open,
+  stops after the 30s no-open-lot grace) but has its **own generation
+  counter**: a VK poison (error 801) must not kill chat intake, and vice
+  versa. `notifyReservationStatus` routes the buyer reply by `event.source` —
+  chat reservations get a service message in the chat («Янтарь: …, бронь
+  подтверждена (код …)»), VK ones reply in VK as before.
+- **Logging/recovery**: same event names (`comment_seen`,
+  `reservation_detected`, `reservation_no_open_lot`, …) with logger component
+  `chat` instead of `vk`, plus `source` and `viewerPhone` in the meta — so
+  the order-recovery-from-logs tooling keeps working and the operator has the
+  buyer's phone in the log line.
+- Config: `config.chat` (`STREAM_CHAT_URL`, `STREAM_CHAT_TOKEN`,
+  `STREAM_CHAT_TIMEOUT_MS`, `STREAM_CHAT_POLL_MS`). Without the URL the chat
+  poller never starts and behavior is exactly pre-chat.
+- Tests: `test/ws-server.chat-source.test.js` (chat бронь through the shared
+  pipeline + reply routing; VK and chat sharing one lot's stock counter),
+  `createChatClientMock` in `test/helpers/ws-harness.js`.
+
 ## Deliberately out of scope
 
 - Installing OBS automatically — a `fail` step links the operator to

@@ -15,6 +15,7 @@ import { parseCancelCommand } from "./cancel-command-parser.js";
 import { parseQuantityCommand } from "./quantity-command-parser.js";
 import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
+import { createChatClient } from "./chat-client.js";
 import { resolveKnownCode } from "./product-code-resolver.js";
 import {
   sendJson,
@@ -53,6 +54,9 @@ export function attachWsServer(httpServer, config, services = {}) {
   // защиту, что и WS-flow. Здесь повторно не оборачиваем.
   const moysklad = services.moysklad || createMoySkladClient(config.moysklad);
   const vk = services.vk || createVkPublisher(config.vk);
+  // Чат зрителей на /efir/ — второй источник комментариев наравне с VK.
+  // enabled:false без STREAM_CHAT_URL: поллер не стартует, ничего не меняется.
+  const chatClient = services.chatClient || createChatClient(config.chat);
   const auth = createAuth();
   const detectionConfig = config.articleExtraction;
   const productCodeCache = services.productCodeCache || null;
@@ -238,6 +242,11 @@ export function attachWsServer(httpServer, config, services = {}) {
     let commentPollingActive = false;
     let commentPollingLastCommentId = 0;
     const commentPollingSeenIds = createBoundedIdSet();
+    // Отдельный жизненный цикл поллера чата /efir/: VK-poison (ошибка 801 и
+    // т.п.) не должен убивать приём броней из собственного чата.
+    let chatPollingGeneration = 0;
+    let chatPollingActive = false;
+    let chatFeedCursor = null;
     let customerOrdersByViewerId = new Map();
     let customerOrderSessionVersion = 1;
     // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
@@ -344,6 +353,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       commentPollingActive = false;
       commentPollingLastCommentId = 0;
       commentPollingSeenIds.clear();
+      chatPollingGeneration += 1;
+      chatPollingActive = false;
+      chatFeedCursor = null;
       activeLot = null;
       openLotsBySessionId.clear();
       lastDetection = null;
@@ -923,6 +935,26 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      // Бронь из чата /efir/ → ответ в тот же чат сервисным сообщением.
+      // VK-poison тут не при чём (это про закрытые VK-комментарии), а ошибка
+      // чата ничего не отравляет — best-effort, как и весь канал ответов.
+      if (event.source === "chat") {
+        void chatClient.postServiceMessage(message).then((result) => {
+          if (!result.ok) {
+            logger.warn("chat", "reservation_reply_failed", {
+              connectionId,
+              lotSessionId: lot?.lotSessionId || null,
+              code: lot?.code || null,
+              commentId: event.commentId,
+              viewerId: event.viewerId,
+              status: event.status,
+              error: result.error,
+            });
+          }
+        });
+        return;
+      }
+
       if (isLotPoisoned(lot?.lotSessionId)) {
         return;
       }
@@ -1484,6 +1516,326 @@ export function attachWsServer(httpServer, config, services = {}) {
       return null;
     }
 
+    // Общая обработка одного комментария зрителя — единый вход для ОБОИХ
+    // источников: VK-видео и чата /efir/. Нормализованная форма:
+    //   { id, viewerId, viewerName, text, createdAt(ISO), source: "vk"|"chat", phone? }
+    // id и viewerId чата живут в диапазоне 9e9+ (назначает chat-service) и не
+    // пересекаются с VK. Денежный путь (matching лотов, сток-гейт, МойСклад)
+    // общий и от источника не зависит; source решает только компонент логов и
+    // канал ответа покупателю (notifyReservationStatus).
+    function ingestViewerComment(comment) {
+      const logSource = comment.source === "chat" ? "chat" : "vk";
+      const target = findCommentTarget(comment.text);
+      if (!target || !target.lot) {
+        // Коммент похож на бронь (keyword + код), но однозначного
+        // открытого лота нет: либо ни один не подошёл, либо подошло
+        // несколько (ambiguous). Бронировать наугад нельзя — выносим
+        // это ОПЕРАТОРУ на дашборд (а не в публичный VK-коммент) и
+        // логируем для diagnostics/bundle. Раньше такие пропадали молча
+        // (см. лог 2026-05-24 20:19:54 «…перестала бронировать, Ирина
+        // повторите»).
+        const probe = parseReservationComment(comment.text);
+        if (probe.hasReservationKeyword && probe.code) {
+          const reason = target?.reason || "no_open_lot";
+          const knownCodes = productCodeCache?.getCodes?.() || null;
+          const probeCodeResolution = knownCodes && knownCodes.size > 0
+            ? resolveKnownCode(probe.code, knownCodes)
+            : { status: "no_catalog", code: probe.code, candidates: [] };
+          const attentionCode = probeCodeResolution.status === "matched"
+            ? probeCodeResolution.code
+            : probe.code;
+          const openLotCodes = getOpenLots().map((lot) => lot.code);
+          const viewerNameForAttention = comment.viewerName
+            || nameCacheStore?.getName?.(comment.viewerId)
+            || "";
+          logger.warn(logSource, "reservation_no_open_lot", {
+            connectionId,
+            commentId: comment.id,
+            viewerId: comment.viewerId,
+            viewerName: viewerNameForAttention,
+            reason,
+            text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+            reservationCommentCode: probe.code,
+            catalogCode: attentionCode,
+            catalogMatchReason: probeCodeResolution.reason || null,
+            candidateCodes: target?.candidateCodes || [],
+            openLotCodes,
+          });
+          sendJson(websocket, {
+            type: "reservationAttention",
+            reason,
+            commentId: comment.id,
+            viewerId: comment.viewerId,
+            viewerName: viewerNameForAttention,
+            code: attentionCode,
+            originalCode: attentionCode !== probe.code ? probe.code : undefined,
+            text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+            candidateCodes: target?.candidateCodes || probeCodeResolution.candidates || [],
+            openLotCodes,
+            source: comment.source,
+          });
+        }
+        return;
+      }
+      const { lot: currentLot, reservationComment, wishlistComment, matchedReservation, matchedWishlist } = target;
+      const reservationState = ensureReservationState(currentLot);
+      if (comment.source === "vk") {
+        // lastCommentId — VK-курсор лота (Math.max с publicationCommentId);
+        // id чата из диапазона 9e9+ задрал бы его до бессмысленного значения.
+        reservationState.lastCommentId = Math.max(reservationState.lastCommentId, comment.id);
+      }
+      rememberSeenComment(reservationState, comment.id);
+
+      // Forensic: каждый новый комментарий в окне лота попадает в лог,
+      // даже если не «бронь». Это позволяет позже увидеть пропущенные
+      // брони (опечатки, «забронируй», эмодзи) и общий шум вокруг лота.
+      // Персистентный кеш имён (W3): запоминаем КАЖДОГО комментатора с
+      // резолвнутым именем, не только бронирующих. Кеш переживает
+      // стоп/старт эфира и используется голосовой отменой брони для
+      // сопоставления произнесённого оператором имени с зрителем.
+      if (nameCacheStore && comment.viewerName) {
+        nameCacheStore.remember(comment.viewerId, comment.viewerName);
+      }
+      logger.info(logSource, "comment_seen", {
+        connectionId,
+        lotSessionId: currentLot.lotSessionId,
+        code: currentLot.code,
+        commentId: comment.id,
+        viewerId: comment.viewerId,
+        viewerName: comment.viewerName,
+        text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+        createdAt: comment.createdAt,
+        source: comment.source,
+        reservationCommentCode: reservationComment.code,
+        hasReservationKeyword: reservationComment.hasReservationKeyword,
+        reservationCommentQuantity: reservationComment.quantity ?? 1,
+        wishlistCommentCode: wishlistComment.code,
+        hasWishlistKeyword: wishlistComment.hasWishlistKeyword,
+        matchedReservation,
+        matchedWishlist,
+      });
+
+      if (!matchedReservation) {
+        if (matchedWishlist) {
+          if (!comment.viewerName) {
+            logger.warn(logSource, "wishlist_profile_missing", {
+              connectionId,
+              lotSessionId: currentLot.lotSessionId,
+              commentId: comment.id,
+              viewerId: comment.viewerId,
+            });
+            return;
+          }
+
+          const wishlistEvent = {
+            commentId: comment.id,
+            viewerId: comment.viewerId,
+            viewerName: comment.viewerName,
+            text: comment.text,
+            createdAt: comment.createdAt,
+            status: "wishlist_confirmed",
+            lotCode: currentLot.code,
+          };
+          void addWishlistFromComment(currentLot, wishlistEvent).catch((error) => {
+            logger.warn("wishlist", "add_from_comment_failed", {
+              connectionId,
+              lotSessionId: currentLot.lotSessionId,
+              commentId: comment.id,
+              viewerId: comment.viewerId,
+              error,
+            });
+          });
+        }
+        return;
+      }
+
+      const viewerId = comment.viewerId;
+      if (!comment.viewerName) {
+        logger.warn(logSource, "reservation_profile_missing", {
+          connectionId,
+          lotSessionId: currentLot.lotSessionId,
+          commentId: comment.id,
+          viewerId,
+        });
+        return;
+      }
+
+      if (reservationState.acceptedUserIds.has(viewerId)) {
+        logger.info(logSource, "reservation_duplicate_ignored", {
+          connectionId,
+          lotSessionId: currentLot.lotSessionId,
+          commentId: comment.id,
+          viewerId,
+        });
+        return;
+      }
+
+      addBoundedId(reservationState.acceptedUserIds, viewerId);
+
+      const reservationQuantity = Math.max(1, Math.min(10, Number(reservationComment.quantity) || 1));
+      const event = {
+        commentId: comment.id,
+        viewerId,
+        viewerName: comment.viewerName,
+        text: comment.text,
+        createdAt: comment.createdAt,
+        status: "pending_reservation",
+        lotCode: currentLot.code,
+        quantity: reservationQuantity,
+        source: comment.source,
+        phone: comment.phone || null,
+      };
+
+      addReservationEvent(currentLot, event);
+      sessionLog.logVkComment({
+        commentId: comment.id,
+        viewerId,
+        viewerName: event.viewerName,
+        text: comment.text,
+        createdAt: event.createdAt,
+        lotCode: currentLot.code,
+      });
+      // Полный снимок данных, необходимых для воспроизведения заказа
+      // в МойСкладе из одной этой строки лога: продукт, цена в момент
+      // эфира, действующая скидка, оригинальный текст комментария.
+      // Цена эфира фиксируется здесь специально — её последующее
+      // изменение в каталоге не должно искажать replay.
+      const reservationSalePrice = Number(getLotEffectivePrice(currentLot) || 0);
+      const reservationDiscountAmount = Number(currentLot.discountAmount || 0);
+      logger.info(logSource, "reservation_detected", {
+        connectionId,
+        lotSessionId: currentLot.lotSessionId,
+        code: currentLot.code,
+        commentId: comment.id,
+        commentText: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+        commentCreatedAt: event.createdAt,
+        viewerId,
+        viewerName: event.viewerName,
+        source: comment.source,
+        viewerPhone: comment.phone || null,
+        productId: currentLot.product?.id || null,
+        productName: currentLot.product?.name || null,
+        pathName: currentLot.product?.pathName || null,
+        salePrice: Number.isFinite(reservationSalePrice) ? reservationSalePrice : null,
+        discountAmount: reservationDiscountAmount,
+        effectivePrice: Number.isFinite(reservationSalePrice)
+          ? Math.max(0, reservationSalePrice - reservationDiscountAmount)
+          : null,
+        availableStock: currentLot.product?.availableStock ?? null,
+      });
+      sessionLog.logReservation({
+        viewerName: event.viewerName,
+        viewerId,
+        lotCode: currentLot.code,
+        lotSessionId: currentLot.lotSessionId,
+        commentId: event.commentId,
+        status: event.status,
+        quantity: event.quantity,
+      });
+      sessionLog.logReservationDetected(buildReservationDiagnosticPayload(currentLot, event, {
+        reservationCommentCode: reservationComment.code,
+        hasReservationKeyword: reservationComment.hasReservationKeyword,
+        matchedReservation,
+      }));
+      emitState();
+      void processReservationEvent(currentLot, event);
+    }
+
+    // Поллер чата /efir/ — второй источник броней. Жизненный цикл зеркалит
+    // VK-поллер (старт при открытии лота, стоп по grace-окну без открытых
+    // лотов), но generation у него свой: VK-poison не должен глушить чат.
+    // Курсорчик chatFeedCursor переживает рестарты поллера внутри соединения;
+    // null → первая итерация только инициализирует его последним seq сервиса
+    // (историю до эфира не переигрываем — как VK-поллер по последнему id).
+    function startChatPolling() {
+      if (!chatClient?.enabled || chatPollingActive) {
+        return;
+      }
+
+      const generation = ++chatPollingGeneration;
+      chatPollingActive = true;
+      const pollMs = Number(config.chat?.pollMs) > 0 ? Number(config.chat.pollMs) : 3000;
+      const NO_OPEN_LOT_GRACE_MS = 30000;
+
+      void (async function chatPollLoop() {
+        let consecutiveFailures = 0;
+        let noOpenLotsSince = null;
+
+        while (generation === chatPollingGeneration) {
+          if (openLotsBySessionId.size > 0) {
+            noOpenLotsSince = null;
+          } else {
+            noOpenLotsSince = noOpenLotsSince || Date.now();
+            if (Date.now() - noOpenLotsSince > NO_OPEN_LOT_GRACE_MS) {
+              break;
+            }
+          }
+
+          try {
+            const feed = await chatClient.fetchFeed(chatFeedCursor);
+            if (generation !== chatPollingGeneration) {
+              break;
+            }
+
+            if (chatFeedCursor === null) {
+              chatFeedCursor = feed.latestSeq;
+            } else {
+              for (const message of feed.messages) {
+                if (!(Number(message.seq) > chatFeedCursor)) {
+                  continue;
+                }
+                chatFeedCursor = Number(message.seq);
+                ingestViewerComment({
+                  id: message.commentId,
+                  viewerId: message.viewerId,
+                  viewerName: message.name || "",
+                  text: message.text,
+                  createdAt: new Date(message.ts).toISOString(),
+                  source: "chat",
+                  phone: message.phone || null,
+                });
+              }
+            }
+
+            if (consecutiveFailures > 0) {
+              logger.info("chat", "chat_poll_recovered", {
+                connectionId,
+                openLotCount: openLotsBySessionId.size,
+                afterFailures: consecutiveFailures,
+              });
+              sendJson(websocket, { type: "info", message: "Чат эфира снова отвечает" });
+            }
+            consecutiveFailures = 0;
+          } catch (error) {
+            consecutiveFailures += 1;
+            logger.warn("chat", "chat_poll_failed", {
+              connectionId,
+              openLotCount: openLotsBySessionId.size,
+              consecutiveFailures,
+              error,
+            });
+            // Однократное предупреждение оператору на серию сбоев; цикл не
+            // останавливаем — чат-сервис может вернуться в любой момент.
+            if (consecutiveFailures === 5) {
+              sendJson(websocket, {
+                type: "warning",
+                message: "Чат эфира не отвечает — брони со страницы зрителей временно не приходят",
+              });
+            }
+          }
+
+          const delayMs = consecutiveFailures > 0
+            ? Math.min(30000, 3000 * 2 ** Math.min(consecutiveFailures - 1, 3))
+            : pollMs;
+          await new Promise((resolve) => {
+            setTimeout(resolve, delayMs);
+          });
+        }
+
+        chatPollingActive = false;
+      })();
+    }
+
     function startCommentPolling() {
       if (commentPollingActive) {
         return;
@@ -1564,217 +1916,18 @@ export function attachWsServer(httpServer, config, services = {}) {
                 continue;
               }
 
-              const target = findCommentTarget(comment.text);
-              if (!target || !target.lot) {
-                // Коммент похож на бронь (keyword + код), но однозначного
-                // открытого лота нет: либо ни один не подошёл, либо подошло
-                // несколько (ambiguous). Бронировать наугад нельзя — выносим
-                // это ОПЕРАТОРУ на дашборд (а не в публичный VK-коммент) и
-                // логируем для diagnostics/bundle. Раньше такие пропадали молча
-                // (см. лог 2026-05-24 20:19:54 «…перестала бронировать, Ирина
-                // повторите»).
-                const probe = parseReservationComment(comment.text);
-                if (probe.hasReservationKeyword && probe.code) {
-                  const reason = target?.reason || "no_open_lot";
-                  const knownCodes = productCodeCache?.getCodes?.() || null;
-                  const probeCodeResolution = knownCodes && knownCodes.size > 0
-                    ? resolveKnownCode(probe.code, knownCodes)
-                    : { status: "no_catalog", code: probe.code, candidates: [] };
-                  const attentionCode = probeCodeResolution.status === "matched"
-                    ? probeCodeResolution.code
-                    : probe.code;
-                  const openLotCodes = getOpenLots().map((lot) => lot.code);
-                  const profileForAttention = profileMap.get(comment.from_id);
-                  const viewerNameForAttention = profileForAttention
-                    ? [profileForAttention.first_name, profileForAttention.last_name].filter(Boolean).join(" ")
-                    : (nameCacheStore?.getName?.(comment.from_id) || "");
-                  logger.warn("vk", "reservation_no_open_lot", {
-                    connectionId,
-                    commentId: comment.id,
-                    viewerId: comment.from_id,
-                    viewerName: viewerNameForAttention,
-                    reason,
-                    text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-                    reservationCommentCode: probe.code,
-                    catalogCode: attentionCode,
-                    catalogMatchReason: probeCodeResolution.reason || null,
-                    candidateCodes: target?.candidateCodes || [],
-                    openLotCodes,
-                  });
-                  sendJson(websocket, {
-                    type: "reservationAttention",
-                    reason,
-                    commentId: comment.id,
-                    viewerId: comment.from_id,
-                    viewerName: viewerNameForAttention,
-                    code: attentionCode,
-                    originalCode: attentionCode !== probe.code ? probe.code : undefined,
-                    text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-                    candidateCodes: target?.candidateCodes || probeCodeResolution.candidates || [],
-                    openLotCodes,
-                  });
-                }
-                continue;
-              }
-              const { lot: currentLot, reservationComment, wishlistComment, matchedReservation, matchedWishlist } = target;
-              const reservationState = ensureReservationState(currentLot);
-              reservationState.lastCommentId = Math.max(reservationState.lastCommentId, comment.id);
-              rememberSeenComment(reservationState, comment.id);
-
-              // Forensic: каждый новый комментарий в окне лота попадает в лог,
-              // даже если не «бронь». Это позволяет позже увидеть пропущенные
-              // брони (опечатки, «забронируй», эмодзи) и общий шум вокруг лота.
-              const profileForLog = profileMap.get(comment.from_id);
-              const viewerNameForLog = profileForLog
-                ? [profileForLog.first_name, profileForLog.last_name].filter(Boolean).join(" ")
-                : "";
-              // Персистентный кеш имён (W3): запоминаем КАЖДОГО комментатора с
-              // резолвнутым именем, не только бронирующих. Кеш переживает
-              // стоп/старт эфира и используется голосовой отменой брони для
-              // сопоставления произнесённого оператором имени с зрителем.
-              if (nameCacheStore && viewerNameForLog) {
-                nameCacheStore.remember(comment.from_id, viewerNameForLog);
-              }
-              logger.info("vk", "comment_seen", {
-                connectionId,
-                lotSessionId: currentLot.lotSessionId,
-                code: currentLot.code,
-                commentId: comment.id,
+              const profile = profileMap.get(comment.from_id);
+              ingestViewerComment({
+                id: comment.id,
                 viewerId: comment.from_id,
-                viewerName: viewerNameForLog,
-                text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-                createdAt: new Date(comment.date * 1000).toISOString(),
-                reservationCommentCode: reservationComment.code,
-                hasReservationKeyword: reservationComment.hasReservationKeyword,
-                reservationCommentQuantity: reservationComment.quantity ?? 1,
-                wishlistCommentCode: wishlistComment.code,
-                hasWishlistKeyword: wishlistComment.hasWishlistKeyword,
-                matchedReservation,
-                matchedWishlist,
-              });
-
-              if (!matchedReservation) {
-                if (matchedWishlist) {
-                  if (!viewerNameForLog) {
-                    logger.warn("vk", "wishlist_profile_missing", {
-                      connectionId,
-                      lotSessionId: currentLot.lotSessionId,
-                      commentId: comment.id,
-                      viewerId: comment.from_id,
-                    });
-                    continue;
-                  }
-
-                  const wishlistEvent = {
-                    commentId: comment.id,
-                    viewerId: comment.from_id,
-                    viewerName: viewerNameForLog,
-                    text: comment.text,
-                    createdAt: new Date(comment.date * 1000).toISOString(),
-                    status: "wishlist_confirmed",
-                    lotCode: currentLot.code,
-                  };
-                  void addWishlistFromComment(currentLot, wishlistEvent).catch((error) => {
-                    logger.warn("wishlist", "add_from_comment_failed", {
-                      connectionId,
-                      lotSessionId: currentLot.lotSessionId,
-                      commentId: comment.id,
-                      viewerId: comment.from_id,
-                      error,
-                    });
-                  });
-                }
-                continue;
-              }
-
-              const viewerId = comment.from_id;
-              if (!viewerNameForLog) {
-                logger.warn("vk", "reservation_profile_missing", {
-                  connectionId,
-                  lotSessionId: currentLot.lotSessionId,
-                  commentId: comment.id,
-                  viewerId,
-                });
-                continue;
-              }
-
-              if (reservationState.acceptedUserIds.has(viewerId)) {
-                logger.info("vk", "reservation_duplicate_ignored", {
-                  connectionId,
-                  lotSessionId: currentLot.lotSessionId,
-                  commentId: comment.id,
-                  viewerId,
-                });
-                continue;
-              }
-
-              addBoundedId(reservationState.acceptedUserIds, viewerId);
-
-              const reservationQuantity = Math.max(1, Math.min(10, Number(reservationComment.quantity) || 1));
-              const event = {
-                commentId: comment.id,
-                viewerId,
-                viewerName: viewerNameForLog,
+                viewerName: profile
+                  ? [profile.first_name, profile.last_name].filter(Boolean).join(" ")
+                  : "",
                 text: comment.text,
                 createdAt: new Date(comment.date * 1000).toISOString(),
-                status: "pending_reservation",
-                lotCode: currentLot.code,
-                quantity: reservationQuantity,
-              };
-
-              addReservationEvent(currentLot, event);
-              sessionLog.logVkComment({
-                commentId: comment.id,
-                viewerId,
-                viewerName: event.viewerName,
-                text: comment.text,
-                createdAt: event.createdAt,
-                lotCode: currentLot.code,
+                source: "vk",
               });
-              // Полный снимок данных, необходимых для воспроизведения заказа
-              // в МойСкладе из одной этой строки лога: продукт, цена в момент
-              // эфира, действующая скидка, оригинальный текст комментария.
-              // Цена эфира фиксируется здесь специально — её последующее
-              // изменение в каталоге не должно искажать replay.
-              const reservationSalePrice = Number(getLotEffectivePrice(currentLot) || 0);
-              const reservationDiscountAmount = Number(currentLot.discountAmount || 0);
-              logger.info("vk", "reservation_detected", {
-                connectionId,
-                lotSessionId: currentLot.lotSessionId,
-                code: currentLot.code,
-                commentId: comment.id,
-                commentText: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-                commentCreatedAt: event.createdAt,
-                viewerId,
-                viewerName: event.viewerName,
-                productId: currentLot.product?.id || null,
-                productName: currentLot.product?.name || null,
-                pathName: currentLot.product?.pathName || null,
-                salePrice: Number.isFinite(reservationSalePrice) ? reservationSalePrice : null,
-                discountAmount: reservationDiscountAmount,
-                effectivePrice: Number.isFinite(reservationSalePrice)
-                  ? Math.max(0, reservationSalePrice - reservationDiscountAmount)
-                  : null,
-                availableStock: currentLot.product?.availableStock ?? null,
-              });
-              sessionLog.logReservation({
-                viewerName: event.viewerName,
-                viewerId,
-                lotCode: currentLot.code,
-                lotSessionId: currentLot.lotSessionId,
-                commentId: event.commentId,
-                status: event.status,
-                quantity: event.quantity,
-              });
-              sessionLog.logReservationDetected(buildReservationDiagnosticPayload(currentLot, event, {
-                reservationCommentCode: reservationComment.code,
-                hasReservationKeyword: reservationComment.hasReservationKeyword,
-                matchedReservation,
-              }));
-              emitState();
-              void processReservationEvent(currentLot, event);
             }
-
             if (consecutiveFailures > 0) {
               logger.info("vk", "comment_poll_recovered", {
                 connectionId,
@@ -2354,6 +2507,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         source: confirmedLot.source,
       });
       startCommentPolling();
+      startChatPolling();
 
       voicePipeline.resetTriggerWindow("confirmed_detection_completed");
     }

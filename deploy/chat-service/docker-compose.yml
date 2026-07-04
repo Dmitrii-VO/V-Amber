@@ -1,0 +1,21 @@
+# Чат зрителей /efir/ на хосте cloud (рядом с ~/mediamtx). Порт только на
+# loopback — наружу ходит через nginx location /chat/. Лимиты — чтобы чат
+# не толкался с pay-service на той же машине.
+services:
+  chat:
+    image: node:22-alpine
+    container_name: efir-chat
+    restart: unless-stopped
+    command: ["node", "/app/server.js"]
+    working_dir: /app
+    environment:
+      PORT: "8890"
+      DATA_DIR: /data
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:?set in .env next to this file}
+    volumes:
+      - ./server.js:/app/server.js:ro
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8890:8890"
+    cpus: "0.25"
+    mem_limit: 128m

@@ -9,6 +9,8 @@
   :root {
     --bg: #14100c;
     --panel: #1f1913;
+    --panel-2: #292118;
+    --border: #3a2f21;
     --text: #f2e8da;
     --muted: #a89880;
     --amber: #e8a33d;
@@ -26,7 +28,7 @@
   }
   header {
     width: 100%;
-    max-width: 960px;
+    max-width: 1240px;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -52,7 +54,15 @@
     animation: pulse 1.6s ease-in-out infinite;
   }
   @keyframes pulse { 50% { opacity: .35; } }
-  main { width: 100%; max-width: 960px; padding: 0 16px 24px; }
+  main {
+    width: 100%;
+    max-width: 1240px;
+    padding: 0 16px 24px;
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 16px;
+    align-items: start;
+  }
   .player {
     position: relative;
     width: 100%;
@@ -94,13 +104,113 @@
     box-shadow: 0 4px 16px rgba(0,0,0,.45);
   }
   .unmute.show { display: block; }
+
+  /* ── Чат ── */
+  .chat {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    height: 560px;
+    overflow: hidden;
+  }
+  .chat-head {
+    padding: 10px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-head .who { font-weight: 400; font-size: 12px; color: var(--muted); }
+  .chat-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    scrollbar-width: thin;
+  }
+  .msg { font-size: 14px; line-height: 1.35; word-break: break-word; }
+  .msg .author { color: var(--amber); font-weight: 600; margin-right: 6px; }
+  .msg--service {
+    background: rgba(232, 163, 61, .12);
+    border-left: 3px solid var(--amber);
+    border-radius: 0 6px 6px 0;
+    padding: 6px 10px;
+  }
+  .msg--service .author { color: var(--amber); }
+  .chat-form {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .chat-form input {
+    flex: 1;
+    min-width: 0;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+  .chat-form input:focus { outline: 1px solid var(--amber); }
+  .btn {
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #241a0d;
+    background: var(--amber);
+    cursor: pointer;
+  }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .chat-join {
+    position: absolute;
+    inset: 0;
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 10px;
+    padding: 22px;
+  }
+  .chat-join.hidden { display: none; }
+  .chat-join h2 { font-size: 16px; }
+  .chat-join p { font-size: 13px; color: var(--muted); }
+  .chat-join input {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 11px 12px;
+    font-size: 14px;
+  }
+  .chat-join input:focus { outline: 1px solid var(--amber); }
+  .chat-error { font-size: 13px; color: #ff9c8a; min-height: 17px; }
+  .chat-hint {
+    padding: 6px 12px 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
   footer {
     width: 100%;
-    max-width: 960px;
+    max-width: 1240px;
     padding: 10px 16px 22px;
     font-size: 13px;
     color: var(--muted);
     text-align: center;
+  }
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; }
+    .chat { height: 52vh; min-height: 340px; }
   }
 </style>
 </head>
@@ -119,6 +229,28 @@
     </div>
     <button id="unmute" class="unmute">🔊 Включить звук</button>
   </div>
+
+  <section class="chat">
+    <div class="chat-head">
+      <span>Чат эфира</span>
+      <span id="chatWho" class="who"></span>
+    </div>
+    <div id="chatLog" class="chat-log"></div>
+    <div class="chat-hint">Бронь: напишите код товара, например «бронь 03204» или просто «03204»</div>
+    <form id="chatForm" class="chat-form">
+      <input id="chatText" type="text" maxlength="300" placeholder="Сообщение…" autocomplete="off">
+      <button id="chatSend" class="btn" type="submit">→</button>
+    </form>
+
+    <div id="chatJoin" class="chat-join">
+      <h2>Представьтесь, чтобы участвовать</h2>
+      <p>Телефон нужен, чтобы связаться с вами по брони. В чате он не виден.</p>
+      <input id="joinName" type="text" maxlength="40" placeholder="Имя" autocomplete="name">
+      <input id="joinPhone" type="tel" maxlength="20" placeholder="Телефон" autocomplete="tel">
+      <div id="joinError" class="chat-error"></div>
+      <button id="joinBtn" class="btn" type="button">Войти в чат</button>
+    </div>
+  </section>
 </main>
 <footer>Если видео не запускается — обновите страницу</footer>
 
@@ -211,6 +343,128 @@
 
   showOffline();
   start();
+})();
+
+/* ── Чат ── */
+(function () {
+  var API = '/chat';
+  var POLL_MS = 3000;
+  var STORAGE_KEY = 'efirChat';
+
+  var log = document.getElementById('chatLog');
+  var form = document.getElementById('chatForm');
+  var textInput = document.getElementById('chatText');
+  var sendBtn = document.getElementById('chatSend');
+  var joinPanel = document.getElementById('chatJoin');
+  var joinName = document.getElementById('joinName');
+  var joinPhone = document.getElementById('joinPhone');
+  var joinError = document.getElementById('joinError');
+  var joinBtn = document.getElementById('joinBtn');
+  var who = document.getElementById('chatWho');
+
+  var auth = null;
+  var lastSeq = null;
+  var polling = false;
+
+  try { auth = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch { auth = null; }
+
+  function applyAuth() {
+    if (auth && auth.token) {
+      joinPanel.classList.add('hidden');
+      who.textContent = auth.name || '';
+    } else {
+      joinPanel.classList.remove('hidden');
+      who.textContent = '';
+    }
+  }
+
+  function renderMessage(msg) {
+    var row = document.createElement('div');
+    row.className = 'msg' + (msg.kind === 'service' ? ' msg--service' : '');
+    var author = document.createElement('span');
+    author.className = 'author';
+    author.textContent = msg.name;
+    var body = document.createElement('span');
+    body.textContent = msg.text;
+    row.appendChild(author);
+    row.appendChild(body);
+    return row;
+  }
+
+  function appendMessages(items) {
+    if (!items.length) return;
+    var pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    for (var i = 0; i < items.length; i++) {
+      log.appendChild(renderMessage(items[i]));
+      lastSeq = Math.max(lastSeq === null ? 0 : lastSeq, items[i].seq);
+    }
+    // не дёргаем скролл, если зритель читает историю выше
+    if (pinned) log.scrollTop = log.scrollHeight;
+    while (log.children.length > 300) log.removeChild(log.firstChild);
+  }
+
+  function poll() {
+    if (polling) return;
+    polling = true;
+    var url = API + '/messages' + (lastSeq === null ? '' : '?after=' + lastSeq);
+    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+      if (lastSeq === null && typeof data.latestSeq === 'number') lastSeq = 0;
+      appendMessages(data.messages || []);
+      if (typeof data.latestSeq === 'number') lastSeq = Math.max(lastSeq || 0, data.latestSeq);
+    }).catch(function () { /* тихий ретрай следующим тиком */ }).finally(function () {
+      polling = false;
+    });
+  }
+
+  joinBtn.addEventListener('click', function () {
+    joinError.textContent = '';
+    joinBtn.disabled = true;
+    fetch(API + '/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: joinName.value, phone: joinPhone.value })
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (!res.ok) { joinError.textContent = res.d.error || 'Не получилось войти'; return; }
+        auth = { token: res.d.token, name: res.d.name };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(auth));
+        applyAuth();
+        textInput.focus();
+      })
+      .catch(function () { joinError.textContent = 'Нет связи с сервером, попробуйте ещё раз'; })
+      .finally(function () { joinBtn.disabled = false; });
+  });
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!auth || !auth.token) { applyAuth(); return; }
+    var text = textInput.value.trim();
+    if (!text) return;
+    sendBtn.disabled = true;
+    fetch(API + '/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: auth.token, text: text })
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; }); })
+      .then(function (res) {
+        if (res.status === 401) {
+          // токен не пережил рестарт сервиса с чистым data-каталогом
+          auth = null;
+          localStorage.removeItem(STORAGE_KEY);
+          applyAuth();
+          return;
+        }
+        if (!res.ok) return; // 429 и прочее — сообщение остаётся в поле
+        textInput.value = '';
+        poll(); // сразу подтянуть своё сообщение
+      })
+      .catch(function () {})
+      .finally(function () { sendBtn.disabled = false; });
+  });
+
+  applyAuth();
+  poll();
+  setInterval(poll, POLL_MS);
 })();
 </script>
 </body>

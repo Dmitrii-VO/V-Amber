@@ -3,6 +3,34 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-05] feat | viewer page + own chat as second reservation source
+
+Toward broadcasts fully off VK. Decision (user, after weighing Telegram vs
+own chat vs VK hybrid): **own chat on the viewer page**. Everything is
+additive — VK comments keep working; both sources feed one lot / one stock
+gate / one MoySklad order. See [[stream-integration]] for design details.
+
+- `deploy/stream-viewer/` — public watch page `/efir/` (vendored hls.js 1.6
+  — jsdelivr is unreliable in RU; offline auto-retry; muted-autoplay unmute
+  button) + chat column (join with name+phone, 3s polling). nginx locations:
+  `/efir/` static, `/live/` HLS proxy, `/chat/` chat service — all
+  same-origin on the 443 vhost.
+- `deploy/chat-service/` — zero-dep node:http chat on `cloud` (docker,
+  loopback:8890). Phone required at join (a бронь needs a contact), shown
+  only to the operator feed under `X-Chat-Token`. Viewer/comment ids in the
+  9e9+ range so VK id paths work unchanged.
+- V-Amber: `server/chat-client.js`; in `ws-server.js` the per-comment logic
+  moved verbatim into `ingestViewerComment({...,source})` shared by the VK
+  poller and the new chat poller (separate generation — VK poison must not
+  kill chat intake); `notifyReservationStatus` routes the reply by
+  `event.source`. Log events keep their names with component `chat` +
+  `source`/`viewerPhone` meta, so order-recovery-from-logs keeps working.
+- Tests: `test/ws-server.chat-source.test.js` (+`createChatClientMock`);
+  chat-service smoke-tested end-to-end locally. 313/313 green.
+- NOT deployed to `cloud` yet: ssh/scp writes to the shared production host
+  need explicit user approval (auto-mode classifier). Deploy steps are in
+  the two deploy READMEs.
+
 ## [2026-07-03] feat | one-button broadcast: nginx proxy + OBS orchestration
 
 Two changes that together turn the stream panel from "connection info +
