@@ -34,9 +34,26 @@ gate / one MoySklad order. See [[stream-integration]] for design details.
   `source`/`viewerPhone` meta, so order-recovery-from-logs keeps working.
 - Tests: `test/ws-server.chat-source.test.js` (+`createChatClientMock`);
   chat-service smoke-tested end-to-end locally. 313/313 green.
-- NOT deployed to `cloud` yet: ssh/scp writes to the shared production host
-  need explicit user approval (auto-mode classifier). Deploy steps are in
-  the two deploy READMEs.
+- **Deployed to `cloud` 2026-07-05** (user approved ssh): page files in
+  `/var/www/stream-viewer/`, chat service via docker compose in
+  `~/chat-service/` (`.env`: OPERATOR_TOKEN + `VK_APP_ID=54665906` +
+  PUBLIC_BASE_URL), three nginx locations inserted after `/mediamtx/`
+  (backup `*.bak.<epoch>`, `nginx -t`, reload). Verified externally:
+  `/efir/` 200 + own CSP, `/chat/health|config` OK, feed 401 without
+  token, VK start 302, full join→message→feed→service-reply cycle through
+  the public domain; test data wiped afterwards. **CSP gotcha**: the vhost
+  ships `script-src 'self'` and no `media-src`, so the page keeps all JS
+  in `app.js` (no inline scripts) and `location /efir/` re-declares CSP
+  with `media-src blob:` (hls.js MSE) — any `add_header` in a location
+  replaces ALL inherited vhost headers. The VK callback therefore hands
+  the chat token via `302 /efir/#chatAuth=<base64url>` instead of an
+  inline-script bridge page. MediaMTX HLS answers `/live/index.m3u8` with
+  a `302 ?cookieCheck=1` first — normal, hls.js follows it. VK ID app
+  54665906 created by the user; the `phone` scope is pending VK
+  moderation — until approved the VK login works but returns no phone.
+  Operator still needs `STREAM_CHAT_URL`/`STREAM_CHAT_TOKEN`/
+  `STREAM_VIEWER_URL` in the Mac `.env` (values mirror the repo-dev
+  `.env`), plus the branch merged to `main` and released.
 
 ## [2026-07-03] feat | one-button broadcast: nginx proxy + OBS orchestration
 
