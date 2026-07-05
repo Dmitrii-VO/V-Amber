@@ -129,6 +129,39 @@ test("publishLotCard republishes text-only when VK rejects the photo (error 100)
   }
 });
 
+test("rate-limit penalty decays gradually instead of resetting on first success", async () => {
+  const INTERVAL_MS = 40;
+  const fetchTimes = [];
+  let callIndex = 0;
+  const original = globalThis.fetch;
+  // Первые два вызова — VK 6 (штраф ×2, затем ×4), дальше успех.
+  globalThis.fetch = async () => {
+    fetchTimes.push(Date.now());
+    callIndex += 1;
+    const payload = callIndex <= 2
+      ? { error: { error_code: 6, error_msg: "Too many requests per second" } }
+      : { response: { items: [], profiles: [], groups: [], can_post: 1 } };
+    return { ok: true, status: 200, async json() { return payload; } };
+  };
+  try {
+    const vk = createVkPublisher({ ...PUBLISHER_CONFIG, apiMinIntervalMs: INTERVAL_MS });
+    await assert.rejects(() => vk.getComments(), /VK API 6/); // штраф ×2
+    await assert.rejects(() => vk.getComments(), /VK API 6/); // штраф ×4
+    await vk.getComments(); // успех: ×4 → ×2 (раньше сбрасывался в ×1)
+    await vk.getComments(); // должен подождать ≥ 2×INTERVAL_MS
+
+    const gapAfterSuccess = fetchTimes[3] - fetchTimes[2];
+    // setTimeout не срабатывает раньше срока, поэтому нижняя граница надёжна;
+    // небольшой люфт вниз — на округление таймеров.
+    assert.ok(
+      gapAfterSuccess >= INTERVAL_MS * 2 - 5,
+      `expected decayed gap >= ${INTERVAL_MS * 2 - 5}ms, got ${gapAfterSuccess}ms`,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("publishLotCard still publishes when photo upload fails", async () => {
   const original = globalThis.fetch;
   const calls = [];
