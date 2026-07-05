@@ -5,19 +5,33 @@
 // не с кем связаться), получает token. Телефон никогда не отдаётся публичным
 // эндпоинтам — только операторскому фиду под X-Chat-Token.
 //
-// Идентификаторы для V-Amber: viewerId и commentId живут в диапазоне
-// ID_BASE(9e9)+ — числовые, как у VK, но гарантированно не пересекаются с
-// реальными VK id (< 2^31). Благодаря этому весь денежный путь V-Amber
-// (контрагенты, dedup, отмены) работает с чатом без изменений.
+// Основной вход — «Войти через VK» (VK ID, OAuth 2.1 + PKCE, без секрета
+// приложения): зритель получает свой НАСТОЯЩИЙ VK user id, и существующий
+// маппинг контрагентов МойСклад по VK id (findCounterpartyByVkId /
+// stampVkIdOnCounterparty в V-Amber) работает без изменений — повторный
+// покупатель не задваивается. Имя и телефон берём из профиля VK ID.
+//
+// Запасной вход — имя+телефон (не у всех есть VK): такие зрители получают
+// синтетический viewerId в диапазоне ID_BASE(9e9)+ — числовой, как у VK, но
+// гарантированно не пересекающийся с реальными VK id (< 2^31), поэтому
+// денежный путь V-Amber (контрагенты, dedup, отмены) работает и для них —
+// просто контрагент заводится новый. commentId сообщений всегда 9e9+seq.
 
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const PORT = Number(process.env.PORT) || 8890;
 const DATA_DIR = process.env.DATA_DIR || "./data";
 const OPERATOR_TOKEN = process.env.OPERATOR_TOKEN || "";
+// VK ID (id.vk.com): приложение создаётся владельцем аккаунта VK, сюда идёт
+// его client_id. Без VK_APP_ID кнопка «Войти через VK» на странице скрыта,
+// остаётся только вход по телефону.
+const VK_APP_ID = process.env.VK_APP_ID || "";
+// Публичный origin страницы/сервиса — из него собирается redirect_uri
+// (должен буква-в-букву совпадать с настройкой в кабинете VK ID).
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const ID_BASE = 9_000_000_000;
 const MAX_TEXT_LENGTH = 300;
 const MAX_NAME_LENGTH = 40;
@@ -56,7 +70,11 @@ loadJsonl(viewersPath, (record) => {
   const viewer = { id: record.id, name: record.name || "", phone: record.phone || "" };
   viewersByToken.set(record.token, viewer);
   viewersById.set(viewer.id, viewer);
-  lastViewerNo = Math.max(lastViewerNo, record.id - ID_BASE);
+  // Счётчик — только по синтетическим id телефонного входа; реальные VK id
+  // (< ID_BASE) в нумерации не участвуют.
+  if (record.id > ID_BASE) {
+    lastViewerNo = Math.max(lastViewerNo, record.id - ID_BASE);
+  }
 });
 
 loadJsonl(messagesPath, (record) => {
@@ -90,6 +108,50 @@ function normalizePhone(raw) {
   // РФ-нормализация: 8XXXXXXXXXX → +7XXXXXXXXXX; остальное — как есть с "+".
   if (digits.length === 11 && digits.startsWith("8")) return `+7${digits.slice(1)}`;
   return `+${digits}`;
+}
+
+// ── VK ID (OAuth 2.1 + PKCE) ───────────────────────────────────────────────
+// Публичный клиент: обмен кода идёт с code_verifier, секрет приложения не
+// нужен и на сервере не хранится. state→verifier живут в памяти 10 минут.
+const pendingVkAuth = new Map(); // state → { verifier, ts }
+const VK_AUTH_TTL_MS = 10 * 60_000;
+
+function base64url(buffer) {
+  return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function vkRedirectUri() {
+  return `${PUBLIC_BASE_URL}/chat/auth/vk/callback`;
+}
+
+function vkAuthEnabled() {
+  return Boolean(VK_APP_ID && PUBLIC_BASE_URL);
+}
+
+function pruneVkAuth() {
+  const now = Date.now();
+  for (const [state, entry] of pendingVkAuth) {
+    if (now - entry.ts > VK_AUTH_TTL_MS) pendingVkAuth.delete(state);
+  }
+}
+
+// Выдаёт (или переиспользует) зрителя и новый token. VK-вход дедупится по
+// реальному VK id: повторный вход того же человека обновляет имя/телефон,
+// но зритель (и контрагент в МойСкладе) остаётся тем же.
+function registerViewer({ id, name, phone, authVia, ip }) {
+  const existing = viewersById.get(id);
+  const viewer = existing || { id, name, phone };
+  viewer.name = name || viewer.name;
+  viewer.phone = phone || viewer.phone;
+  const token = randomBytes(24).toString("hex");
+  viewersByToken.set(token, viewer);
+  viewersById.set(viewer.id, viewer);
+  appendFileSync(
+    viewersPath,
+    JSON.stringify({ ...viewer, token, authVia, ts: Date.now(), ip }) + "\n",
+    "utf8",
+  );
+  return { viewer, token };
 }
 
 // ── HTTP-помощники ─────────────────────────────────────────────────────────
@@ -157,6 +219,108 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, { ok: true, messages: messages.length, viewers: viewersById.size });
     }
 
+    if (route === "GET /chat/config") {
+      // Странице нужно знать, показывать ли кнопку «Войти через VK».
+      return sendJson(response, 200, { vkAuth: vkAuthEnabled() });
+    }
+
+    if (route === "GET /chat/auth/vk/start") {
+      if (!vkAuthEnabled()) return sendJson(response, 404, { error: "vk auth disabled" });
+      pruneVkAuth();
+      const state = base64url(randomBytes(24));
+      const verifier = base64url(randomBytes(32));
+      pendingVkAuth.set(state, { verifier, ts: Date.now() });
+      const authUrl = new URL("https://id.vk.com/authorize");
+      authUrl.search = new URLSearchParams({
+        response_type: "code",
+        client_id: VK_APP_ID,
+        redirect_uri: vkRedirectUri(),
+        state,
+        code_challenge: base64url(createHash("sha256").update(verifier).digest()),
+        code_challenge_method: "S256",
+        // vkid.personal_info — имя; phone — верифицированный телефон (зритель
+        // подтверждает передачу на экране VK; без согласия телефон не придёт,
+        // тогда бронь остаётся с контактом через VK id).
+        scope: "vkid.personal_info phone",
+      }).toString();
+      response.writeHead(302, { Location: authUrl.toString(), "Cache-Control": "no-store" });
+      return response.end();
+    }
+
+    if (route === "GET /chat/auth/vk/callback") {
+      if (!vkAuthEnabled()) return sendJson(response, 404, { error: "vk auth disabled" });
+      const fail = (reason) => {
+        console.error("vk_auth_failed", reason);
+        response.writeHead(302, { Location: "/efir/#chatAuthError", "Cache-Control": "no-store" });
+        return response.end();
+      };
+
+      pruneVkAuth();
+      const state = url.searchParams.get("state") || "";
+      const code = url.searchParams.get("code") || "";
+      const deviceId = url.searchParams.get("device_id") || "";
+      const pending = pendingVkAuth.get(state);
+      if (!pending || !code) return fail("bad_state_or_code");
+      pendingVkAuth.delete(state);
+
+      // Обмен кода на токен (PKCE, без секрета) и запрос профиля.
+      const tokenResponse = await fetch("https://id.vk.com/oauth2/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          code_verifier: pending.verifier,
+          client_id: VK_APP_ID,
+          device_id: deviceId,
+          redirect_uri: vkRedirectUri(),
+          state,
+        }).toString(),
+      });
+      const tokenData = await tokenResponse.json().catch(() => null);
+      const vkUserId = Number(tokenData?.user_id);
+      if (!tokenResponse.ok || !tokenData?.access_token || !Number.isFinite(vkUserId) || vkUserId <= 0) {
+        return fail(`token_exchange: ${tokenData?.error_description || tokenData?.error || tokenResponse.status}`);
+      }
+
+      let name = "";
+      let phone = "";
+      const infoResponse = await fetch("https://id.vk.com/oauth2/user_info", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          access_token: tokenData.access_token,
+          client_id: VK_APP_ID,
+        }).toString(),
+      });
+      const infoData = await infoResponse.json().catch(() => null);
+      if (infoResponse.ok && infoData?.user) {
+        name = [infoData.user.first_name, infoData.user.last_name].filter(Boolean).join(" ").trim();
+        phone = normalizePhone(infoData.user.phone) || "";
+      }
+      // Профиль недоступен — не валим вход: id есть, маппинг в МойСклад
+      // работает, а имя зритель увидит плейсхолдерное.
+      if (!name) name = `id${vkUserId}`;
+
+      const { viewer, token } = registerViewer({
+        id: vkUserId,
+        name: name.slice(0, MAX_NAME_LENGTH),
+        phone,
+        authVia: "vk",
+        ip: clientIp(request),
+      });
+
+      // Токен передаём через страницу-мостик: она кладёт его в localStorage
+      // (тот же origin, что /efir/) и возвращает зрителя на эфир.
+      const bootstrap = JSON.stringify({ token, name: viewer.name });
+      const html = `<!DOCTYPE html><meta charset="utf-8"><script>
+localStorage.setItem("efirChat", ${JSON.stringify(bootstrap)});
+location.replace("/efir/");
+</script>`;
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      return response.end(html);
+    }
+
     if (route === "POST /chat/join") {
       if (!joinAllowed(clientIp(request))) {
         return sendJson(response, 429, { error: "Слишком много попыток входа, подождите минуту" });
@@ -168,11 +332,13 @@ const server = createServer(async (request, response) => {
       if (!phone) return sendJson(response, 400, { error: "Укажите телефон — по нему мы свяжемся по брони" });
 
       lastViewerNo += 1;
-      const viewer = { id: ID_BASE + lastViewerNo, name, phone };
-      const token = randomBytes(24).toString("hex");
-      viewersByToken.set(token, viewer);
-      viewersById.set(viewer.id, viewer);
-      appendFileSync(viewersPath, JSON.stringify({ ...viewer, token, ts: Date.now(), ip: clientIp(request) }) + "\n", "utf8");
+      const { viewer, token } = registerViewer({
+        id: ID_BASE + lastViewerNo,
+        name,
+        phone,
+        authVia: "phone",
+        ip: clientIp(request),
+      });
       return sendJson(response, 200, { token, name: viewer.name });
     }
 

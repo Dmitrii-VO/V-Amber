@@ -195,6 +195,25 @@
   }
   .chat-join input:focus { outline: 1px solid var(--amber); }
   .chat-error { font-size: 13px; color: #ff9c8a; min-height: 17px; }
+  .btn--vk {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    background: #07f;
+    color: #fff;
+  }
+  .chat-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .chat-divider::before, .chat-divider::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid var(--border);
+  }
   .chat-hint {
     padding: 6px 12px 10px;
     font-size: 12px;
@@ -244,6 +263,8 @@
 
     <div id="chatJoin" class="chat-join">
       <h2>Представьтесь, чтобы участвовать</h2>
+      <a id="vkAuthBtn" class="btn btn--vk" href="/chat/auth/vk/start" hidden>Войти через VK</a>
+      <div id="joinDivider" class="chat-divider" hidden>или по телефону</div>
       <p>Телефон нужен, чтобы связаться с вами по брони. В чате он не виден.</p>
       <input id="joinName" type="text" maxlength="40" placeholder="Имя" autocomplete="name">
       <input id="joinPhone" type="tel" maxlength="20" placeholder="Телефон" autocomplete="tel">
@@ -362,11 +383,28 @@
   var joinBtn = document.getElementById('joinBtn');
   var who = document.getElementById('chatWho');
 
+  var vkAuthBtn = document.getElementById('vkAuthBtn');
+  var joinDivider = document.getElementById('joinDivider');
+
   var auth = null;
   var lastSeq = null;
   var polling = false;
 
   try { auth = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch { auth = null; }
+
+  // Кнопка «Войти через VK» — только если у сервиса настроен VK ID.
+  fetch(API + '/config').then(function (r) { return r.json(); }).then(function (cfg) {
+    if (cfg && cfg.vkAuth) {
+      vkAuthBtn.hidden = false;
+      joinDivider.hidden = false;
+    }
+  }).catch(function () {});
+
+  // Возврат из VK с ошибкой (страница-мостик редиректит на /efir/#chatAuthError)
+  if (location.hash === '#chatAuthError') {
+    joinError.textContent = 'Вход через VK не удался — попробуйте ещё раз или войдите по телефону';
+    history.replaceState(null, '', location.pathname);
+  }
 
   function applyAuth() {
     if (auth && auth.token) {

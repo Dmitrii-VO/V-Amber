@@ -187,13 +187,28 @@ parallel — one lot, one stock gate, one MoySklad order path; a broadcast can
 take reservations from VK and the chat simultaneously.
 
 - **`deploy/chat-service/`** — zero-dependency node:http service on `cloud`
-  (docker, `127.0.0.1:8890`, nginx `location /chat/`). Viewers join with
-  **name + phone** (a бронь without a contact is useless; the phone is shown
-  only to the operator feed, never to the public chat). Endpoints, rate
-  limits, and deploy steps in its README. Viewer ids / comment ids are
-  numeric in the **9e9+ range** (`ID_BASE = 9_000_000_000`) so they can never
-  collide with real VK ids (< 2^31) and the whole money path (counterparty,
-  dedup, cancel by `viewerId+commentId`) works unchanged.
+  (docker, `127.0.0.1:8890`, nginx `location /chat/`). Endpoints, rate
+  limits, and deploy steps in its README.
+  - **Primary join: «Войти через VK»** (VK ID, OAuth 2.1 + PKCE — public
+    client, no app secret stored anywhere). Added 2026-07-05 after the user
+    flagged that synthetic chat ids would duplicate returning buyers: the
+    MoySklad counterparty mapping is keyed on **VK id**
+    (`findCounterpartyByVkId`/`stampVkIdOnCounterparty`), so a chat viewer
+    authenticated via VK ID carries their **real VK user id** and maps to the
+    same counterparty as their old VK-comment reservations. Name + verified
+    phone come from `id.vk.com/oauth2/user_info` (scope
+    `vkid.personal_info phone`). Needs a VK ID web app (`VK_APP_ID`,
+    redirect `/chat/auth/vk/callback`, `PUBLIC_BASE_URL`) — see the README;
+    without it the button is hidden. The callback hands the chat token to
+    the page via a same-origin bridge page that writes `localStorage` and
+    redirects back to `/efir/`.
+  - **Fallback join: name + phone** (a бронь without a contact is useless;
+    the phone is shown only to the operator feed, never to the public chat).
+    These viewers get numeric ids in the **9e9+ range**
+    (`ID_BASE = 9_000_000_000`) that can never collide with real VK ids
+    (< 2^31), so the money path (counterparty, dedup, cancel by
+    `viewerId+commentId`) still works — they just start a fresh counterparty.
+    Message `commentId`s are always `9e9+seq` regardless of auth method.
 - **`server/chat-client.js`** — V-Amber-side client: `fetchFeed(afterSeq)`
   (`afterSeq === null` → cursor init only, history is never replayed —
   mirrors the VK poller's last-comment-id init) and best-effort
