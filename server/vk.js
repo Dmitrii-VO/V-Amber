@@ -239,10 +239,18 @@ export function createVkPublisher(config) {
 
         try {
           const result = await task.operation();
-          // Успех — затухание адаптивного штрафа.
+          // Успех — ПЛАВНОЕ затухание адаптивного штрафа (халвинг), а не
+          // мгновенный сброс. Сброс в 1 давал «качели»: во время всплеска
+          // комментариев успешная публикация возвращала темп 1×, следующий
+          // же опрос снова ловил VK 6, и штраф раскручивался заново (эфир
+          // 2026-07-05: 33 rate-limit'а за 3,5 минуты). Халвинг 8→4→2→1
+          // возвращает полный темп только после серии успешных вызовов.
           if (backoffMultiplier > 1) {
-            backoffMultiplier = 1;
-            logger.info("vk", "api_rate_limit_recovered", { method: task.method });
+            backoffMultiplier = Math.floor(backoffMultiplier / 2);
+            if (backoffMultiplier <= 1) {
+              backoffMultiplier = 1;
+              logger.info("vk", "api_rate_limit_recovered", { method: task.method });
+            }
           }
           task.resolve(result);
         } catch (error) {
