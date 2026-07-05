@@ -310,15 +310,16 @@ const server = createServer(async (request, response) => {
         ip: clientIp(request),
       });
 
-      // Токен передаём через страницу-мостик: она кладёт его в localStorage
-      // (тот же origin, что /efir/) и возвращает зрителя на эфир.
-      const bootstrap = JSON.stringify({ token, name: viewer.name });
-      const html = `<!DOCTYPE html><meta charset="utf-8"><script>
-localStorage.setItem("efirChat", ${JSON.stringify(bootstrap)});
-location.replace("/efir/");
-</script>`;
-      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      return response.end(html);
+      // Токен передаём через URL-фрагмент (/efir/#chatAuth=<base64url(json)>):
+      // страница-мостик с инлайн-скриптом запрещена CSP vhost'а
+      // (script-src 'self'), а фрагмент на сервер не уходит — app.js страницы
+      // кладёт его в localStorage и сразу вычищает из адресной строки.
+      const payload = base64url(Buffer.from(JSON.stringify({ token, name: viewer.name }), "utf8"));
+      response.writeHead(302, {
+        Location: `/efir/#chatAuth=${payload}`,
+        "Cache-Control": "no-store",
+      });
+      return response.end();
     }
 
     if (route === "POST /chat/join") {
