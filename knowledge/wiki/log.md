@@ -19,6 +19,13 @@ gate / one MoySklad order. See [[stream-integration]] for design details.
   loopback:8890). Phone required at join (a бронь needs a contact), shown
   only to the operator feed under `X-Chat-Token`. Viewer/comment ids in the
   9e9+ range so VK id paths work unchanged.
+- **VK ID login added same day** (user: chat identity must not break the
+  VK-id → MoySklad counterparty mapping): primary «Войти через VK» button on
+  the join panel, OAuth 2.1 PKCE flow in chat-service (no app secret), real
+  VK user id + name + verified phone from `id.vk.com`; phone join stays as
+  fallback (synthetic 9e9+ id → new counterparty, accepted trade-off).
+  Requires a VK ID web app: `VK_APP_ID` + `PUBLIC_BASE_URL` in the service
+  env, redirect `/chat/auth/vk/callback` — setup steps in the README.
 - V-Amber: `server/chat-client.js`; in `ws-server.js` the per-comment logic
   moved verbatim into `ingestViewerComment({...,source})` shared by the VK
   poller and the new chat poller (separate generation — VK poison must not

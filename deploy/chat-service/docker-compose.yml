@@ -12,6 +12,10 @@ services:
       PORT: "8890"
       DATA_DIR: /data
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:?set in .env next to this file}
+      # VK ID («Войти через VK»): client_id приложения из кабинета id.vk.com
+      # и публичный origin для redirect_uri. Пусто = только вход по телефону.
+      VK_APP_ID: ${VK_APP_ID:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - ./server.js:/app/server.js:ro
       - ./data:/data
