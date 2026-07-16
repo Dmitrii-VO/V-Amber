@@ -35,6 +35,20 @@ installation ≠ verified execution. The dispatch rewrite is now covered by a
 local stub test (both targets rewritten correctly; `restart-chat; cat
 /etc/shadow`, arbitrary paths and arbitrary commands still rejected).
 
+**Second run — deploy worked, health check raced it.** With the dispatch fixed
+on the host, both rsync steps passed and the new code went live (`/chat/health`
+started returning `sessionStartSeq`; `/efir/` served the gated player and the
+logout button). Only the health check failed: `restart-chat` returns as soon as
+docker accepts the command, not when chat-service is listening, so `curl -sf`
+hit nginx **2 seconds** after the restart, got a 502 and exited 22 — on a fully
+successful deploy. Fixed with `--retry`/`--retry-delay`/`--retry-all-errors`
+(`--retry-all-errors` is the part that matters: plain `--retry` would not cover
+every HTTP error). Both surfaces returned 200 moments later, unaided.
+
+Worth remembering: a red workflow does not mean a failed deploy. Read which
+*step* failed before touching anything — here the instinct to "roll back the
+broken deploy" would have reverted a deploy that had actually succeeded.
+
 ## [2026-07-16] fix | chat cursor lost every message past PUBLIC_PAGE_SIZE
 
 Review of the own-эфир branch before merge found two bugs in the public
