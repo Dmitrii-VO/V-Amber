@@ -25,6 +25,11 @@
           <span id="sessionLabel">Idle</span>
         </span>
 
+        <div id="efirModeToggle" class="mode-toggle" role="tablist" aria-label="Источник эфира">
+          <button type="button" class="mode-toggle__btn" data-mode="vk">ВК эфир</button>
+          <button type="button" class="mode-toggle__btn" data-mode="own">Свой эфир</button>
+        </div>
+
         <div class="topbar-controls">
           <select id="microphoneSelect" class="select mic-select"></select>
           <div id="vkLiveUrlWrap" style="flex:1; min-width:200px; display:flex; flex-direction:column; gap:4px;">
@@ -91,6 +96,18 @@
             <input id="cacheBannerRemember" type="checkbox" />
             <span>Запомнить выбор</span>
           </label>
+        </div>
+      </div>
+
+      <div id="chatSessionBanner" class="info-banner" hidden role="dialog" aria-label="Сессия чата зрителей">
+        <div class="info-banner-body">
+          <strong>Начать новую сессию чата зрителей?</strong>
+          <span class="dim">Новая сессия скрывает прежние сообщения у зрителей и в этой панели.
+            История никуда не пропадает — просто больше не показывается.</span>
+        </div>
+        <div class="info-banner-actions">
+          <button id="chatSessionNewButton" class="btn btn--primary" type="button">Новая сессия</button>
+          <button id="chatSessionContinueButton" class="btn btn--ghost" type="button">Продолжить старую</button>
         </div>
       </div>
 
@@ -211,6 +228,26 @@
               <div id="transcriptOutput" class="transcript-empty">
                 Запустите сессию для начала транскрипции
               </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="col col--chat">
+          <section id="chatPanel" class="panel" hidden>
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Чат зрителей</span>
+                <span id="chatMsgCount" class="count">· 0</span>
+              </div>
+              <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">/efir/</span>
+            </div>
+            <div class="panel-body panel-body--flush chat-panel-body">
+              <div id="chatLog" class="chat-log"></div>
+              <div id="chatLogEmpty" class="res-empty">Сообщения зрителей появятся здесь</div>
+              <form id="chatOperatorForm" class="chat-operator-form">
+                <input id="chatOperatorInput" class="input" type="text" maxlength="300" placeholder="Ответ в чат…" autocomplete="off" />
+                <button id="chatOperatorSend" class="btn btn--primary" type="submit">→</button>
+              </form>
             </div>
           </section>
         </div>

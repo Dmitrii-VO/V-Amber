@@ -11,6 +11,7 @@ import { createReservationDigestLog } from "./reservation-digest-log.js";
 import { createAuth } from "./auth.js";
 import { getStreamStatus } from "./stream-status.js";
 import { preflightBroadcast, startBroadcast, stopBroadcast } from "./stream-orchestrator.js";
+import { createChatClient } from "./chat-client.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 const SEND_LOGS_TIMEOUT_MS = 60 * 1000;
@@ -199,6 +200,11 @@ export function createStaticServer({
   let logsInFlight = false;
   const reservationDigestLog = createReservationDigestLog();
   const auth = createAuth();
+  // Отдельный экземпляр от ws-server.js: там chatClient гоняет курсор для
+  // сопоставления броней (fetchFeed), здесь — только чтение публичной ленты
+  // для дашборд-панели «Чат зрителей» и отправка ответов оператора; общего
+  // состояния между ними нет, оба бьют в один и тот же chat-service.
+  const chatClient = createChatClient(config.chat);
 
   // Кэш списков из МС, чтобы операторские открытия модалки не били в МС каждый раз.
   let suppliersCache = null;
@@ -504,6 +510,62 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
     if (pathname === "/api/stream/stop") {
       if (request.method !== "POST") return methodNotAllowed(response, "POST");
       jsonResponse(response, 200, await stopBroadcast());
+      return;
+    }
+
+    // Прокси операторской панели «Чат зрителей» (dashboard) к chat-service:
+    // читает ПУБЛИЧНУЮ ленту (viewer+service вперемешку, как у зрителей на
+    // /efir/) и публикует ответы оператора как сервисные сообщения. Уже
+    // требует логин через общий auth-гейт выше (/api/* без API_TOKEN не
+    // защищён вовсе, как и остальной /api/*).
+    if (pathname === "/api/chat/messages") {
+      if (!chatClient.enabled) {
+        jsonResponse(response, 200, { configured: false });
+        return;
+      }
+      if (request.method === "GET") {
+        const afterParam = urlObject.searchParams.get("after");
+        const after = afterParam === null ? 0 : Number(afterParam);
+        try {
+          const result = await chatClient.fetchMessages(Number.isFinite(after) ? after : 0);
+          jsonResponse(response, 200, { configured: true, ...result });
+        } catch (error) {
+          jsonResponse(response, 200, {
+            configured: true, latestSeq: 0, messages: [], error: error?.message || String(error),
+          });
+        }
+        return;
+      }
+      if (request.method === "POST") {
+        let body;
+        try {
+          body = await readJsonBody(request, 4096);
+        } catch {
+          jsonResponse(response, 400, { ok: false, error: "bad_request" });
+          return;
+        }
+        const text = String(body?.text || "").trim();
+        if (!text) {
+          jsonResponse(response, 400, { ok: false, error: "empty_text" });
+          return;
+        }
+        const result = await chatClient.postServiceMessage(text);
+        jsonResponse(response, result.ok ? 200 : 502, result);
+        return;
+      }
+      return methodNotAllowed(response, "GET, POST");
+    }
+
+    // Оператор выбрал «Новая сессия» в баннере при «Запустить эфир» —
+    // помечает границу сессии в chat-service (см. [[stream-integration]]).
+    if (pathname === "/api/chat/session") {
+      if (request.method !== "POST") return methodNotAllowed(response, "POST");
+      if (!chatClient.enabled) {
+        jsonResponse(response, 200, { ok: false, error: "not_configured" });
+        return;
+      }
+      const result = await chatClient.postNewSession();
+      jsonResponse(response, result.ok ? 200 : 502, result);
       return;
     }
 
