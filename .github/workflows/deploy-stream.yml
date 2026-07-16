@@ -52,7 +52,16 @@ jobs:
             ci-deploy@"$HOST":/srv/chat-service/
           ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile="$HOME/.ssh/known_hosts" ci-deploy@"$HOST" restart-chat
 
+      # Проверка гонится с рестартом контейнера: `restart-chat` возвращает
+      # управление, как только docker принял команду, а не когда chat-service
+      # реально начал слушать — в это окно nginx отдаёт 502 и `curl -sf`
+      # падает с кодом 22 при полностью успешном деплое (так и случилось на
+      # первом реальном прогоне: health-check стукнулся через 2с после
+      # рестарта). Поэтому ретраим: --retry-all-errors нужен, чтобы ретраились
+      # и HTTP-ошибки, а не только сетевые.
       - name: Health check
         run: |
-          curl -sf https://www.xn--80azkg6cn.space/efir/ > /dev/null
-          curl -sf https://www.xn--80azkg6cn.space/chat/health
+          curl -sf --retry 5 --retry-delay 2 --retry-all-errors \
+            https://www.xn--80azkg6cn.space/efir/ > /dev/null
+          curl -sf --retry 10 --retry-delay 3 --retry-all-errors \
+            https://www.xn--80azkg6cn.space/chat/health
