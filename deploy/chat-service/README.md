@@ -47,11 +47,26 @@ id в диапазоне 9e9+ и заводится в МойСкладе нов
 
 ## Деплой на cloud
 
+**Автоматический (обычный путь).** Пуш в `main`, затрагивающий
+`deploy/chat-service/**`, запускает
+[`.github/workflows/deploy-stream.yml`](../../.github/workflows/deploy-stream.yml):
+rsync `server.js`/`docker-compose.yml` в `/srv/chat-service` от урезанного
+пользователя `ci-deploy` + `docker compose restart chat` + health-check.
+Подробности — [stream-integration § CI-деплой](../../knowledge/wiki/stream-integration.md).
+
+Сервис живёт в `/srv/chat-service` (перенесён туда одноразовым скриптом
+[`deploy/ci/setup-cloud-deploy-user.sh`](../ci/setup-cloud-deploy-user.sh) —
+раньше был в `~user1/chat-service`; `ci-deploy` не входит в группу `user1` и
+не мог бы писать по старому пути).
+
+**Ручной (запасной вариант / первичная настройка `.env` и nginx)**:
+
 ```bash
-ssh cloud "mkdir -p ~/chat-service/data"
-scp deploy/chat-service/server.js deploy/chat-service/docker-compose.yml cloud:~/chat-service/
+ssh cloud "sudo mkdir -p /srv/chat-service/data"
+scp deploy/chat-service/server.js deploy/chat-service/docker-compose.yml cloud:/tmp/
+ssh cloud "sudo mv /tmp/server.js /tmp/docker-compose.yml /srv/chat-service/"
 # секрет операторского фида (тот же кладётся в .env V-Amber как STREAM_CHAT_TOKEN):
-ssh cloud "cd ~/chat-service && printf 'OPERATOR_TOKEN=<секрет>\nVK_APP_ID=<client_id из id.vk.com>\nPUBLIC_BASE_URL=https://www.xn--80azkg6cn.space\n' > .env && docker compose up -d"
+ssh cloud "cd /srv/chat-service && printf 'OPERATOR_TOKEN=<секрет>\nVK_APP_ID=<client_id из id.vk.com>\nPUBLIC_BASE_URL=https://www.xn--80azkg6cn.space\n' | sudo tee .env >/dev/null && sudo chown ci-deploy:ci-deploy .env data && sudo -u ci-deploy docker compose up -d"
 ssh cloud "curl -s http://127.0.0.1:8890/chat/health"
 ```
 
