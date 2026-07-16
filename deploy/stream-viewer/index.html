@@ -126,6 +126,18 @@
     align-items: center;
   }
   .chat-head .who { font-weight: 400; font-size: 12px; color: var(--muted); }
+  .chat-head-right { display: flex; align-items: center; gap: 10px; }
+  .chat-logout {
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 400;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+  }
+  .chat-logout:hover { color: var(--text); }
   .chat-log {
     flex: 1;
     overflow-y: auto;
@@ -144,6 +156,7 @@
     padding: 6px 10px;
   }
   .msg--service .author { color: var(--amber); }
+  .msg--session { text-align: center; color: var(--muted); font-size: 12px; margin: 8px 0; }
   .chat-form {
     display: flex;
     gap: 8px;
@@ -252,7 +265,10 @@
   <section class="chat">
     <div class="chat-head">
       <span>Чат эфира</span>
-      <span id="chatWho" class="who"></span>
+      <span class="chat-head-right">
+        <span id="chatWho" class="who"></span>
+        <button id="chatLogoutBtn" class="chat-logout" type="button" hidden>Выйти</button>
+      </span>
     </div>
     <div id="chatLog" class="chat-log"></div>
     <div class="chat-hint">Бронь: напишите код товара, например «бронь 03204» или просто «03204»</div>
@@ -264,12 +280,14 @@
     <div id="chatJoin" class="chat-join">
       <h2>Представьтесь, чтобы участвовать</h2>
       <a id="vkAuthBtn" class="btn btn--vk" href="/chat/auth/vk/start" hidden>Войти через VK</a>
-      <div id="joinDivider" class="chat-divider" hidden>или по телефону</div>
-      <p>Телефон нужен, чтобы связаться с вами по брони. В чате он не виден.</p>
-      <input id="joinName" type="text" maxlength="40" placeholder="Имя" autocomplete="name">
-      <input id="joinPhone" type="tel" maxlength="20" placeholder="Телефон" autocomplete="tel">
+      <div id="joinPhoneBlock" hidden>
+        <div id="joinDivider" class="chat-divider">или по телефону</div>
+        <p>Телефон нужен, чтобы связаться с вами по брони. В чате он не виден.</p>
+        <input id="joinName" type="text" maxlength="40" placeholder="Имя" autocomplete="name">
+        <input id="joinPhone" type="tel" maxlength="20" placeholder="Телефон" autocomplete="tel">
+        <button id="joinBtn" class="btn" type="button">Войти в чат</button>
+      </div>
       <div id="joinError" class="chat-error"></div>
-      <button id="joinBtn" class="btn" type="button">Войти в чат</button>
     </div>
   </section>
 </main>
