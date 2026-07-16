@@ -108,6 +108,13 @@ It never writes to logs or MoySklad. See [[service-scripts]].
 - [ ] No product driven to **negative `availableStock`** by the эфир. Allocation is
   on `availableStock` (respects the "Брак" store exclusion), **not** physical
   `stock`. See [[reservation-flow]] and `scripts/find-overbooked.js`.
+- [ ] `find-overbooked.js` checks whole-account state, not just this эфир — cross
+  reference its output against this session's `lot_opened` codes before
+  blaming the broadcast for pre-existing drift.
+- [ ] **`lot_opened.availableStock: null` is the leading indicator**, confirmed
+  2026-07-05: every lot opened with unknown stock (`null`) that got a
+  reservation ended up overbooked by exactly the reserved quantity; every lot
+  opened with a real number did not. See [[stock-synchronization]].
 
 ---
 

@@ -9,6 +9,11 @@ stream.
 `web-ui/app.js` lets the operator:
 
 - choose and refresh microphone devices (selection persists in localStorage);
+- pick the broadcast method with the `#efirModeToggle` segmented control
+  in the topbar («ВК эфир» / «Свой эфир», persists in localStorage) — shows
+  only the VK-URL field or only the stream/chat panels for the selected
+  method. UI-only: both backend pollers keep running regardless of the
+  selection. See [[stream-integration#Эфир mode toggle (2026-07-06)]];
 - validate and persist a VK live video URL;
 - start and stop WebSocket audio streaming (Space keyboard shortcut);
 - view transcript, active lot, detections, reservations, metrics, and uptime;
@@ -83,7 +88,8 @@ changes:
 
 `#streamPanel` (right column, above "Брони") shows connection info and
 live status for the self-hosted MediaMTX stream — an alternative to VK
-Live. Hidden entirely unless `STREAM_MEDIAMTX_API_URL` is configured.
+Live. Hidden unless `STREAM_MEDIAMTX_API_URL` is configured **and** the
+`#efirModeToggle` is set to «Свой эфир» (see above).
 Shows RTMP URL, publish key, and viewer link (each with a "Копировать"
 button), a status dot (`В эфире · N зрителей` / `Стрим не запущен` /
 `Ошибка связи с сервером`) and, since 2026-07-03, one-button broadcast
