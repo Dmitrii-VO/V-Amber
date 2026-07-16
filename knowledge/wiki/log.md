@@ -3,6 +3,38 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-16] fix | chat cursor lost every message past PUBLIC_PAGE_SIZE
+
+Review of the own-эфир branch before merge found two bugs in the public
+chat feed, both about the cursor/pagination contract. Reproduced by
+running `deploy/chat-service` locally over a seeded `messages.jsonl` of
+150 messages: the old client saw 100 of 150 and silently lost the 50
+**newest**.
+
+1. `GET /chat/messages` never served its "last 50" branch —
+   `url.searchParams.get("after")` returns `null` when the param is
+   absent, and **`Number(null) === 0`, not `NaN`**, so `Number.isFinite`
+   was always true and a no-`after` request fell into the `after=0`
+   branch, returning the *oldest* `PUBLIC_PAGE_SIZE`. `GET /chat/feed`
+   never had this — it checks `afterParam === null` explicitly. Watch for
+   this whenever a route distinguishes "absent" from "zero".
+2. Clients advanced the cursor to `latestSeq`, which is the **global**
+   max, while `messages` is capped at `PUBLIC_PAGE_SIZE` and filtered by
+   the session floor — so anything beyond one page was skipped forever.
+
+Fix: advance the cursor only over messages actually received, mirroring
+`chatFeedCursor` in `server/ws-server.js` (~line 1787); use `latestSeq`
+only to seat the cursor at start when there's nothing to show. **The
+reservation feed was never affected** — it already used the per-message
+pattern, so no order was ever lost; impact was display-only (`/efir/`
+viewers and `#chatPanel`).
+
+Verified against a live local chat-service: no-`after` now returns
+msg-101..150, a cold cursor catches up all 150 without loss, the session
+floor still hides the previous эфир and survives restart
+(`sessionStartSeq` restored from `messages.jsonl`), 401 without token.
+`npm test` 313/313.
+
 ## [2026-07-06] feat | chat viewer session reset via «Запустить эфир»
 
 Operator saw stale test messages in `#chatPanel` because
