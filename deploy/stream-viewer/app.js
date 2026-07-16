@@ -227,9 +227,16 @@
     polling = true;
     var url = API + '/messages' + (lastSeq === null ? '' : '?after=' + lastSeq);
     fetch(url).then(function (r) { return r.json(); }).then(function (data) {
-      if (lastSeq === null && typeof data.latestSeq === 'number') lastSeq = 0;
-      appendMessages(data.messages || []);
-      if (typeof data.latestSeq === 'number') lastSeq = Math.max(lastSeq || 0, data.latestSeq);
+      var items = data.messages || [];
+      // appendMessages двигает lastSeq по каждому реально полученному
+      // сообщению. На latestSeq (глобальный максимум) не прыгаем: выдача
+      // режется по PUBLIC_PAGE_SIZE, и хвост, не влезший в страницу, был бы
+      // пропущен навсегда. latestSeq нужен только чтобы встать на курсор,
+      // если на старте сессии показывать нечего.
+      appendMessages(items);
+      if (!items.length && lastSeq === null && typeof data.latestSeq === 'number') {
+        lastSeq = data.latestSeq;
+      }
     }).catch(function () { /* тихий ретрай следующим тиком */ }).finally(function () {
       polling = false;
     });

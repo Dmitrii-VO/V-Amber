@@ -1767,6 +1767,25 @@ function appendChatMessages(items) {
   elements.chatMsgCount.textContent = `· ${state.chatMsgCount}`;
 }
 
+// Курсор двигаем ТОЛЬКО по реально полученным сообщениям — тот же приём, что
+// у фида броней в ws-server.js. latestSeq от chat-service это глобальный
+// максимум, а messages режутся по PUBLIC_PAGE_SIZE и фильтруются границей
+// сессии, так что прыжок курсора на latestSeq потерял бы хвост, не влезший
+// в страницу: панель молча пропустила бы эти сообщения навсегда.
+// latestSeq используем только чтобы поставить курсор на старте, когда
+// показывать всё равно нечего.
+function advanceChatCursor(items, latestSeq) {
+  if (items.length) {
+    for (const item of items) {
+      if (Number.isFinite(Number(item.seq))) {
+        state.chatLastSeq = Math.max(state.chatLastSeq, Number(item.seq));
+      }
+    }
+  } else if (state.chatLastSeq === 0 && Number.isFinite(Number(latestSeq))) {
+    state.chatLastSeq = Number(latestSeq);
+  }
+}
+
 async function pollChatMessages() {
   if (state.chatPolling) return;
   state.chatPolling = true;
@@ -1774,10 +1793,9 @@ async function pollChatMessages() {
     const response = await fetch(`/api/chat/messages?after=${state.chatLastSeq}`);
     const payload = await response.json();
     if (!payload.configured) return;
-    appendChatMessages(payload.messages || []);
-    if (typeof payload.latestSeq === "number") {
-      state.chatLastSeq = Math.max(state.chatLastSeq, payload.latestSeq);
-    }
+    const items = payload.messages || [];
+    appendChatMessages(items);
+    advanceChatCursor(items, payload.latestSeq);
   } catch {
     // Тихий ретрай следующим тиком — тот же best-effort подход, что у
     // pollStreamStatus/efir-страницы; не хотим спамить оператора на каждый
@@ -1816,15 +1834,18 @@ async function sendChatOperatorMessage(event) {
 
 async function initChatPanel() {
   try {
-    const response = await fetch("/api/chat/messages?after=0");
+    // Без after — стартовая выдача это последние 50 сообщений сессии
+    // (оператору нужен свежий хвост, а не начало эфира).
+    const response = await fetch("/api/chat/messages");
     if (!response.ok) return;
     const payload = await response.json();
     if (!payload.configured) return;
 
     state.chatConfigured = true;
     applyEfirMode(state.efirMode);
-    appendChatMessages(payload.messages || []);
-    if (typeof payload.latestSeq === "number") state.chatLastSeq = payload.latestSeq;
+    const items = payload.messages || [];
+    appendChatMessages(items);
+    advanceChatCursor(items, payload.latestSeq);
 
     elements.chatOperatorForm.addEventListener("submit", sendChatOperatorMessage);
     state.chatPollTimer = window.setInterval(pollChatMessages, CHAT_POLL_MS);

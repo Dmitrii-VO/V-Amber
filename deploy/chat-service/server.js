@@ -374,12 +374,17 @@ const server = createServer(async (request, response) => {
     }
 
     if (route === "GET /chat/messages") {
-      const after = Number(url.searchParams.get("after"));
+      // Проверяем именно afterParam, а не Number(after): get() при отсутствии
+      // параметра возвращает null, а Number(null) === 0 (не NaN) — из-за чего
+      // ветка «последние 50» была недостижима и стартовая выдача отдавала
+      // САМЫЕ СТАРЫЕ сообщения. Тот же приём, что в GET /chat/feed ниже.
+      const afterParam = url.searchParams.get("after");
+      const after = Number(afterParam);
       // Никогда не отдаём раньше sessionStartSeq — даже клиенту со старым
       // курсором с прошлой сессии — так «Новая сессия» реально скрывает
       // прошлый чат и у оператора, и у зрителей на /efir/.
       const inSession = messages.filter((m) => m.seq >= sessionStartSeq);
-      const slice = Number.isFinite(after)
+      const slice = afterParam !== null && Number.isFinite(after)
         ? inSession.filter((m) => m.seq > after).slice(0, PUBLIC_PAGE_SIZE)
         : inSession.slice(-50);
       return sendJson(response, 200, { latestSeq: lastSeq, messages: slice.map(publicMessage) });
