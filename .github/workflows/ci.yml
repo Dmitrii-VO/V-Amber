@@ -9,8 +9,14 @@ on:
     branches: [main]
   workflow_call:
 
+# github.workflow в вызванном (workflow_call) прогоне — имя ВЫЗЫВАЮЩЕГО
+# воркфлоу, поэтому оно и разводит группы: standalone-прогон на main и
+# прогон, вызванный из deploy-stream.yml, иначе падают в одну группу
+# ci-<ref>, и cancel-in-progress убивает один другим. Тесты при этом
+# отрабатывают (внутри деплоя), но в истории остаётся «cancelled», а
+# самостоятельный сигнал CI на main пропадает.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
