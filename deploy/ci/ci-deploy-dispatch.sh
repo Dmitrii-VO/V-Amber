@@ -10,13 +10,30 @@
 # Всё остальное (произвольная команда, обход через `;`/`&&` и т.п.) отклоняется:
 # rsync --server сам по себе не проходит через шелл, а restart-chat сравнивается
 # как целая строка, так что дописать что-то ещё к ней нельзя.
+#
+# Про подмену пути ниже. rrsync делает chdir в свой каталог и ЯКОРИТ путь
+# клиента в нём: `if arg.startswith('/'): arg = args.dir + arg`. То есть
+# абсолютный путь от клиента склеивается с корнем — /var/www/stream-viewer/
+# превращалось в /var/www/stream-viewer/var/www/stream-viewer, и rsync падал
+# с "mkdir failed: No such file or directory". rrsync ожидает "." либо путь
+# ОТНОСИТЕЛЬНО своего корня.
+#
+# Просто слать "." из воркфлоу нельзя: тогда обе цели выглядят в
+# SSH_ORIGINAL_COMMAND одинаково и этот case не сможет их различить. Поэтому
+# воркфлоу шлёт полный путь (он же документирует, куда деплой идёт), а здесь
+# мы его срезаем и подставляем "." — rrsync читает команду из
+# SSH_ORIGINAL_COMMAND (rrsync:156), так что правки в env ему достаточно.
+# Корень rrsync остаётся узким (именно этот каталог, не /var/www и не /srv) —
+# на машине рядом крутится pay-service, расширять область записи нельзя.
 set -euo pipefail
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
-  "rsync --server"*"/var/www/stream-viewer/")
+  "rsync --server"*" /var/www/stream-viewer/")
+    export SSH_ORIGINAL_COMMAND="${SSH_ORIGINAL_COMMAND% /var/www/stream-viewer/} ."
     exec /usr/bin/rrsync -wo /var/www/stream-viewer/
     ;;
-  "rsync --server"*"/srv/chat-service/")
+  "rsync --server"*" /srv/chat-service/")
+    export SSH_ORIGINAL_COMMAND="${SSH_ORIGINAL_COMMAND% /srv/chat-service/} ."
     exec /usr/bin/rrsync -wo /srv/chat-service/
     ;;
   restart-chat)
