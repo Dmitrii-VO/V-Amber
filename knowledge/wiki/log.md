@@ -3,6 +3,73 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-06] feat | chat viewer session reset via «Запустить эфир»
+
+Operator saw stale test messages in `#chatPanel` because
+`deploy/chat-service` has no session concept — one continuous
+`messages.jsonl` forever, read as-is by both the dashboard and `/efir/`.
+Considered a standalone "новая сессия" button first; user preferred
+prompting at «Запустить эфир» time instead (own-server broadcast start),
+since that's the real moment a new эфир begins for viewers, and it avoids
+wiping an ongoing chat on an accidental OBS/network restart mid-broadcast
+(operator can answer "продолжить"). Full design in
+[[stream-integration#Chat session reset, tied to «Запустить эфир» (2026-07-06 — implemented)]].
+
+Landed in checkpoints: `deploy/chat-service/server.js` (`kind:"session"`
+marker, `POST /chat/session/new`, `sessionStartSeq` floor on
+`GET /chat/messages`, restored from `messages.jsonl` on restart) →
+`server/chat-client.js` (`postNewSession()`) → `server/http-server.js`
+(`POST /api/chat/session` proxy) → `web-ui` (`#chatSessionBanner`,
+`askChatSessionChoice()`, wired into `streamStartButton`, session-marker
+divider rendering) → `deploy/stream-viewer/app.js` (same divider
+rendering for viewers). `npm test` 313/313 throughout; no dedicated
+automated test added (`http-server.js` has no existing test harness).
+
+Manually verified end-to-end against a throwaway local chat-service
+instance. **Incident during testing**: forgot this dev machine's OBS is
+wired to the real production RTMP/MediaMTX — clicking «Запустить эфир»
+during the test briefly (~1 min, 0 readers) started a real broadcast,
+caught via server logs and stopped immediately. See the testing-gotcha
+note in [[stream-integration#Chat session reset, tied to «Запустить эфир» (2026-07-06 — implemented)]]
+for what to do differently next time.
+
+## [2026-07-06] question | shooting from iPhone while V-Amber/OBS run on the Mac
+
+Operator asked how to run V-Amber on the MacBook but shoot the эфир from an
+iPhone. Answer: OBS orchestration is localhost-only
+(`ws://127.0.0.1:4455`), so OBS must stay on the same Mac — the iPhone
+becomes a camera/mic **source** inside OBS, not a second encoder. Recommended
+Continuity Camera (macOS Ventura+/iOS 16+, Wi-Fi+Bluetooth or USB-C cable,
+shows up as a normal OBS video-capture device, no plugin); fallback is a
+virtual-webcam companion app (Camo/EpocCam/iVCam) for older devices. Explicitly
+steered away from pushing RTMP straight from the phone (e.g. Larix) to
+MediaMTX, since that would bypass OBS and break the one-button
+`startBroadcast`/`stopBroadcast` control. No V-Amber code change — pure OBS
+scene configuration. Full guidance in
+[[stream-integration#Shooting from a phone while OBS/V-Amber run on the Mac (2026-07-06, question)]].
+
+## [2026-07-06] feat | эфир mode toggle (ВК vs свой сервер) in the dashboard
+
+`#efirModeToggle` in the topbar (`web-ui/index.html`, next to
+`#sessionPill`) lets the operator pick which broadcast method they're
+running so only its controls show: "ВК эфир" reveals `#vkLiveUrlWrap` and
+hides `#streamPanel`/`#chatPanel`; "Свой эфир" does the opposite (both still
+gated on `state.streamConfigured`/`state.chatConfigured` from their existing
+config fetches). Choice persists in `localStorage["efirMode"]`
+(`applyEfirMode()` in `web-ui/app.js`), default `"vk"`.
+
+**Deliberately UI-only.** VK-comment polling and the viewer-chat poll
+(`/api/chat/messages`) keep running in parallel no matter what the UI shows —
+the toggle is never sent to the server. User's call: a future multi-platform
+setup may run VK and the self-hosted stream at once, and tying reservation
+intake to the currently-visible tab risks silently dropping orders from the
+hidden channel. See [[stream-integration#Эфир mode toggle (2026-07-06)]] and
+[[web-dashboard]].
+
+Verified manually via the preview browser tool (mode switch shows/hides the
+right panels, survives a reload, chat/VK network polling continues in both
+modes) and `npm test` (313/313, unaffected — server-side untouched).
+
 ## [2026-07-05] feat | viewer page + own chat as second reservation source
 
 Toward broadcasts fully off VK. Decision (user, after weighing Telegram vs

@@ -104,10 +104,28 @@ Editing that nginx config follows the local convention: back up to
     where `getStreamStatus()` itself throws — no separate `500` shape for
     callers to branch on.
 
+## Эфир mode toggle (2026-07-06)
+
+`#efirModeToggle` in the topbar (`web-ui/index.html`, next to `#sessionPill`)
+lets the operator switch between "ВК эфир" and "Свой эфир" so only the
+controls for the broadcast method actually in use are shown: VK mode shows
+`#vkLiveUrlWrap`; own-server mode shows `#streamPanel` and `#chatPanel`
+(each still gated on being configured via `state.streamConfigured` /
+`state.chatConfigured`). The choice is persisted in
+`localStorage["efirMode"]` (`web-ui/app.js`, `applyEfirMode()`).
+
+**This is UI-only.** VK-comment polling (`server/vk.js`) and the viewer-chat
+poll (`/api/chat/messages`) keep running in parallel regardless of which
+mode is selected in the UI — the toggle never reaches the server. This is
+deliberate: a future multi-platform setup may run VK and the self-hosted
+stream at the same time, and coupling reservation intake to the UI's
+current tab would silently drop orders from the hidden channel.
+
 ## Dashboard panel
 
-`web-ui/index.html` `#streamPanel` (hidden unless configured) sits in the
-right column above "Брони", styled with the existing `.panel` classes.
+`web-ui/index.html` `#streamPanel` (hidden unless configured, and only
+shown when `#efirModeToggle` is set to "Свой эфир") sits in the right
+column above "Брони", styled with the existing `.panel` classes.
 `web-ui/app.js`:
 
 - `initStreamPanel()` — fetches `/api/stream/config` once at page load,
@@ -160,6 +178,119 @@ right column above "Брони", styled with the existing `.panel` classes.
 - Config: `config.obs` — `OBS_WEBSOCKET_URL` (default
   `ws://127.0.0.1:4455`), `OBS_WEBSOCKET_PASSWORD`, `OBS_TIMEOUT_MS`.
   V-Amber and OBS run on the same operator machine, so localhost is right.
+
+### Shooting from a phone while OBS/V-Amber run on the Mac (2026-07-06, question)
+
+Operator question: V-Amber runs on the MacBook, but they want to shoot the
+эфир with an iPhone. Since orchestration talks to OBS over
+`ws://127.0.0.1:4455` (previous bullet), OBS itself must keep running on
+the same Mac as V-Amber — the iPhone should feed OBS as a **camera/mic
+source**, not run its own OBS/encoder. This needs no V-Amber code changes,
+only an OBS scene source:
+
+- **Continuity Camera (recommended, free)** — macOS Ventura+/iOS 16+, same
+  Apple ID, Wi-Fi+Bluetooth on (or a USB-C cable for a more stable feed
+  and to keep the phone charged). The iPhone shows up as a normal
+  `Video Capture Device` in OBS (AVFoundation), no extra app/plugin. This
+  is the default recommendation — it slots the phone in as OBS's camera
+  and leaves the rest of the one-button flow (`Запустить эфир` /
+  `Остановить`) untouched.
+- **Fallback (older macOS/iPhone, or Continuity Camera unavailable)** —
+  a virtual-webcam companion app (Camo, EpocCam, iVCam): install on both
+  iPhone and Mac, pick the resulting virtual camera as the OBS source.
+  Same architecture, just an extra app instead of a system feature.
+- **Not recommended**: pushing RTMP directly from the iPhone (e.g. Larix
+  Broadcaster) straight to MediaMTX. It would bypass OBS entirely, so
+  `startBroadcast()`/`stopBroadcast()` (which drive OBS, not MediaMTX)
+  would no longer control the эфир — the operator would have to start/stop
+  the phone's RTMP push manually and only «Проверить эфир» (MediaMTX
+  status) would still make sense.
+
+## Chat session reset, tied to «Запустить эфир» (2026-07-06 — implemented)
+
+**Problem**: `deploy/chat-service/server.js` keeps one continuous
+`messages.jsonl` forever — there is no concept of "эфир session". Both
+the operator dashboard's `#chatPanel` and the public `/efir/` page read
+the same `/chat/messages` feed, so every new broadcast still shows
+whatever was last said (including stale test messages from a previous,
+unrelated эфир). The reservation-matching feed (`GET /chat/feed`, used by
+`server/ws-server.js`'s `startChatPolling()`) is **not** affected by this —
+its cursor already resets per audio session — this plan is only about the
+human-visible chat log.
+
+**Decision (user, 2026-07-06)**: no standalone "new session" button.
+Instead, prompt the operator right when they click «Запустить эфир»
+(`streamStartButton`, own-server broadcast mode): *"начать новую сессию
+чата или продолжить старую?"* — as a non-blocking inline banner, the same
+pattern as `#cacheBanner`'s pre-session product-code-cache prompt. This
+piggybacks the chat-session boundary on the moment a new эфир actually
+begins for viewers, and gives an explicit way to say **no** to a reset
+when OBS/network dropped and the operator restarts the same broadcast (so
+the ongoing chat isn't senselessly wiped on a reconnect).
+
+**Design**:
+
+1. `deploy/chat-service/server.js` — add a message `kind: "session"`
+   marker (alongside the existing `"viewer"`/`"service"` kinds). A new
+   `POST /chat/session/new` route (operator-only, same `X-Chat-Token` gate
+   as `/chat/service`) appends the marker and moves an in-memory
+   `sessionStartSeq` forward. `sessionStartSeq` is restored on boot by
+   scanning loaded `messages.jsonl` for the last `kind:"session"` record
+   (no extra state file). **Nothing is ever deleted** — `messages.jsonl`
+   keeps full history, matching this project's append-only-log convention
+   (wishlist-store, name-cache-store, order-recovery-from-logs).
+2. `GET /chat/messages` (public — read by both the dashboard panel and
+   `/efir/`) floors its result at `sessionStartSeq` in addition to the
+   existing `after` cursor, so nobody (operator or viewer) can page back
+   before the latest reset. `GET /chat/feed` (reservation intake) is
+   unchanged. `GET /chat/health` gains `sessionStartSeq` for diagnostics.
+3. `server/chat-client.js` — new `postNewSession()`, mirrors
+   `postServiceMessage()`.
+4. `server/http-server.js` — new `POST /api/chat/session` behind the
+   existing `API_TOKEN` gate, next to the existing `/api/chat/messages`
+   proxy, calling `chatClient.postNewSession()`.
+5. `web-ui/index.html` — new `#chatSessionBanner` (same shape as
+   `#cacheBanner`: two buttons, no "remember" checkbox — this must ask
+   every time, not silently reuse the last answer). `web-ui/app.js` — new
+   `askChatSessionChoice()` promise helper (mirrors `askCacheChoice()`).
+   The `streamStartButton` handler awaits it **before** calling the real
+   `startBroadcastFromUi()`, but only when `state.chatConfigured`; picking
+   "новая сессия" fires `POST /api/chat/session` first (best-effort — a
+   chat-service hiccup must not block the actual broadcast start).
+6. Render the `kind:"session"` marker as a plain centered divider (not a
+   chat bubble) in both the dashboard's `renderChatMessage()` and
+   `deploy/stream-viewer/app.js`'s message renderer.
+
+**Deploy note**: steps 1–2 live in `deploy/chat-service`, which only ships
+via `.github/workflows/deploy-stream.yml` on push to `main` — steps 3–6
+ship via the normal V-Amber release/update path on the operator's Mac.
+Both legs need to land before the banner works end-to-end.
+
+**Verification (2026-07-06)**: full flow tested against a throwaway local
+`chat-service` instance (temporary `.env` override, reverted after) —
+`POST /chat/session/new` auth-gated correctly (401 without/with wrong
+`X-Chat-Token`), `GET /chat/messages` floors both fresh loads and
+stale-cursor requests at `sessionStartSeq`, the boundary survives a
+chat-service restart (rescanned from `messages.jsonl`), and the dashboard
+banner → `POST /api/chat/session` → `POST /api/stream/start` sequencing
+fired in the right order end-to-end. `npm test` stayed 313/313 throughout
+(this feature has no dedicated automated test — `http-server.js` has no
+existing test harness to extend; verification was manual, matching how
+the эфир mode toggle above was verified).
+
+**Testing gotcha found the hard way**: this Windows dev checkout has a
+real OBS Studio reachable at the default `ws://127.0.0.1:4455` with a
+scene already wired to this project's RTMP settings. Clicking «Запустить
+эфир» against the **real** `STREAM_MEDIAMTX_API_URL`/OBS config (only
+`STREAM_CHAT_URL` was overridden for this test, not MediaMTX/OBS) actually
+launched OBS and started a real ~1-minute publish to production MediaMTX
+(`obs_autolaunch_attempt` → `obs_stream_started` → `broadcast_started` in
+the logs) — `readers` stayed 0 throughout, and it was stopped immediately
+via `POST /api/stream/stop` once noticed. **Future local testing of
+`/api/stream/start`/the new banner must also stub or override
+`STREAM_MEDIAMTX_API_URL`/`OBS_WEBSOCKET_URL`** (not just chat), or use a
+dedicated test/staging RTMP path, to avoid touching the real broadcast
+pipeline again.
 
 ## Viewer page (2026-07-05)
 
@@ -235,6 +366,72 @@ take reservations from VK and the chat simultaneously.
 - Tests: `test/ws-server.chat-source.test.js` (chat бронь through the shared
   pipeline + reply routing; VK and chat sharing one lot's stock counter),
   `createChatClientMock` in `test/helpers/ws-harness.js`.
+
+## Deploy automation (CI, 2026-07-05)
+
+Both `deploy/stream-viewer/` and `deploy/chat-service/` used to be deployed by
+hand (`ssh`/`scp` commands in their READMEs). `.github/workflows/deploy-stream.yml`
+now automates this: on every push to `main` that touches `deploy/stream-viewer/**`
+or `deploy/chat-service/**`, it rsyncs the changed files to `cloud` and (for
+chat) runs `docker compose restart chat`, then curls both public URLs as a
+smoke test. It deliberately triggers **only on `push` to `main`, never on
+`pull_request`** — the repo is public, and GitHub does not expose repo secrets
+to workflows triggered from fork PRs, so keeping the trigger push-only is what
+keeps the deploy secrets safe.
+
+**Why a new `ci-deploy` user instead of reusing the existing deploy path**:
+`user1` (the account used for every manual `ssh cloud` command elsewhere in
+this wiki) has passwordless `sudo ALL` and is in the `docker` group — i.e. it
+is root-equivalent on a host that also runs unrelated production services
+(auctionbot, pay-service, n8n). Putting that key into GitHub Actions secrets
+would mean a leaked secret = root on a box with a payment service. So CI gets
+its own low-privilege account instead:
+
+- `ci-deploy` — created by
+  [`deploy/ci/setup-cloud-deploy-user.sh`](../../deploy/ci/setup-cloud-deploy-user.sh)
+  (idempotent, run once with the CI public key as its argument). It's in
+  groups `docker` (needed to restart the chat container over the docker
+  socket — unavoidable, docker-group membership is itself root-equivalent,
+  this is the one real privilege the account needs) and `www-data` (so it can
+  write into `/var/www/stream-viewer`, which is `chown www-data`, without
+  `chown`-ing it away from nginx every deploy). It has **no sudo**.
+- Its SSH key is restricted with a **forced command**
+  ([`deploy/ci/ci-deploy-dispatch.sh`](../../deploy/ci/ci-deploy-dispatch.sh))
+  so the key cannot open an interactive shell — sshd always runs the
+  dispatcher, which inspects `$SSH_ORIGINAL_COMMAND` and allows exactly three
+  things: `rrsync -wo` into `/var/www/stream-viewer/`, `rrsync -wo` into
+  `/srv/chat-service/`, or the literal fixed string `restart-chat` (→
+  `docker compose restart chat`). Anything else is rejected. This caps the
+  blast radius of a leaked CI secret to "can overwrite these two directories
+  and restart this one container" — not a general-purpose shell, not access
+  to auctionbot/pay-service/n8n on the same box.
+- `chat-service` was **relocated from `~user1/chat-service` to
+  `/srv/chat-service`**, owned by `ci-deploy`, as part of that same setup
+  script — `ci-deploy` isn't in `user1`'s group and can't write inside
+  `/home/user1`, so the service had to move to a neutral path both accounts
+  can reason about. The docker-compose bind mounts (`./server.js`, `./data`)
+  are relative, so the move is transparent to the running container; only the
+  host-side path changed. `deploy/chat-service/README.md`'s manual/fallback
+  steps were updated to the new path.
+
+**GitHub secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Contents | Why a secret and not plain workflow text |
+|---|---|---|
+| `DEPLOY_SSH_KEY` | private half of the dedicated CI keypair (ed25519, no passphrase — required for unattended CI) | obviously sensitive |
+| `DEPLOY_SSH_HOST` | the `cloud` IP | wiki convention keeps this IP out of anywhere publicly readable (see infra section above); the workflow file is in a public repo, so it gets the same treatment as the wiki instead of being hardcoded |
+| `DEPLOY_SSH_KNOWN_HOSTS` | `ssh-keyscan` output for that IP | pins the host key so the workflow can't be MITM'd by `StrictHostKeyChecking=no`; also embeds the IP, hence also a secret |
+
+**Rotation/revocation**: to cut off CI access, delete the one `authorized_keys`
+line under `/home/ci-deploy/.ssh/` on `cloud` (or `sudo userdel -r ci-deploy`
+to remove the account entirely) and rotate the three GitHub secrets. Nothing
+else on the box depends on that account.
+
+**Known pre-existing condition, not fixed by this change**: `user1` itself
+still has passwordless `sudo ALL` + `docker` group and is still what every
+manual `ssh cloud` command in this wiki uses — this design only makes sure
+*CI* doesn't inherit that exposure, it doesn't tighten `user1`. Worth revisiting
+separately.
 
 ## Deliberately out of scope
 
