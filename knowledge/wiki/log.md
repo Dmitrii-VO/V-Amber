@@ -3,6 +3,36 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-16] feat | CI that actually runs the tests, and it gates the deploy
+
+Until now the repo had **no test workflow at all** — only `release.yml` and
+`deploy-stream.yml`, both on push to `main`. `gh pr checks` reported nothing on
+any PR, `npm test` ran only by hand, and the cloud deploy went out with zero
+test signal. Two defects reached production the same day precisely because
+nothing was there to catch them.
+
+`ci.yml` runs `npm ci && npm test` on `pull_request` and on push to `main`. It
+also declares `workflow_call`, and `deploy-stream.yml` now calls it as a `test`
+job with `deploy: needs: test` — reused rather than duplicated, so the deploy
+gate and the PR check are the same signal. Tests run twice on a `main` push that
+touches the deploy paths (once standalone, once via the caller); ~40s, accepted
+in exchange for prod never outrunning a red suite.
+
+**Node version discrepancy, found while picking one for CI and left unresolved:**
+
+| Where | Node |
+|---|---|
+| app `Dockerfile` | 20 |
+| `deploy/chat-service/docker-compose.yml` | 22 |
+| CI (chosen here) | 22 |
+
+`npm test` is `node --test "test/**/*.test.js"`, and the test runner only
+understands **glob patterns from Node 21+** — so the suite *cannot run at all*
+on the Node 20 the app ships on. CI therefore tests on 22 while the app runs on
+20: the tests have never once executed against the version in production. Not
+fixed here (it needs a decision — bump the image, or drop the glob and pass a
+directory); flagged so it isn't rediscovered by accident.
+
 ## [2026-07-16] fix | CI deploy failed on first real run — rrsync anchors client paths
 
 PR #8 merged; `Auto Release` succeeded, `Deploy stream viewer + chat service`

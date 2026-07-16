@@ -17,7 +17,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Прод не должен обгонять красные тесты: раскатка идёт на живой хост, где
+  # рядом работает pay-service, и до 2026-07-16 деплой стартовал вообще без
+  # какого-либо прогона тестов. Переиспользуем ci.yml, а не дублируем шаги,
+  # чтобы тестовый сигнал был один и тот же и здесь, и на PR-ах.
+  test:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
