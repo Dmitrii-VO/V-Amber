@@ -46,12 +46,35 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build app image
         run: docker build -t v-amber:ci .
-      # Дым: образ должен хотя бы стартовать интерпретатор и подтянуть
-      # зависимости на этой версии Node — без этого «сборка прошла» ещё не
-      # значит, что приложение на 22 живое.
+      # Дым: образ должен стартовать интерпретатор и подтянуть зависимости.
       - name: Smoke — deps load on this Node
         run: |
           docker run --rm v-amber:ci node -e "
             require('ws'); require('@grpc/grpc-js'); require('dotenv');
             console.log('node', process.version, '— deps ok');
           "
+
+      # «Образ собрался» и «приложение живое» — разные утверждения, и второе
+      # до сих пор не проверялось ничем. Поднимаем контейнер целиком и ждём
+      # ответа по HTTP. YANDEX_SPEECHKIT_API_KEY фиктивный: config.js требует
+      # переменную при старте, но сам ключ нужен только при подключении к
+      # SpeechKit, которого здесь не происходит. Остальное имеет умолчания;
+      # VK/МойСклад не сконфигурированы и деградируют штатно.
+      - name: Smoke — app boots and serves on this Node
+        run: |
+          docker run -d --name v-amber-smoke \
+            -e YANDEX_SPEECHKIT_API_KEY=dummy-key-for-ci \
+            -p 8080:8080 v-amber:ci
+          ok=
+          for i in $(seq 1 25); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/; then ok=1; break; fi
+            sleep 1
+          done
+          echo "── логи контейнера ──"
+          docker logs v-amber-smoke 2>&1 | tail -20
+          docker rm -f v-amber-smoke >/dev/null
+          if [ "$ok" != 1 ]; then
+            echo "приложение не ответило на / за 25с" >&2
+            exit 1
+          fi
+          echo "приложение поднялось и отвечает"
