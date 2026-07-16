@@ -23,6 +23,13 @@
     badge.classList.remove('on');
   }
 
+  function showAuthGate() {
+    overlay.classList.remove('hidden');
+    overlayTitle.textContent = 'Войдите, чтобы посмотреть эфир';
+    overlayHint.textContent = 'Представьтесь в чате справа — трансляция откроется сразу после входа';
+    badge.classList.remove('on');
+  }
+
   function showLive() {
     overlay.classList.add('hidden');
     badge.classList.add('on');
@@ -87,8 +94,23 @@
     unmuteBtn.classList.remove('show');
   });
 
-  showOffline();
-  start();
+  // Картинка не должна показываться, пока зритель не авторизован в чате
+  // (VK ID или имя+телефон) — чат-модуль ниже вызывает это после applyAuth().
+  var started = false;
+  window.efirStartPlayer = function () {
+    if (started) return;
+    started = true;
+    showOffline();
+    start();
+  };
+  window.efirStopPlayer = function () {
+    started = false;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    stopHls();
+    showAuthGate();
+  };
+
+  showAuthGate();
 })();
 
 /* ── Чат ── */
@@ -108,7 +130,7 @@
   var joinBtn = document.getElementById('joinBtn');
   var who = document.getElementById('chatWho');
   var vkAuthBtn = document.getElementById('vkAuthBtn');
-  var joinDivider = document.getElementById('joinDivider');
+  var logoutBtn = document.getElementById('chatLogoutBtn');
 
   var auth = null;
   var lastSeq = null;
@@ -137,16 +159,15 @@
   try { auth = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) { auth = null; }
 
   // Кнопка «Войти через VK» — только если у сервиса настроен VK ID.
+  // Вход по телефону временно скрыт (joinPhoneBlock hidden в index.html) —
+  // divider внутри него трогать не нужно.
   fetch(API + '/config').then(function (r) { return r.json(); }).then(function (cfg) {
-    if (cfg && cfg.vkAuth) {
-      vkAuthBtn.hidden = false;
-      joinDivider.hidden = false;
-    }
+    if (cfg && cfg.vkAuth) vkAuthBtn.hidden = false;
   }).catch(function () {});
 
   // Возврат из VK с ошибкой
   if (location.hash === '#chatAuthError') {
-    joinError.textContent = 'Вход через VK не удался — попробуйте ещё раз или войдите по телефону';
+    joinError.textContent = 'Вход через VK не удался — попробуйте ещё раз';
     history.replaceState(null, '', location.pathname);
   }
 
@@ -154,13 +175,29 @@
     if (auth && auth.token) {
       joinPanel.classList.add('hidden');
       who.textContent = auth.name || '';
+      logoutBtn.hidden = false;
+      if (window.efirStartPlayer) window.efirStartPlayer();
     } else {
       joinPanel.classList.remove('hidden');
       who.textContent = '';
+      logoutBtn.hidden = true;
+      if (window.efirStopPlayer) window.efirStopPlayer();
     }
   }
 
+  logoutBtn.addEventListener('click', function () {
+    auth = null;
+    localStorage.removeItem(STORAGE_KEY);
+    applyAuth();
+  });
+
   function renderMessage(msg) {
+    if (msg.kind === 'session') {
+      var divider = document.createElement('div');
+      divider.className = 'msg msg--session';
+      divider.textContent = '— ' + msg.text + ' —';
+      return divider;
+    }
     var row = document.createElement('div');
     row.className = 'msg' + (msg.kind === 'service' ? ' msg--service' : '');
     var author = document.createElement('span');
