@@ -56,6 +56,12 @@ const viewersById = new Map();    // id → {id, name, phone}
 const messages = [];              // {seq, ts, viewerId|null, name, text, kind}
 let lastSeq = 0;
 let lastViewerNo = 0;
+// Граница текущей "сессии" эфира — seq последней kind:"session" записи.
+// Ничего не удаляется из messages.jsonl; это только нижняя граница для
+// публичной ленты (/chat/messages), так что и дашборд, и /efir/ начинают
+// показывать чат с чистого листа после «Новая сессия», а прошлые эфиры
+// остаются в файле для восстановления при необходимости.
+let sessionStartSeq = 0;
 
 function loadJsonl(path, onRecord) {
   if (!existsSync(path)) return;
@@ -81,6 +87,7 @@ loadJsonl(messagesPath, (record) => {
   if (!Number.isFinite(record?.seq)) return;
   messages.push(record);
   lastSeq = Math.max(lastSeq, record.seq);
+  if (record.kind === "session") sessionStartSeq = Math.max(sessionStartSeq, record.seq);
 });
 
 // ── Рейт-лимиты (в памяти; сброс при рестарте допустим) ────────────────────
@@ -216,7 +223,9 @@ const server = createServer(async (request, response) => {
 
   try {
     if (route === "GET /chat/health") {
-      return sendJson(response, 200, { ok: true, messages: messages.length, viewers: viewersById.size });
+      return sendJson(response, 200, {
+        ok: true, messages: messages.length, viewers: viewersById.size, sessionStartSeq,
+      });
     }
 
     if (route === "GET /chat/config") {
@@ -366,9 +375,13 @@ const server = createServer(async (request, response) => {
 
     if (route === "GET /chat/messages") {
       const after = Number(url.searchParams.get("after"));
+      // Никогда не отдаём раньше sessionStartSeq — даже клиенту со старым
+      // курсором с прошлой сессии — так «Новая сессия» реально скрывает
+      // прошлый чат и у оператора, и у зрителей на /efir/.
+      const inSession = messages.filter((m) => m.seq >= sessionStartSeq);
       const slice = Number.isFinite(after)
-        ? messages.filter((m) => m.seq > after).slice(0, PUBLIC_PAGE_SIZE)
-        : messages.slice(-50);
+        ? inSession.filter((m) => m.seq > after).slice(0, PUBLIC_PAGE_SIZE)
+        : inSession.slice(-50);
       return sendJson(response, 200, { latestSeq: lastSeq, messages: slice.map(publicMessage) });
     }
 
@@ -400,6 +413,16 @@ const server = createServer(async (request, response) => {
       const text = String(body?.text || "").trim().slice(0, MAX_TEXT_LENGTH);
       if (!text) return sendJson(response, 400, { error: "empty text" });
       const record = appendMessage({ viewerId: null, name: SERVICE_NAME, text, kind: "service" });
+      return sendJson(response, 200, { seq: record.seq });
+    }
+
+    // Оператор нажал «Новая сессия» при старте эфира: помечаем границу — сама
+    // история никуда не девается, но /chat/messages (и дашборд, и /efir/)
+    // перестаёт отдавать что-либо раньше этого seq.
+    if (route === "POST /chat/session/new") {
+      if (!isOperator(request)) return sendJson(response, 401, { error: "unauthorized" });
+      const record = appendMessage({ viewerId: null, name: SERVICE_NAME, text: "Новая сессия", kind: "session" });
+      sessionStartSeq = record.seq;
       return sendJson(response, 200, { seq: record.seq });
     }
 
