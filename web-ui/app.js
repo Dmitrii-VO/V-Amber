@@ -132,9 +132,20 @@ const elements = {
   streamStartButton: $("streamStartButton"),
   streamStopButton: $("streamStopButton"),
   streamChecklist: $("streamChecklist"),
+
+  chatPanel: $("chatPanel"),
+  chatMsgCount: $("chatMsgCount"),
+  chatLog: $("chatLog"),
+  chatLogEmpty: $("chatLogEmpty"),
+  chatOperatorForm: $("chatOperatorForm"),
+  chatOperatorInput: $("chatOperatorInput"),
+  chatOperatorSend: $("chatOperatorSend"),
 };
 
 const state = {
+  efirMode: "vk",
+  streamConfigured: false,
+  chatConfigured: false,
   audioContext: null,
   mediaStream: null,
   sourceNode: null,
@@ -170,6 +181,15 @@ const state = {
   streamStatusTimer: null,
   streamStatusPolling: false,
   streamOfflineCycles: 0,
+  // null = не знаем текущее состояние (например, ещё не опрашивали) — в этом
+  // случае обе кнопки остаются кликабельными, как и раньше, а не молчаливо
+  // блокируются на основании догадки.
+  streamLive: null,
+
+  chatLastSeq: 0,
+  chatPolling: false,
+  chatPollTimer: null,
+  chatMsgCount: 0,
 };
 
 const digestState = {
@@ -1438,6 +1458,24 @@ function setStreamStatus(kind, label) {
   elements.streamStatusLabel.textContent = label;
 }
 
+// Держит «Запустить эфир»/«Остановить» в согласии с реальным состоянием
+// эфира — раньше обе кнопки были кликабельны и одинаково подсвечены (у
+// «Остановить» стабильный красный контур .btn--danger) независимо от того,
+// идёт эфир или нет, из-за чего «Остановить» выглядела «включённой» ещё до
+// старта. Зеркалит существующий паттерн elements.stopButton.disabled = next
+// === "idle" для основных кнопок сессии (см. applyLifecycle).
+function applyStreamButtonsFromLiveState() {
+  const isLive = state.streamLive === true;
+  const isOffline = state.streamLive === false;
+  elements.streamStartButton.disabled = isLive;
+  elements.streamStopButton.disabled = isOffline;
+}
+
+function setStreamLive(isLive) {
+  state.streamLive = isLive;
+  applyStreamButtonsFromLiveState();
+}
+
 // После скольких подряд циклов «не в эфире»/ошибки проверка сама
 // останавливается — чтобы не долбить MediaMTX (и не спамить WARN
 // status_poll_failed на сервере), когда стрим намеренно выключен.
@@ -1455,12 +1493,16 @@ async function pollStreamStatus() {
     if (!payload.configured) return "unconfigured";
     if (payload.error) {
       setStreamStatus("err", `Ошибка связи с сервером: ${payload.error}`);
+      // Связь не удалась — не знаем, идёт ли эфир на самом деле; не гадаем
+      // и оставляем обе кнопки как есть, а не блокируем по догадке.
       return "error";
     } else if (payload.live) {
       setStreamStatus("live", `В эфире · ${payload.readers ?? 0} зрителей`);
+      setStreamLive(true);
       return "live";
     } else {
       setStreamStatus("warn", "Стрим не запущен");
+      setStreamLive(false);
       return "offline";
     }
   } catch (error) {
@@ -1537,9 +1579,61 @@ function renderStreamChecklist(steps, pendingLabel) {
   box.hidden = steps.length === 0 && !pendingLabel;
 }
 
+// Во время запроса блокируем ОБЕ кнопки (нельзя жать «Старт»/«Стоп» второй
+// раз, пока первый вызов ещё выполняется); по завершении возвращаем
+// disabled-состояние, соответствующее последнему известному streamLive,
+// а не снимаем блокировку с обеих сразу.
 function setStreamButtonsBusy(busy) {
-  elements.streamStartButton.disabled = busy;
-  elements.streamStopButton.disabled = busy;
+  if (busy) {
+    elements.streamStartButton.disabled = true;
+    elements.streamStopButton.disabled = true;
+  } else {
+    applyStreamButtonsFromLiveState();
+  }
+}
+
+// Как askCacheChoice — неблокирующий inline-баннер вместо window.confirm.
+// В отличие от askCacheChoice, выбор нигде не запоминается: оператора
+// нужно спрашивать при каждом «Запустить эфир», иначе случайный «упавший
+// OBS → перезапуск того же эфира» молча стёр бы текущий чат.
+function askChatSessionChoice() {
+  const banner = document.getElementById("chatSessionBanner");
+  const newBtn = document.getElementById("chatSessionNewButton");
+  const continueBtn = document.getElementById("chatSessionContinueButton");
+  if (!banner || !newBtn || !continueBtn) {
+    return Promise.resolve("continue");
+  }
+
+  return new Promise((resolve) => {
+    banner.hidden = false;
+    const finish = (choice) => {
+      banner.hidden = true;
+      newBtn.removeEventListener("click", onNew);
+      continueBtn.removeEventListener("click", onContinue);
+      resolve(choice);
+    };
+    const onNew = () => finish("new");
+    const onContinue = () => finish("continue");
+    newBtn.addEventListener("click", onNew);
+    continueBtn.addEventListener("click", onContinue);
+  });
+}
+
+// Спрашивает про сессию чата (только если чат вообще настроен), затем
+// запускает реальный эфир. Сбой POST /api/chat/session — best-effort,
+// не должен блокировать сам эфир.
+async function handleStreamStartClick() {
+  if (state.chatConfigured) {
+    const choice = await askChatSessionChoice();
+    if (choice === "new") {
+      try {
+        await fetch("/api/chat/session", { method: "POST" });
+      } catch (error) {
+        handleError(error, "Не удалось начать новую сессию чата — эфир всё равно запускается");
+      }
+    }
+  }
+  await startBroadcastFromUi();
 }
 
 async function startBroadcastFromUi() {
@@ -1554,13 +1648,16 @@ async function startBroadcastFromUi() {
     const result = await response.json();
     renderStreamChecklist(result.steps || []);
     if (result.ok) {
+      setStreamLive(true);
       startStreamPolling();
     } else {
       setStreamStatus("err", "запуск не удался — см. шаги ниже");
+      setStreamLive(false);
     }
   } catch (error) {
     renderStreamChecklist([{ label: "Запуск эфира", status: "fail", detail: error?.message || String(error) }]);
     setStreamStatus("err", "запуск не удался");
+    setStreamLive(false);
   } finally {
     setStreamButtonsBusy(false);
   }
@@ -1574,8 +1671,13 @@ async function stopBroadcastFromUi() {
     renderStreamChecklist(result.steps || []);
     stopStreamPolling();
     setStreamStatus(result.ok ? "warn" : "err", result.ok ? "эфир остановлен" : "не удалось остановить — см. шаги ниже");
+    // Провал stop не значит «уже не идёт» — скорее всего эфир так и остался
+    // живым; держим «Остановить» доступной для повтора, а не открываем
+    // заново «Запустить эфир» поверх ещё работающей трансляции.
+    setStreamLive(!result.ok);
   } catch (error) {
     setStreamStatus("err", `Ошибка: ${error?.message || String(error)}`);
+    setStreamLive(true);
   } finally {
     setStreamButtonsBusy(false);
   }
@@ -1601,16 +1703,133 @@ async function initStreamPanel() {
       // path — see server/http-server.js's obsStreamKey comment.
       elements.streamKey.value = payload.obsStreamKey || "";
     }
-    elements.streamPanel.hidden = false;
+    state.streamConfigured = true;
+    applyEfirMode(state.efirMode);
     setStreamStatus("", "нажмите «Запустить эфир»");
+    // По умолчанию считаем «не в эфире» (так и выглядит на свежей загрузке),
+    // «Остановить» неактивна, пока не подтверждено обратное — чинит баг, где
+    // обе кнопки были одинаково кликабельны независимо от факта эфира.
+    setStreamLive(false);
     elements.streamCheckButton.hidden = false;
     elements.streamCheckButton.addEventListener("click", toggleStreamPolling);
     elements.streamStartButton.hidden = false;
-    elements.streamStartButton.addEventListener("click", startBroadcastFromUi);
+    elements.streamStartButton.addEventListener("click", handleStreamStartClick);
     elements.streamStopButton.hidden = false;
     elements.streamStopButton.addEventListener("click", stopBroadcastFromUi);
+    // Один разовый (не циклический — см. 2026-07-03 про спам WARN) опрос:
+    // если оператор обновил страницу посреди уже идущего эфира, кнопки и
+    // статус сразу должны отражать реальное состояние, а не «не в эфире».
+    void pollStreamStatus();
   } catch (error) {
     handleError(error, "Не удалось загрузить настройки стрима");
+  }
+}
+
+// --- Панель «Чат зрителей» (dashboard) ---
+// Независима от WS-сессии распознавания речи (та открывается только по
+// «Старт») — читает публичную ленту /efir/-чата тем же HTTP-опросом, что и
+// стрим-статус, поэтому работает сразу после открытия дашборда, даже если
+// оператор ещё не начал голосовую сессию.
+
+const CHAT_POLL_MS = 3000;
+
+function renderChatMessage(msg) {
+  if (msg.kind === "session") {
+    const divider = document.createElement("div");
+    divider.className = "chat-msg chat-msg--session";
+    divider.textContent = `— ${msg.text} —`;
+    return divider;
+  }
+  const row = document.createElement("div");
+  row.className = `chat-msg${msg.kind === "service" ? " chat-msg--service" : ""}`;
+  const author = document.createElement("span");
+  author.className = "author";
+  author.textContent = msg.name;
+  const body = document.createElement("span");
+  body.textContent = msg.text;
+  row.append(author, body);
+  return row;
+}
+
+function appendChatMessages(items) {
+  if (!items.length) return;
+  elements.chatLogEmpty.hidden = true;
+  // Не дёргаем скролл, если оператор читает историю выше конца ленты.
+  const pinned = elements.chatLog.scrollHeight - elements.chatLog.scrollTop - elements.chatLog.clientHeight < 60;
+  for (const item of items) {
+    elements.chatLog.appendChild(renderChatMessage(item));
+  }
+  if (pinned) elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+  while (elements.chatLog.children.length > 300) {
+    elements.chatLog.removeChild(elements.chatLog.firstChild);
+  }
+  state.chatMsgCount += items.length;
+  elements.chatMsgCount.textContent = `· ${state.chatMsgCount}`;
+}
+
+async function pollChatMessages() {
+  if (state.chatPolling) return;
+  state.chatPolling = true;
+  try {
+    const response = await fetch(`/api/chat/messages?after=${state.chatLastSeq}`);
+    const payload = await response.json();
+    if (!payload.configured) return;
+    appendChatMessages(payload.messages || []);
+    if (typeof payload.latestSeq === "number") {
+      state.chatLastSeq = Math.max(state.chatLastSeq, payload.latestSeq);
+    }
+  } catch {
+    // Тихий ретрай следующим тиком — тот же best-effort подход, что у
+    // pollStreamStatus/efir-страницы; не хотим спамить оператора на каждый
+    // сетевой сбой опроса, отдельного статуса для чата и так нет.
+  } finally {
+    state.chatPolling = false;
+  }
+}
+
+async function sendChatOperatorMessage(event) {
+  event.preventDefault();
+  const text = elements.chatOperatorInput.value.trim();
+  if (!text) return;
+  elements.chatOperatorSend.disabled = true;
+  try {
+    const response = await fetch("/api/chat/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    elements.chatOperatorInput.value = "";
+    // Сразу подтягиваем свежую ленту — увидим собственное сообщение (сервер
+    // публикует его в chat-service под именем «Янтарь») без ожидания
+    // следующего 3с тика.
+    void pollChatMessages();
+  } catch (error) {
+    handleError(error, "Не удалось отправить сообщение в чат");
+  } finally {
+    elements.chatOperatorSend.disabled = false;
+  }
+}
+
+async function initChatPanel() {
+  try {
+    const response = await fetch("/api/chat/messages?after=0");
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (!payload.configured) return;
+
+    state.chatConfigured = true;
+    applyEfirMode(state.efirMode);
+    appendChatMessages(payload.messages || []);
+    if (typeof payload.latestSeq === "number") state.chatLastSeq = payload.latestSeq;
+
+    elements.chatOperatorForm.addEventListener("submit", sendChatOperatorMessage);
+    state.chatPollTimer = window.setInterval(pollChatMessages, CHAT_POLL_MS);
+  } catch (error) {
+    handleError(error, "Не удалось загрузить чат зрителей");
   }
 }
 
@@ -1749,6 +1968,26 @@ elements.sendLogsDownload.addEventListener("click", async () => {
 
 const vkLiveUrlWrap = document.getElementById("vkLiveUrlWrap");
 const vkUrlStatus = document.getElementById("vkUrlStatus");
+
+// Переключатель режима эфира («ВК» / «Свой эфир»): решает, только видимость
+// каких панелей показывать. Опрос VK-комментариев и viewer-чата на бэкенде
+// продолжает идти в обоих режимах — см. knowledge/wiki/stream-integration.md.
+function applyEfirMode(mode) {
+  state.efirMode = mode;
+  localStorage.setItem("efirMode", mode);
+  document.querySelectorAll("#efirModeToggle .mode-toggle__btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+  vkLiveUrlWrap.hidden = mode !== "vk";
+  elements.streamPanel.hidden = !(mode === "own" && state.streamConfigured);
+  elements.chatPanel.hidden = !(mode === "own" && state.chatConfigured);
+}
+
+document.querySelectorAll("#efirModeToggle .mode-toggle__btn").forEach((btn) => {
+  btn.addEventListener("click", () => applyEfirMode(btn.dataset.mode));
+});
+
+applyEfirMode(localStorage.getItem("efirMode") || "vk");
 
 function setVkUrlStatus(level, text) {
   if (!vkUrlStatus) return;
@@ -2075,7 +2314,6 @@ elements.vkLiveUrlInput.addEventListener("input", () => {
 const savedVkUrl = localStorage.getItem("vkLiveVideoUrl");
 if (savedVkUrl) {
   elements.vkLiveUrlInput.value = savedVkUrl;
-  vkLiveUrlWrap.hidden = false;
   validateVkUrl(savedVkUrl);
 }
 
@@ -2084,6 +2322,7 @@ setSessionPill("", "Idle");
 renderSafeMode();
 fetchSafeModeInitial();
 initStreamPanel();
+initChatPanel();
 
 navigator.mediaDevices.addEventListener("devicechange", loadInputDevices);
 loadInputDevices();
