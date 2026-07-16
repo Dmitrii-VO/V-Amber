@@ -1,0 +1,33 @@
+name: CI
+
+# Единственный источник тестового сигнала: PR-ы получают проверку, а деплой
+# вызывает этот же воркфлоу через workflow_call и не раскатывает прод, пока
+# тесты не прошли (см. deploy-stream.yml).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22, а не 20 из Dockerfile приложения: скрипт `npm test` зовёт
+      # `node --test "test/**/*.test.js"`, а glob-паттерны тест-раннер
+      # понимает только с Node 21+ — на 20 команда не отработает вовсе.
+      # Расхождение (прод на 20, тесты на 22) осознанное и разбирается
+      # отдельно, см. knowledge/wiki/log.md за 2026-07-16.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+      - run: npm test

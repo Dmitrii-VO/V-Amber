@@ -33,6 +33,19 @@ macOS launchers are documented in
   [voice-price-parsing](knowledge/wiki/voice-price-parsing.md),
   `server/article-extractor.js`, `server/price-detector.js`, and
   `server/discount-detector.js`.
+- Deploy order, and what auto-deploys vs what does not:
+  1. `main` push touching `deploy/stream-viewer/**` or `deploy/chat-service/**`
+     runs `ci.yml` (tests) → only then rsync to the cloud host + restart +
+     health check. Tests gate the deploy; a red test suite stops it.
+  2. **The V-Amber app itself never auto-deploys** — it reaches the operator's
+     Mac only via release + a manual update.
+  3. **`deploy/ci/ci-deploy-dispatch.sh` is installed by hand, not by CI**, and
+     `deploy/ci/**` is deliberately outside the workflow's `paths:` filter.
+     Editing it in the repo changes nothing on the host until it is reinstalled
+     (`setup-cloud-deploy-user.sh`, or a single `install` for just that file).
+     Repo and host can silently drift — compare hashes before assuming.
+  Details in [stream-integration](knowledge/wiki/stream-integration.md); the
+  log entries for 2026-07-16 record both ways this deploy has already broken.
 - Every push to `main` triggers the Auto Release workflow
   (`.github/workflows/release.yml`), which auto-bumps the patch version and
   pushes a `chore: bump version to X.Y.Z [skip ci]` commit from
