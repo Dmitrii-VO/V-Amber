@@ -18,20 +18,27 @@ gate and the PR check are the same signal. Tests run twice on a `main` push that
 touches the deploy paths (once standalone, once via the caller); ~40s, accepted
 in exchange for prod never outrunning a red suite.
 
-**Node version discrepancy, found while picking one for CI and left unresolved:**
+**Node version discrepancy, found while picking one for CI — resolved by
+bumping the image (2026-07-16, same day).**
 
-| Where | Node |
-|---|---|
-| app `Dockerfile` | 20 |
-| `deploy/chat-service/docker-compose.yml` | 22 |
-| CI (chosen here) | 22 |
+The app `Dockerfile` was on `node:20-bookworm-slim` while `deploy/chat-service`,
+`release.yml` and the new CI were all on 22. That mattered because `npm test` is
+`node --test "test/**/*.test.js"` and the test runner only understands **glob
+patterns from Node 21+** — the suite *could not run at all* on the Node 20 the
+app shipped on, so the code had never once been tested against its own
+production version.
 
-`npm test` is `node --test "test/**/*.test.js"`, and the test runner only
-understands **glob patterns from Node 21+** — so the suite *cannot run at all*
-on the Node 20 the app ships on. CI therefore tests on 22 while the app runs on
-20: the tests have never once executed against the version in production. Not
-fixed here (it needs a decision — bump the image, or drop the glob and pass a
-directory); flagged so it isn't rediscovered by accident.
+Resolved by bumping the Dockerfile to `node:22-bookworm-slim` (user's call
+between that and dropping the glob). Node is now 22 in every pin: Dockerfile,
+CI, `release.yml`, chat-service. Low risk to bump — there are no native
+dependencies (`@grpc/grpc-js`, `ws`, `dotenv` are pure JS) and no
+devDependencies at all.
+
+Worth knowing: **nothing verified the image build**, so a broken Dockerfile
+would have surfaced only at the operator's `docker compose up`. CI now has a
+separate `docker` job that builds the image and smoke-loads the deps inside it
+on that Node — kept separate from `test` so a build break doesn't read as a test
+break.
 
 ## [2026-07-16] fix | CI deploy failed on first real run — rrsync anchors client paths
 

@@ -25,11 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node 22, а не 20 из Dockerfile приложения: скрипт `npm test` зовёт
-      # `node --test "test/**/*.test.js"`, а glob-паттерны тест-раннер
-      # понимает только с Node 21+ — на 20 команда не отработает вовсе.
-      # Расхождение (прод на 20, тесты на 22) осознанное и разбирается
-      # отдельно, см. knowledge/wiki/log.md за 2026-07-16.
+      # 22 — та же версия, что в Dockerfile приложения, в release.yml и в
+      # deploy/chat-service. Раньше приложение ехало на 20, а тесты на 20 не
+      # запускались вовсе (glob в `node --test` только с 21+), так что код
+      # никогда не проверялся на своей прод-версии.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -37,3 +36,22 @@ jobs:
 
       - run: npm ci
       - run: npm test
+
+  # Сборку образа не проверяло вообще ничто: Dockerfile ломался бы молча и
+  # обнаруживался только при docker compose up у оператора. Отдельный job,
+  # чтобы падение сборки не выглядело как падение тестов.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app image
+        run: docker build -t v-amber:ci .
+      # Дым: образ должен хотя бы стартовать интерпретатор и подтянуть
+      # зависимости на этой версии Node — без этого «сборка прошла» ещё не
+      # значит, что приложение на 22 живое.
+      - name: Smoke — deps load on this Node
+        run: |
+          docker run --rm v-amber:ci node -e "
+            require('ws'); require('@grpc/grpc-js'); require('dotenv');
+            console.log('node', process.version, '— deps ok');
+          "

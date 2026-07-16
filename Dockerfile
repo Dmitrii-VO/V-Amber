@@ -1,4 +1,9 @@
-FROM node:20-bookworm-slim
+# 22, а не 20: `npm test` это `node --test "test/**/*.test.js"`, а glob-паттерны
+# тест-раннер понимает только с Node 21+ — на 20 набор тестов не запускался
+# вовсе, то есть код никогда не проверялся на той версии, на которой ехал в
+# прод. Теперь версия одна везде: здесь, в CI, в release.yml и в
+# deploy/chat-service. См. knowledge/wiki/log.md за 2026-07-16.
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
