@@ -3,6 +3,38 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-16] fix | CI deploy failed on first real run — rrsync anchors client paths
+
+PR #8 merged; `Auto Release` succeeded, `Deploy stream viewer + chat service`
+failed in 12s on its very first step. **Production was untouched** — the run
+died on the stream-viewer rsync, before chat-service was copied or restarted,
+so the box stayed on the previous code and kept serving (`/chat/health` and
+`/efir/` both 200). No partial deploy.
+
+Cause: `rrsync` chdirs into its restricted dir and **anchors** a client path
+inside it — `if arg.startswith('/'): arg = args.dir + arg` (see
+`/usr/bin/rrsync`, `validated_arg`). The workflow sent the real absolute
+destination, so `/var/www/stream-viewer/` became
+`/var/www/stream-viewer/var/www/stream-viewer` →
+`mkdir failed: No such file or directory`. rrsync wants `.` or a path relative
+to its root.
+
+Sending `.` straight from the workflow doesn't work either: both targets would
+then look identical in `SSH_ORIGINAL_COMMAND` and the dispatch `case` could not
+tell them apart. Fix keeps the absolute path in the workflow (it documents where
+the deploy goes) and has `ci-deploy-dispatch.sh` strip it and substitute `.`
+before exec'ing rrsync — rrsync reads the command from `SSH_ORIGINAL_COMMAND`,
+so rewriting the env var is enough. **The rrsync root stays narrow** (that one
+directory, not `/var/www` or `/srv`) — widening it was the tempting shortcut and
+is not acceptable with pay-service on the same host.
+
+Lesson: the pre-merge check verified every *precondition* (user, paths, groups,
+forced command, script hash byte-identical) and all of them passed — but nothing
+ever exercised the deploy path itself, and the bug lived exactly there. Verified
+installation ≠ verified execution. The dispatch rewrite is now covered by a
+local stub test (both targets rewritten correctly; `restart-chat; cat
+/etc/shadow`, arbitrary paths and arbitrary commands still rejected).
+
 ## [2026-07-16] fix | chat cursor lost every message past PUBLIC_PAGE_SIZE
 
 Review of the own-эфир branch before merge found two bugs in the public
