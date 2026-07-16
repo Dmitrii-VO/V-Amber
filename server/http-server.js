@@ -524,10 +524,14 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         return;
       }
       if (request.method === "GET") {
+        // Отсутствующий after прокидываем как null, а не как 0: без него
+        // chat-service отдаёт последние 50 сообщений (нужная стартовая
+        // выдача для панели), тогда как after=0 вернул бы САМЫЕ СТАРЫЕ
+        // PUBLIC_PAGE_SIZE сообщений сессии.
         const afterParam = urlObject.searchParams.get("after");
-        const after = afterParam === null ? 0 : Number(afterParam);
+        const after = afterParam === null ? null : Number(afterParam);
         try {
-          const result = await chatClient.fetchMessages(Number.isFinite(after) ? after : 0);
+          const result = await chatClient.fetchMessages(Number.isFinite(after) ? after : null);
           jsonResponse(response, 200, { configured: true, ...result });
         } catch (error) {
           jsonResponse(response, 200, {
