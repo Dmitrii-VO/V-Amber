@@ -470,6 +470,50 @@ the stream-side pieces:
 This is preview-only and read-only against the stream — it does not change the
 broadcast pipeline, VK/MoySklad flow, or the one-button orchestration.
 
+## Dual-stream: mirror the эфир to VK (2026-07-22)
+
+Roman's request #1 — broadcast to VK **and** the own platform at once. Order
+intake from both sources already runs in parallel (the VK poller and chat poller
+are both always on); this adds the **video** to VK too.
+
+**Mechanism: a V-Amber-managed local ffmpeg relay** (`server/stream-relay.js`).
+`ffmpeg -i <MediaMTX RTMP> -c copy -f flv <VK RTMP+key>` reads the own stream
+back from MediaMTX and pushes it to VK Live, `-c copy` (no re-encode, minimal
+CPU). Chosen over an OBS multi-RTMP plugin (not controllable via obs-websocket)
+and a cloud-side restream (deploy-gated, touches the prod host).
+
+- **Topology / why it's safe**: the own stream stays **direct** (OBS→MediaMTX,
+  unchanged and orchestrated as before). The relay is a **secondary, best-effort**
+  channel — if ffmpeg dies it self-restarts a bounded number of times
+  (`relayRestartMax`, default 5) and **never affects the own stream**. Roman
+  moved off VK Live precisely for reliability, so VK must not be able to
+  jeopardise the own эфир.
+- **Bandwidth trade-off**: the relay pulls from cloud MediaMTX and pushes to VK,
+  so the operator's uplink carries the stream twice (to MediaMTX + to VK). For a
+  single shopping эфир at a moderate bitrate that's acceptable; documented here
+  so it isn't a surprise.
+- **Orchestration** (`server/stream-orchestrator.js`): after MediaMTX confirms
+  the own stream is live, `startVkRelayStep` starts the relay and adds a
+  «Дубль в ВК» step to the `{ok, steps}` result (informational — a relay failure
+  never flips the broadcast to `ok:false`). `stopBroadcast` stops the relay
+  first, unconditionally and idempotently.
+- **Config** (`config.stream`, all optional — no `vkTargetUrl` ⇒ dual-stream
+  off): `STREAM_VK_TARGET_URL` (full VK push URL) **or** `STREAM_VK_RTMP_URL` +
+  `STREAM_VK_KEY` (server + key from VK «Трансляции», combined as
+  `server/key`); `STREAM_RELAY_SOURCE_URL` (defaults to
+  `STREAM_RTMP_URL/​<pathName>` — MediaMTX allows anonymous read on `live`);
+  `STREAM_FFMPEG_PATH` (default `ffmpeg`); `STREAM_RELAY_RESTART_MAX/DELAY_MS`.
+- **Status**: `GET /api/stream/status` now includes `relay: {configured, state
+  (idle|running|error), restarts, lastError}`; the dashboard stream panel shows a
+  «Дубль в ВК: активен/не запущен/ошибка» line (`#streamRelayLine`).
+- **Operator prerequisites (manual, one-time per эфир)**: ffmpeg installed on the
+  Mac; a VK Live broadcast created in VK «Трансляции» to get its RTMP server +
+  key (VK's live-create isn't automated); paste those into the config. The VK
+  live **video URL** for comment polling is the existing `VK_LIVE_VIDEO_URL`.
+- **Tests**: `test/stream-relay.test.js` (command build, bounded restart on
+  unexpected exit, stop kills + blocks restart, not-configured/​spawn-fail
+  guards) — with a fake `spawn`, so no real ffmpeg/VK push runs.
+
 ## Deliberately out of scope
 
 - Installing OBS automatically — a `fail` step links the operator to

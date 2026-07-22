@@ -139,6 +139,8 @@ const elements = {
   streamStartButton: $("streamStartButton"),
   streamStopButton: $("streamStopButton"),
   streamChecklist: $("streamChecklist"),
+  streamRelayLine: $("streamRelayLine"),
+  streamRelayState: $("streamRelayState"),
 
   chatPanel: $("chatPanel"),
   chatMsgCount: $("chatMsgCount"),
@@ -1609,6 +1611,7 @@ async function pollStreamStatus() {
   try {
     const response = await fetch("/api/stream/status");
     const payload = await response.json();
+    renderRelayStatus(payload.relay);
     if (!payload.configured) return "unconfigured";
     if (payload.error) {
       setStreamStatus("err", `Ошибка связи с сервером: ${payload.error}`);
@@ -1630,6 +1633,25 @@ async function pollStreamStatus() {
   } finally {
     state.streamStatusPolling = false;
   }
+}
+
+// Индикатор дубля эфира в ВК (ffmpeg-релей MediaMTX→ВК). Скрыт, если дубль
+// не настроен (нет STREAM_VK_*). См. server/stream-relay.js.
+function renderRelayStatus(relay) {
+  if (!elements.streamRelayLine) return;
+  if (!relay || !relay.configured) {
+    elements.streamRelayLine.hidden = true;
+    return;
+  }
+  elements.streamRelayLine.hidden = false;
+  const map = {
+    running: { text: "активен", cls: "ok" },
+    idle: { text: "не запущен", cls: "warn" },
+    error: { text: `ошибка${relay.restarts ? ` (перезапусков: ${relay.restarts})` : ""}`, cls: "err" },
+  };
+  const view = map[relay.state] || { text: relay.state || "—", cls: "warn" };
+  elements.streamRelayState.textContent = view.text;
+  elements.streamRelayState.className = `stream-relay-state ${view.cls}`;
 }
 
 function stopStreamPolling() {

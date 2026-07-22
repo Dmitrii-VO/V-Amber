@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { getStreamStatus } from "./stream-status.js";
 import { getObsState, configureObsStream, startObsStream, stopObsStream } from "./obs-client.js";
+import { startRelay, stopRelay, isRelayConfigured } from "./stream-relay.js";
 
 // Оркестрация запуска эфира «одной кнопкой»: пошаговый preflight с
 // автопочинкой (прописать настройки OBS, запустить OBS), затем старт
@@ -175,6 +176,24 @@ export async function preflightBroadcast({ fix = true } = {}) {
   return { ok: true, steps, obsStreaming: obs.streaming, mediamtxLive: Boolean(mtx.live) };
 }
 
+// Дубль эфира в ВК (best-effort): после того как свой поток пошёл, поднимаем
+// ffmpeg-релей MediaMTX→ВК. Никогда не роняет запуск своего эфира — при
+// проблеме добавляет шаг «fail», но overall остаётся ok. Когда VK не настроен
+// (нет STREAM_VK_*), шаг не добавляется вовсе.
+function startVkRelayStep(steps) {
+  if (!isRelayConfigured()) return;
+  const result = startRelay();
+  if (result.ok) {
+    steps.push(step("vk_relay", "Дубль в ВК", "ok",
+      result.already ? "дубль в ВК уже идёт" : "поток дублируется в ВК Live"));
+  } else {
+    steps.push(step("vk_relay", "Дубль в ВК", "fail",
+      result.message || result.code || "не удалось запустить дубль",
+      "Проверьте ffmpeg (STREAM_FFMPEG_PATH) и RTMP-ключ ВК (STREAM_VK_*). "
+      + "Свой эфир при этом идёт нормально."));
+  }
+}
+
 // Полный запуск: preflight с автопочинкой → StartStream в OBS → ждём,
 // пока MediaMTX подтвердит приём потока (ready:true).
 export async function startBroadcast() {
@@ -184,6 +203,7 @@ export async function startBroadcast() {
 
     if (pre.obsStreaming && pre.mediamtxLive) {
       pre.steps.push(step("publish", "Публикация потока", "ok", "эфир уже идёт"));
+      startVkRelayStep(pre.steps);
       return { ok: true, steps: pre.steps, live: true };
     }
 
@@ -205,6 +225,7 @@ export async function startBroadcast() {
       const status = await getStreamStatus();
       if (status.live) {
         pre.steps.push(step("publish", "Публикация потока", "ok", "MediaMTX принимает поток"));
+        startVkRelayStep(pre.steps);
         logger.info("stream", "broadcast_started", {});
         return { ok: true, steps: pre.steps, live: true };
       }
@@ -222,19 +243,26 @@ export async function startBroadcast() {
 
 // Остановка: гасим публикацию в OBS. MediaMTX сам увидит разрыв потока.
 export async function stopBroadcast() {
+  // Гасим дубль в ВК всегда и первым делом: релей не должен продолжать
+  // качать/лить поток после того, как оператор остановил эфир. Идемпотентно.
+  const relayWasConfigured = isRelayConfigured();
+  stopRelay();
+  const relaySteps = relayWasConfigured
+    ? [step("vk_relay", "Дубль в ВК", "ok", "дубль в ВК остановлен")]
+    : [];
   try {
     try {
       const obs = await getObsState();
       if (!obs.streaming) {
-        return { ok: true, steps: [step("publish", "Публикация потока", "ok", "эфир уже остановлен")] };
+        return { ok: true, steps: [step("publish", "Публикация потока", "ok", "эфир уже остановлен"), ...relaySteps] };
       }
     } catch {
       // OBS недоступен — значит и вещать он не может; считаем остановленным.
-      return { ok: true, steps: [step("publish", "Публикация потока", "ok", "OBS не запущен — эфир не идёт")] };
+      return { ok: true, steps: [step("publish", "Публикация потока", "ok", "OBS не запущен — эфир не идёт"), ...relaySteps] };
     }
     await stopObsStream();
     logger.info("stream", "broadcast_stopped", {});
-    return { ok: true, steps: [step("publish", "Публикация потока", "ok", "трансляция остановлена")] };
+    return { ok: true, steps: [step("publish", "Публикация потока", "ok", "трансляция остановлена"), ...relaySteps] };
   } catch (error) {
     logger.error("stream", "broadcast_stop_failed", { error: error?.message || String(error) });
     return {

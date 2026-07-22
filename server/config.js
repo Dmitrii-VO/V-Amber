@@ -139,6 +139,35 @@ export const config = {
       try { return new URL(raw).origin; } catch { return ""; }
     })(),
     statusTimeoutMs: parseIntEnv(process.env.STREAM_STATUS_TIMEOUT_MS, 3000),
+    // --- Дубль эфира в ВК (ffmpeg-релей MediaMTX → ВК) ---
+    // Топология: OBS → MediaMTX (свой поток, без изменений), а V-Amber
+    // локально запускает ffmpeg, который читает свой поток из MediaMTX и
+    // пушит его в ВК Live. Так основной поток остаётся прямым и надёжным, а
+    // ВК — вторичный best-effort: падение релея не задевает свой эфир.
+    // См. server/stream-relay.js и knowledge/wiki/stream-integration.md.
+    ffmpegPath: process.env.STREAM_FFMPEG_PATH?.trim() || "ffmpeg",
+    // Полный push-URL ВК Live (сервер + ключ из «Трансляции» в ВК). Пустой =
+    // дубль в ВК выключен. Можно задать целиком (STREAM_VK_TARGET_URL) или
+    // раздельно сервером+ключом (STREAM_VK_RTMP_URL + STREAM_VK_KEY).
+    vkTargetUrl: (() => {
+      const full = process.env.STREAM_VK_TARGET_URL?.trim();
+      if (full) return full;
+      const server = process.env.STREAM_VK_RTMP_URL?.trim();
+      const key = process.env.STREAM_VK_KEY?.trim();
+      return server && key ? `${server.replace(/\/+$/, "")}/${key}` : "";
+    })(),
+    // Источник релея — RTMP-чтение своего потока из MediaMTX. По умолчанию
+    // выводим из STREAM_RTMP_URL (bare-сервер) + путь (MediaMTX разрешает
+    // анонимное чтение пути live). Переопределяется STREAM_RELAY_SOURCE_URL.
+    relaySourceUrl: (() => {
+      const explicit = process.env.STREAM_RELAY_SOURCE_URL?.trim();
+      if (explicit) return explicit;
+      const bare = process.env.STREAM_RTMP_URL?.trim();
+      const path = process.env.STREAM_PATH_NAME?.trim() || "live";
+      return bare ? `${bare.replace(/\/+$/, "")}/${path}` : "";
+    })(),
+    relayRestartMax: parseIntEnv(process.env.STREAM_RELAY_RESTART_MAX, 5),
+    relayRestartDelayMs: parseIntEnv(process.env.STREAM_RELAY_RESTART_DELAY_MS, 3000),
   },
   // Чат зрителей на странице /efir/ (deploy/chat-service на cloud).
   // Опционально: без STREAM_CHAT_URL чат-поллер не запускается, брони
