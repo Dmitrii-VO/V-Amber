@@ -873,6 +873,81 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
       return jsonResponse(response, 200, { ok: true, count: blockedViewersStore.size() });
     }
 
+    // -------------------- Реальный ВК-бан / удаление комментария --------------------
+    //
+    // Слой поверх мягкой блокировки: groups.ban (бан из сообщества эфира) и
+    // video.deleteComment (удаление коммента из эфира), оба под user-токеном —
+    // см. server/vk.js banViewer/deleteVideoComment и knowledge/wiki/vk-comments.md.
+    // Это запись в VK, поэтому в safe mode блокируем, как и остальные VK-записи.
+    // VK-порог реального id: чат-зрители (id ≥ 9e9) в VK не банятся.
+    const VK_MAX_REAL_ID = 2 ** 31;
+
+    if (pathname === "/api/viewers/ban" && request.method === "POST") {
+      let body;
+      try { body = await readJsonBody(request, 4096); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const viewerId = String(body.viewerId ?? "").trim();
+      if (!viewerId) return jsonResponse(response, 400, { error: "viewerId_required" });
+      if (isSafeMode()) {
+        return jsonResponse(response, 200, { ok: false, status: "safe_mode_blocked", message: "Safe mode: VK-бан заблокирован" });
+      }
+
+      const numericId = Number(viewerId);
+      const isVkViewer = Number.isInteger(numericId) && numericId > 0 && numericId < VK_MAX_REAL_ID;
+      const reason = String(body.reason || "").slice(0, 200);
+
+      // Сначала реальный VK-бан (если это VK-зритель), затем — при наличии —
+      // удаление его комментария из эфира. Обе операции best-effort и
+      // возвращают структурированный результат, а не бросают.
+      let ban = { ok: false, code: "chat_viewer_no_vk_ban", message: "Зритель чата — бан в ВК неприменим" };
+      if (isVkViewer) {
+        ban = await vk.banViewer({ userId: numericId, comment: reason });
+      }
+      let deleted = null;
+      const commentId = body.commentId != null ? String(body.commentId).trim() : "";
+      if (commentId && isVkViewer) {
+        deleted = await vk.deleteVideoComment({ commentId });
+      }
+
+      // Локальная мягкая блокировка ставится ВСЕГДА — даже если VK-бан не
+      // прошёл (не сообщество / API-ошибка / чат-зритель), спамер всё равно
+      // перестаёт обрабатываться. blockedBy помечает, был ли реальный ВК-бан.
+      let entry = null;
+      if (blockedViewersStore) {
+        entry = blockedViewersStore.block(viewerId, {
+          name: body.viewerName || body.name || "",
+          reason: reason || (ban.ok ? "спам (бан в ВК)" : "спам"),
+          blockedBy: ban.ok ? "vk_ban" : "operator",
+        });
+      }
+      logger.info("http", "viewer_ban_requested", {
+        viewerId, isVkViewer, banOk: ban.ok, banCode: ban.code || null,
+        deletedOk: deleted?.ok ?? null,
+      });
+      diag("viewer_ban_requested", { viewerId, banOk: ban.ok, deletedOk: deleted?.ok ?? null });
+      return jsonResponse(response, 200, {
+        ok: ban.ok || Boolean(entry),
+        ban, deleted, entry, count: blockedViewersStore?.size?.() ?? 0,
+      });
+    }
+
+    if (pathname === "/api/comments/delete" && request.method === "POST") {
+      let body;
+      try { body = await readJsonBody(request, 4096); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const commentId = String(body.commentId ?? "").trim();
+      if (!commentId) return jsonResponse(response, 400, { error: "commentId_required" });
+      if (isSafeMode()) {
+        return jsonResponse(response, 200, { ok: false, status: "safe_mode_blocked", message: "Safe mode: удаление в ВК заблокировано" });
+      }
+      const result = await vk.deleteVideoComment({ commentId });
+      logger.info("http", "comment_delete_requested", { commentId, ok: result.ok, code: result.code || null });
+      diag("comment_delete_requested", { commentId, ok: result.ok });
+      return jsonResponse(response, 200, result);
+    }
+
     // -------------------- Wish list --------------------
 
     if (pathname === "/api/wishlist/count") {

@@ -48,6 +48,26 @@ Service comments therefore post from the user-token account's identity, not the
 community page — posting video comments "as the community" is not possible via
 the VK API. Full rationale and regression history in [[vk-comments]].
 
+## Moderation
+
+`server/vk.js` exposes two operator-driven moderation calls, both under the
+**user token** (`videoToken`), routed through the high-priority queue lane:
+
+- `banViewer({ userId, reason, comment })` → `groups.ban`. Bans the spammer
+  from the эфир's community. The эфир video is community-owned (`liveOwnerId`
+  negative), so the group id is `-liveOwnerId`; guarded to reject a non-community
+  эфир (`owner_id ≥ 0` → `not_community`). Works because the user-token account
+  administers the community — the `VK_GROUP_TOKEN` belongs to a *different*
+  community and cannot ban here. Ban is community-wide, reversible via
+  `groups.unban`.
+- `deleteVideoComment({ commentId })` → `video.deleteComment` on `liveOwnerId`.
+  Removes the comment from the эфир.
+
+Both return a structured `{ok, code?, vkErrorCode?}` and never throw. Rationale,
+token choice, and the two-community setup are in
+[[vk-comments#Real VK ban + comment deletion (2026-07-22)]]. HTTP surface:
+[[http-api#Blocked viewer routes]].
+
 ## Reservation comments
 
 Buyer comments such as `бронь` are processed against the current active lot.

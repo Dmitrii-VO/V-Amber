@@ -1111,6 +1111,25 @@ function addViewerComment(payload) {
   body.className = "comment-text";
   body.textContent = payload.text || "";
 
+  // Действие по спаму прямо из ленты. VK-зритель → реальный бан сообщества +
+  // удаление комментария; зритель чата → мягкая блокировка (в ВК не банится).
+  const ban = document.createElement("button");
+  ban.type = "button";
+  ban.className = "comment-ban";
+  ban.textContent = "🚫";
+  if (payload.source === "chat") {
+    ban.title = "Заблокировать зрителя чата (мягко, без ВК-бана)";
+    ban.addEventListener("click", () => void blockViewer({
+      viewerId: payload.viewerId, viewerName: payload.viewerName, reason: "спам",
+    }));
+  } else {
+    ban.title = "Забанить в сообществе ВК и удалить комментарий";
+    ban.addEventListener("click", () => void banViewerVk({
+      viewerId: payload.viewerId, viewerName: payload.viewerName, commentId: payload.commentId,
+    }));
+  }
+  meta.append(ban);
+
   row.append(meta, body);
   feed.appendChild(row);
 
@@ -2726,6 +2745,50 @@ async function blockViewer({ viewerId, viewerName, reason }) {
   }
 }
 
+// Реальный ВК-бан спамера (groups.ban из сообщества эфира) + удаление его
+// комментария (video.deleteComment). Ставит и мягкую блокировку — даже если
+// ВК-бан не прошёл, зритель перестаёт обрабатываться. См. server/vk.js и
+// POST /api/viewers/ban.
+async function banViewerVk({ viewerId, viewerName, commentId }) {
+  if (viewerId == null || viewerId === "") return;
+  const who = viewerName || `id ${viewerId}`;
+  const delNote = commentId != null && commentId !== "" ? " и удалить его комментарий" : "";
+  if (!window.confirm(
+    `Забанить ${who} в сообществе ВК${delNote}?\n\n`
+    + "Спамер вылетит из сообщества целиком (не только из эфира) и больше не "
+    + "сможет комментировать. Снять бан можно в настройках сообщества ВК.",
+  )) {
+    return;
+  }
+  try {
+    const response = await fetch("/api/viewers/ban", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        viewerId: String(viewerId),
+        viewerName: viewerName || "",
+        commentId: commentId != null ? String(commentId) : "",
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (data.status === "safe_mode_blocked") {
+      logEvent("Safe mode: ВК-бан заблокирован", "warn");
+      return;
+    }
+    if (data.ban?.ok) {
+      logEvent(`${who} забанен в сообществе ВК${data.deleted?.ok ? ", комментарий удалён" : ""}`, "warn");
+    } else if (data.ban?.code === "chat_viewer_no_vk_ban") {
+      logEvent(`${who} — зритель чата, в ВК не банится; поставлена мягкая блокировка`, "warn");
+    } else {
+      const reason = data.ban?.message || data.ban?.code || data.ban?.vkErrorCode || "ошибка";
+      logEvent(`ВК-бан ${who} не прошёл (${reason}); поставлена мягкая блокировка`, "warn");
+    }
+    if (data.count != null) elements.blockedCount.textContent = String(data.count);
+  } catch (error) {
+    logEvent(`Не удалось забанить ${who}: ${error?.message || error}`, "warn");
+  }
+}
+
 async function unblockViewer(viewerId) {
   try {
     const response = await fetch(`/api/blocked-viewers/${encodeURIComponent(viewerId)}`, { method: "DELETE" });
@@ -2774,6 +2837,13 @@ async function renderBlockedList() {
     const body = document.createElement("div");
     const head = document.createElement("div");
     head.textContent = viewer.name || `id ${viewer.viewerId}`;
+    if (viewer.blockedBy === "vk_ban") {
+      const badge = document.createElement("span");
+      badge.className = "blocked-vkban";
+      badge.textContent = "бан в ВК";
+      badge.title = "Забанен в сообществе ВК (groups.ban), не только мягкая блокировка";
+      head.append(" ", badge);
+    }
     const sub = document.createElement("div");
     sub.className = "dim";
     const when = viewer.blockedAt ? new Date(viewer.blockedAt).toLocaleString() : "";

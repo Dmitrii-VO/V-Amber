@@ -122,8 +122,15 @@ on `#commentsPanel` rather than the old `#chatPanel`).
   (`server/ws-server.js`), placed right after the block filter so spammers never
   appear and before reservation parsing so plain chatter shows too. Each row has
   a source badge (`VK` blue / `чат` amber) + author + text; «×» clears the feed.
-  This is distinct from the reservation-focused panels (which only surface
-  `бронь`) and from the `#chatPanel` reply box.
+  Each row also has a `🚫` action: on a VK row it triggers a **real VK ban +
+  comment deletion** (confirm dialog naming the community-wide consequence,
+  `POST /api/viewers/ban`); on a chat row it soft-blocks only. See
+  [[vk-comments#Real VK ban + comment deletion (2026-07-22)]]. This is distinct
+  from the reservation-focused panels (which only surface `бронь`) and from the
+  `#chatPanel` reply box.
+
+The `🚫 Блокировки` modal marks VK-banned entries with a «бан в ВК» badge
+(`blockedBy: "vk_ban"`) to distinguish a real community ban from a soft block.
 
 ## Wishlist modal
 

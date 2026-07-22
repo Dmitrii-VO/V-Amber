@@ -452,6 +452,73 @@ export function createVkPublisher(config) {
         source: liveVideo.source || null,
       };
     },
+    // Реальный бан спамера в сообществе эфира. Эфир — видео сообщества
+    // (owner_id отрицательный), поэтому groups.ban банит его из этого
+    // сообщества, и заблокированный больше не может комментировать. Токен —
+    // user (videoToken): владелец user-токена админ сообщества, а group-токен
+    // в этом проекте от ДРУГОГО сообщества (см. vk-comments.md). Бан из всего
+    // сообщества, а не только эфира — оператор жмёт осознанно (confirm в UI),
+    // откат через groups.unban. Только для реальных VK-id (< 2^31); зрители
+    // своего чата (id ≥ 9e9) сюда не попадают — их фильтрует вызывающий код.
+    async banViewer({ userId, reason = 1, comment = "" } = {}) {
+      if (!userToken) {
+        return { ok: false, code: "no_user_token", message: "VK user-токен не настроен" };
+      }
+      const targetId = parsePositiveInt(userId, 0);
+      if (!targetId) {
+        return { ok: false, code: "bad_user_id", message: "Некорректный VK id зрителя" };
+      }
+      const owner = normalizeVkOwnerId(liveOwnerId);
+      if (!owner || Number(owner) >= 0) {
+        // Эфир на пользовательском профиле (или owner не разобран): бан
+        // сообщества неприменим — у VK нет «бана комментатора видео».
+        return { ok: false, code: "not_community", message: "Эфир не на сообществе — бан в ВК недоступен" };
+      }
+      const groupId = String(owner).replace(/^-/, "");
+      try {
+        await callVkApi("groups.ban", {
+          group_id: groupId,
+          owner_id: targetId,
+          reason,
+          comment,
+          comment_visible: 0,
+        }, videoToken);
+        logger.info("vk", "viewer_banned", { groupId, userId: targetId, reason });
+        return { ok: true, groupId, userId: targetId };
+      } catch (error) {
+        const vkErrorCode = error?.vkErrorCode ?? null;
+        logger.warn("vk", "viewer_ban_failed", { groupId, userId: targetId, vkErrorCode, error });
+        return { ok: false, code: "api_error", vkErrorCode, message: error?.message || String(error) };
+      }
+    },
+    // Удаляет комментарий спамера из эфира (video.deleteComment, user-токен).
+    // owner_id — владелец эфирного видео (liveOwnerId). Комментарий исчезает
+    // у всех зрителей ВК — это то, что оператор видит глазами как «удалить».
+    async deleteVideoComment({ commentId } = {}) {
+      if (!userToken) {
+        return { ok: false, code: "no_user_token", message: "VK user-токен не настроен" };
+      }
+      const cid = parsePositiveInt(commentId, 0);
+      if (!cid) {
+        return { ok: false, code: "bad_comment_id", message: "Некорректный id комментария" };
+      }
+      const owner = normalizeVkOwnerId(liveOwnerId);
+      if (!owner) {
+        return { ok: false, code: "no_live", message: "Эфирное видео не настроено" };
+      }
+      try {
+        await callVkApi("video.deleteComment", {
+          owner_id: owner,
+          comment_id: cid,
+        }, videoToken);
+        logger.info("vk", "comment_deleted", { ownerId: owner, commentId: cid });
+        return { ok: true, ownerId: owner, commentId: cid };
+      } catch (error) {
+        const vkErrorCode = error?.vkErrorCode ?? null;
+        logger.warn("vk", "comment_delete_failed", { ownerId: owner, commentId: cid, vkErrorCode, error });
+        return { ok: false, code: "api_error", vkErrorCode, message: error?.message || String(error) };
+      }
+    },
     async getComments(count = 20) {
       if (!isEnabled) {
         logger.info("vk", "read_skipped_not_configured", {

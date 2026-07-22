@@ -121,7 +121,38 @@ blocked buyer is recoverable from the session log.
 Blocking is **soft** — it is a V-Amber-side filter, not `groups.ban`. The
 spammer keeps writing in VK and sees their own comments; only processing
 stops. Chosen so the action stays reversible and needs no community
-management rights. A real VK ban would be a separate layer on top.
+management rights. This is the base layer; the real VK ban below sits on top.
+
+### Real VK ban + comment deletion (2026-07-22)
+
+The layer on top of the soft filter, for spammers the operator wants gone
+from VK, not just ignored:
+
+- **`groups.ban`** — a real community ban. The эфир is a **community** video
+  (`liveOwnerId` is negative), so banning the commenter from that community
+  stops them commenting on the эфир. Derived group id is `-liveOwnerId`.
+- **`video.deleteComment`** — removes the spammer's comment from the эфир, so
+  it disappears for everyone (this is what «удалить» means to the operator).
+
+**Both run under the user token, not the group token.** The user-token account
+(«Amber Standard») is an admin (`admin_level=3`) of **both** communities, and
+`groups.ban` via a user token that administers the community is permitted. The
+`VK_GROUP_TOKEN` in this project belongs to a **different** community
+(retail `amberry39`) than the эфир (wholesale `amberstandardopt`), so it is the
+wrong token for эфир bans — hence the user token. Implemented as
+`vk.banViewer({userId})` / `vk.deleteVideoComment({commentId})`
+(`server/vk.js`), both through the high-priority VK queue lane.
+
+Caveats: the ban is **community-wide** (not эфир-only) — reversible via
+`groups.unban` in VK; the operator confirms it explicitly in the UI. It only
+applies to real VK viewers (id `< 2^31`); own-chat viewers (id ≥ `9e9`) can't be
+VK-banned, so the ban route falls back to a soft block for them
+(`chat_viewer_no_vk_ban`). Every ban route also records a soft block, so a
+spammer stops being processed even when the VK ban itself fails
+(`blockedBy: "vk_ban"` vs `"operator"` distinguishes the two in the store).
+Both `groups.ban` and `video.deleteComment` are VK writes, so they are blocked
+in [[web-dashboard]] safe mode. See [[vk-integration#Moderation]] and
+[[http-api#Blocked viewer routes]].
 
 Storage is `server/blocked-viewers-store.js`: append-only JSONL in
 `logs/blocked-viewers.jsonl`, records `block` / `unblock`, last record per
@@ -132,8 +163,10 @@ an explicit allowlist in `server/log-bundle.js`).
 
 Operator entry points in `web-ui/app.js`: a `🚫` button on every reservation
 row and on every "требует внимания" row (spam usually lands there — a
-reservation-shaped comment with no matching open lot), plus a
-`🚫 Блокировки` modal in the top bar for the list and unblocking.
+reservation-shaped comment with no matching open lot), a `🚫` on every row of
+the «Комментарии зала» feed (VK rows → real VK ban + comment delete with a
+confirm; chat rows → soft block), plus a `🚫 Блокировки` modal in the top bar
+for the list and unblocking (VK-banned entries carry a «бан в ВК» badge).
 
 Blocking does **not** cancel reservations that viewer already made. Existing
 `Бронь` and MoySklad positions stay; the operator removes them with

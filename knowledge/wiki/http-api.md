@@ -48,6 +48,8 @@ V-Amber serves the browser UI and local operator APIs from
 | `/api/blocked-viewers` | `GET` | Returns the blocked viewers and their count, newest block first. |
 | `/api/blocked-viewers` | `POST` | Blocks a viewer by `viewerId`; optional `viewerName` and `reason`. Idempotent — a repeat block keeps the original `blockedAt`. |
 | `/api/blocked-viewers/:viewerId` | `DELETE` | Unblocks a viewer. Returns `404 viewer_not_blocked` when the id was not in the list. |
+| `/api/viewers/ban` | `POST` | Real VK moderation. Body: `viewerId` (required), optional `viewerName`, `reason`, `commentId`. For a VK viewer (id `< 2^31`) calls `groups.ban` on the эфир community and, if `commentId` is given, `video.deleteComment`; for a chat viewer (id ≥ `9e9`) skips the VK ban (`ban.code: "chat_viewer_no_vk_ban"`). **Always also records a soft block** (`blockedBy: "vk_ban"` on success, else `"operator"`) so the viewer stops being processed even if the VK ban fails. Blocked in safe mode (`status: "safe_mode_blocked"`). Returns `{ok, ban, deleted, entry, count}`. See [[vk-comments#Real VK ban + comment deletion (2026-07-22)]]. |
+| `/api/comments/delete` | `POST` | Deletes a VK эфир comment via `video.deleteComment`. Body: `commentId` (required). Blocked in safe mode. Returns the `{ok, code?}` result. |
 
 Blocking is **soft**: it only stops V-Amber from processing that viewer's
 comments. Nothing is banned in the VK community, so the spammer keeps
