@@ -1027,6 +1027,16 @@ a { color: inherit; }
 .comment-src--chat { color: var(--amber); background: var(--amber-bg); }
 .comment-author { color: var(--text-muted); font-weight: 600; font-size: var(--fs-xs); }
 .comment-text { color: var(--text); }
+.comment-ban {
+  margin-left: auto; background: transparent; border: none; cursor: pointer;
+  opacity: 0.3; font-size: 12px; line-height: 1; padding: 0 2px;
+}
+.comment-ban:hover { opacity: 1; }
+.blocked-vkban {
+  font-size: 10px; color: var(--red); background: var(--red-bg);
+  border: 1px solid var(--red-border); padding: 0 5px; border-radius: 3px;
+  margin-left: 4px; vertical-align: middle; font-weight: 600;
+}
 .manual-code__input:focus {
   outline: none;
   border-color: var(--accent, #60a5fa);
