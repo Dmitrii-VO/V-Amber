@@ -530,8 +530,12 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         return;
       }
       const subPath = pathname.slice("/api/stream/hls/".length);
-      // Защита от обхода каталога: сегменты MediaMTX — плоские имена файлов.
-      if (subPath.includes("..") || subPath.startsWith("/")) {
+      // Защита от обхода каталога: сегменты MediaMTX — плоские имена файлов
+      // (index.m3u8, .ts/.mp4). Отклоняем `..`, ведущий `/` и percent-encoding
+      // (`%2e%2e` иначе прошёл бы мимо .includes(".."), а nginx на cloud мог бы
+      // раскодировать его и выйти за пределы /live/). Легальные HLS-имена `%`
+      // не содержат; query-параметры плеера идут отдельно в urlObject.search.
+      if (subPath.includes("..") || subPath.startsWith("/") || subPath.includes("%")) {
         response.writeHead(400).end("Bad request");
         return;
       }
