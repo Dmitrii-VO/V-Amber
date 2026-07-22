@@ -433,6 +433,43 @@ manual `ssh cloud` command in this wiki uses — this design only makes sure
 *CI* doesn't inherit that exposure, it doesn't tighten `user1`. Worth revisiting
 separately.
 
+## Dashboard live preview + comments feed (2026-07-22)
+
+Roman broadcasts with the iPhone as OBS's Continuity Camera, so the phone screen
+shows only the "connected to Mac" state — he can't watch the эфир picture or read
+comments on it. Both were brought onto the laptop dashboard. UI details in
+[[web-dashboard#Live preview + comments feed (center column, 2026-07-22)]];
+the stream-side pieces:
+
+- **`config.stream.viewerOrigin`** (`server/config.js`) — the origin of
+  `STREAM_VIEWER_URL` (e.g. `https://…` without `/efir/`). Empty when
+  `STREAM_VIEWER_URL` is unset.
+- **`GET /api/stream/hls/*`** (`server/http-server.js`) — a same-origin HLS
+  proxy: forwards `/api/stream/hls/<path>` → `{viewerOrigin}/live/<path>`,
+  streaming the body (`Readable.fromWeb`) with the upstream content-type. Needed
+  because cloud `/live/` sends **no CORS** (dashboard on `localhost` can't fetch
+  the raw `.m3u8` cross-origin) and `/efir/` sends `X-Frame-Options: DENY` +
+  `frame-ancestors 'none'` (can't iframe the viewer page either). MediaMTX HLS
+  playlists reference segments by **relative** path, so segment requests land
+  back on this proxy automatically — no URL rewriting. Verified end-to-end
+  against the live cloud MediaMTX (idle эфир returns MediaMTX's own
+  `"no stream is available on path 'live'"` 404; a running эфир returns the
+  playlist). One operator watching their own low-volume stream — proxying
+  segments through the local node process is fine. Note the split gating: the
+  proxy works whenever `viewerOrigin` (from `STREAM_VIEWER_URL`) is set, but the
+  dashboard only auto-shows the preview when the stream is *also* configured
+  (`STREAM_MEDIAMTX_API_URL`, via `/api/stream/config`).
+- **`web-ui/hls.min.js`** — hls.js vendored into the dashboard (copy of
+  `deploy/stream-viewer/hls.min.js`), loaded as a plain `<script>` before the
+  module `app.js` so `window.Hls` is global.
+- **`viewerComment` WS message** (`server/ws-server.js`) — emitted per
+  non-blocked comment from `ingestViewerComment` for the «Комментарии зала»
+  feed; additive, does not touch reservation logic. Tests:
+  `test/ws-server.viewer-comment.test.js`.
+
+This is preview-only and read-only against the stream — it does not change the
+broadcast pipeline, VK/MoySklad flow, or the one-button orchestration.
+
 ## Deliberately out of scope
 
 - Installing OBS automatically — a `fail` step links the operator to

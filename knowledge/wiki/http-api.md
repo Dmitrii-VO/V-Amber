@@ -25,6 +25,7 @@ V-Amber serves the browser UI and local operator APIs from
 | `/api/stream/preflight` | `GET` | Read-only broadcast readiness checks (`fix:false`): config, MediaMTX API, OBS reachability, OBS stream settings. Always `200` with `{ok, steps[]}`. See [[stream-integration]]. |
 | `/api/stream/start` | `POST` | One-button broadcast start: preflight with auto-fix (launch OBS, write RTMP server/key), `StartStream` in OBS, wait up to 30s for MediaMTX `ready:true`. Always `200` with `{ok, steps[], live?}` — can take ~45s worst case. |
 | `/api/stream/stop` | `POST` | Stops the OBS stream output. Always `200` with `{ok, steps[]}`. |
+| `/api/stream/hls/*` | `GET` | Same-origin HLS proxy for the dashboard's «Картинка эфира» preview. Transparently forwards `/api/stream/hls/<path>` to `{viewerOrigin}/live/<path>` (origin derived from `STREAM_VIEWER_URL`), streaming the body back with the upstream content-type. Exists because cloud `/live/` sends no CORS and `/efir/` forbids framing (`X-Frame-Options: DENY`), so the dashboard can neither fetch the raw HLS cross-origin nor iframe the viewer page. `501` when `STREAM_VIEWER_URL` is unset, `400` on `..`/absolute subpaths, `502` (quiet, no error log) when cloud is unreachable — hls.js polls constantly and an idle эфир is expected. See [[stream-integration]]. |
 
 ## Wishlist routes
 
@@ -39,6 +40,18 @@ V-Amber serves the browser UI and local operator APIs from
 | `/api/wishlist/:entryId` | `DELETE` | Removes an active wishlist entry. |
 | `/api/wishlist/check-customerorders` | `POST` | Checks whether wishlist entries already exist in open MoySklad customer orders. |
 | `/api/wishlist/purchase-order` | `POST` | Creates MoySklad purchase orders from selected wishlist groups, with idempotency by draft/group hash. |
+
+## Blocked viewer routes
+
+| Route | Method | Behavior |
+|---|---|---|
+| `/api/blocked-viewers` | `GET` | Returns the blocked viewers and their count, newest block first. |
+| `/api/blocked-viewers` | `POST` | Blocks a viewer by `viewerId`; optional `viewerName` and `reason`. Idempotent — a repeat block keeps the original `blockedAt`. |
+| `/api/blocked-viewers/:viewerId` | `DELETE` | Unblocks a viewer. Returns `404 viewer_not_blocked` when the id was not in the list. |
+
+Blocking is **soft**: it only stops V-Amber from processing that viewer's
+comments. Nothing is banned in the VK community, so the spammer keeps
+seeing their own comments. See [[vk-comments#Blocking spammers]].
 
 ## Reservation digest routes
 

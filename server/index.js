@@ -14,6 +14,7 @@ import { createProductCodeCache } from "./product-code-cache.js";
 import { loadActiveState, clearActiveState, extractOrphans } from "./state-store.js";
 import { createWishlistStore } from "./wishlist-store.js";
 import { createNameCacheStore } from "./name-cache-store.js";
+import { createBlockedViewersStore } from "./blocked-viewers-store.js";
 import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
@@ -154,12 +155,14 @@ async function main() {
   const wishlistSubmissions = createWishlistSubmissions();
   const wishlistStore = createWishlistStore();
   const nameCacheStore = createNameCacheStore();
+  const blockedViewersStore = createBlockedViewersStore();
   const settingsStore = createSettingsStore({ fallbacks: config.wishlist });
 
   await Promise.all([
     wishlistSubmissions.load(),
     wishlistStore.load(),
     nameCacheStore.load(),
+    blockedViewersStore.load(),
     settingsStore.load(),
   ]);
 
@@ -217,6 +220,7 @@ async function main() {
     wishlistStore,
     wishlistSubmissions,
     settingsStore,
+    blockedViewersStore,
     diagnosticRouter,
     packageVersion,
   });
@@ -227,6 +231,7 @@ async function main() {
     productCodeCache,
     wishlistStore,
     nameCacheStore,
+    blockedViewersStore,
     diagnosticRouter,
     packageVersion,
   });

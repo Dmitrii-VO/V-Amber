@@ -3,6 +3,33 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-07-21] feat | Soft blocking of comment spammers
+
+The operator can now block a viewer, after which V-Amber ignores everything
+that viewer writes. Two design calls worth remembering:
+
+**The filter sits first in `ingestViewerComment`, not somewhere convenient.**
+Anywhere lower and a spam comment can still mint a `Бронь` plus a MoySklad
+position, which the operator then unwinds by hand — the same class of cleanup
+the self-comment filter was added to prevent (2026-06-03). Both VK polling and
+the `/efir/` chat funnel through this one function, so a single guard covers
+both sources.
+
+**The block is soft — a V-Amber-side filter, not `groups.ban`.** The spammer
+keeps writing in VK and sees their own comments; only processing stops. This
+keeps the action reversible, needs no community-management rights, and cannot
+hurt a buyer blocked by mistake. Blocked comments still log `comment_blocked`,
+so mistakes are recoverable from the session log. A real VK ban, if ever
+wanted, is a separate layer on top rather than a rewrite.
+
+Blocking deliberately does **not** touch reservations the viewer already made
+— existing orders stay until the operator cancels them explicitly.
+
+Storage follows `name-cache-store.js`: append-only JSONL, last record per
+`viewerId` wins. `logs/blocked-viewers.jsonl` holds viewer names, so it is PII
+and stays out of the diagnostic bundle. Details in
+[[vk-comments#Blocking spammers]] and [[http-api#Blocked viewer routes]].
+
 ## [2026-07-16] feat | CI that actually runs the tests, and it gates the deploy
 
 Until now the repo had **no test workflow at all** — only `release.yml` and

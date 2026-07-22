@@ -100,6 +100,31 @@ list in `#streamChecklist`; «Остановить» stops the OBS output;
 after 3 consecutive offline cycles (there is no always-on background
 poll). See [[stream-integration]].
 
+## Live preview + comments feed (center column, 2026-07-22)
+
+Added for Roman's operator scenario: he broadcasts with the iPhone as OBS's
+Continuity Camera, so the phone screen is unusable and he can't see the эфир
+picture or read comments on it. Both now live on the laptop dashboard, in the
+center column (`.col--chat`, which now expands to 360px whenever visible, keyed
+on `#commentsPanel` rather than the old `#chatPanel`).
+
+- **`#previewPanel` «Картинка эфира»** — a 16:9 `<video>` playing the own
+  MediaMTX HLS via vendored `web-ui/hls.min.js`, sourced from the same-origin
+  proxy `/api/stream/hls/index.m3u8` (see [[http-api]] / [[stream-integration]]
+  for why a proxy and not iframe/direct HLS). Muted autoplay with «Включить
+  звук», an offline overlay («Эфир ещё не начался»), a live/offline badge, and a
+  7s retry loop — mirrors the public `/efir/` player. Shown only in «Свой эфир»
+  mode when the stream is configured (that is when MediaMTX actually carries the
+  feed); `applyEfirMode` starts/stops the player as the toggle flips.
+- **`#commentsPanel` «Комментарии зала»** — a unified live feed of **every**
+  non-blocked viewer comment (VK + own chat), always visible. The server emits a
+  `viewerComment` WS message per comment from `ingestViewerComment`
+  (`server/ws-server.js`), placed right after the block filter so spammers never
+  appear and before reservation parsing so plain chatter shows too. Each row has
+  a source badge (`VK` blue / `чат` amber) + author + text; «×» clears the feed.
+  This is distinct from the reservation-focused panels (which only surface
+  `бронь`) and from the `#chatPanel` reply box.
+
 ## Wishlist modal
 
 The dashboard has a full wishlist modal with active/archive/settings tabs,

@@ -62,6 +62,7 @@ export function attachWsServer(httpServer, config, services = {}) {
   const productCodeCache = services.productCodeCache || null;
   const wishlistStore = services.wishlistStore || null;
   const nameCacheStore = services.nameCacheStore || null;
+  const blockedViewersStore = services.blockedViewersStore || null;
   const createSessionLogImpl = services.createSessionLog || createSessionLog;
   const saveActiveStateImpl = services.saveActiveState || saveActiveState;
   const clearActiveStateImpl = services.clearActiveState || clearActiveState;
@@ -1525,6 +1526,44 @@ export function attachWsServer(httpServer, config, services = {}) {
     // канал ответа покупателю (notifyReservationStatus).
     function ingestViewerComment(comment) {
       const logSource = comment.source === "chat" ? "chat" : "vk";
+
+      // Спамер в чёрном списке: выходим ДО парсинга, до имя-кеша и до
+      // reservationAttention. Фильтр стоит первым сознательно — иначе
+      // спам успевает создать бронь и заказ в МойСкладе, а отменять их
+      // потом придётся вручную. Блокировка мягкая: в VK комментарий
+      // остаётся, V-Amber его просто не обрабатывает.
+      if (blockedViewersStore?.isBlocked?.(comment.viewerId)) {
+        logger.info(logSource, "comment_blocked", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName: comment.viewerName
+            || blockedViewersStore.get?.(comment.viewerId)?.name
+            || "",
+          text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+          source: comment.source,
+        });
+        return;
+      }
+
+      // Лента комментариев в дашборде: оператор (Роман) ведёт эфир с телефона
+      // как камеры и не видит комментарии в самом VK/на /efir/. Поэтому
+      // КАЖДЫЙ незаблокированный комментарий — не только «бронь» — уходит
+      // оператору отдельным событием, чтобы он читал зал на ноутбуке.
+      // Стоит после фильтра блокировок (спамеры в ленту не попадают) и не
+      // трогает логику броней ниже.
+      sendJson(websocket, {
+        type: "viewerComment",
+        commentId: comment.id,
+        viewerId: comment.viewerId,
+        viewerName: comment.viewerName
+          || nameCacheStore?.getName?.(comment.viewerId)
+          || "",
+        text: typeof comment.text === "string" ? comment.text.slice(0, 500) : "",
+        createdAt: comment.createdAt || new Date().toISOString(),
+        source: comment.source === "chat" ? "chat" : "vk",
+      });
+
       const target = findCommentTarget(comment.text);
       if (!target || !target.lot) {
         // Коммент похож на бронь (keyword + код), но однозначного
