@@ -889,6 +889,7 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
 
       const viewerId = String(body.viewerId ?? "").trim();
       if (!viewerId) return jsonResponse(response, 400, { error: "viewerId_required" });
+      if (!vk?.banViewer) return jsonResponse(response, 503, { error: "vk_unavailable" });
       if (isSafeMode()) {
         return jsonResponse(response, 200, { ok: false, status: "safe_mode_blocked", message: "Safe mode: VK-бан заблокирован" });
       }
@@ -939,6 +940,7 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
 
       const commentId = String(body.commentId ?? "").trim();
       if (!commentId) return jsonResponse(response, 400, { error: "commentId_required" });
+      if (!vk?.deleteVideoComment) return jsonResponse(response, 503, { error: "vk_unavailable" });
       if (isSafeMode()) {
         return jsonResponse(response, 200, { ok: false, status: "safe_mode_blocked", message: "Safe mode: удаление в ВК заблокировано" });
       }
