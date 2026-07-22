@@ -28,6 +28,16 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
   let stopping = false;
   let restartTimer = null;
 
+  // ffmpeg печатает целевой URL в сообщениях об ошибке, а он содержит ключ
+  // трансляции ВК (секрет). lastError уходит в /api/stream/status и в UI —
+  // поэтому вырезаем цель из любого текста, прежде чем сохранить.
+  function redact(text) {
+    if (!text) return text;
+    let out = String(text);
+    if (cfg.vkTargetUrl) out = out.split(cfg.vkTargetUrl).join("<vk-target>");
+    return out;
+  }
+
   function isConfigured() {
     return Boolean(cfg.relaySourceUrl && cfg.vkTargetUrl);
   }
@@ -52,7 +62,7 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
     } catch (error) {
       proc = null;
       state = "error";
-      lastError = error?.message || String(error);
+      lastError = redact(error?.message || String(error));
       logImpl.warn("stream-relay", "spawn_failed", { error: lastError });
       return;
     }
@@ -62,10 +72,10 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
 
     proc.stderr?.on?.("data", (chunk) => {
       const line = String(chunk).trim();
-      if (line) lastError = line.slice(0, 300); // последняя строка stderr для диагностики
+      if (line) lastError = redact(line).slice(0, 300); // последняя строка stderr для диагностики
     });
     proc.on("error", (error) => {
-      lastError = error?.message || String(error);
+      lastError = redact(error?.message || String(error));
       logImpl.warn("stream-relay", "relay_error", { error: lastError });
     });
     proc.on("exit", (code, signal) => {

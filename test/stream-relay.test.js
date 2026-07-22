@@ -113,6 +113,17 @@ test("синхронный сбой запуска ffmpeg → spawn_failed, св
   assert.equal(relay.status().state, "error");
 });
 
+test("ключ трансляции ВК не утекает в lastError (редакция stderr)", () => {
+  const spawn = makeFakeSpawn();
+  const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: spawn, log: silentLog });
+  relay.start();
+  spawn.spawned[0].stderr.emit("data", "Failed to connect to rtmp://vk-ingest/app/streamkey: I/O error");
+  const st = relay.status();
+  assert.ok(!st.lastError.includes("streamkey"), "ключ ВК не должен попадать в lastError");
+  assert.ok(st.lastError.includes("<vk-target>"), "цель должна быть заредачена");
+  relay.stop();
+});
+
 test("повторный start идемпотентен (already)", () => {
   const spawn = makeFakeSpawn();
   const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: spawn, log: silentLog });
