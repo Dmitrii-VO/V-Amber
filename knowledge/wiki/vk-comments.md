@@ -104,10 +104,48 @@ back to the user token — was the last that worked (28 successful
 publishes, 0 errors). The fix above restores that user-token behavior
 while keeping the group token for DMs.
 
+## Blocking spammers
+
+Added 2026-07-21. The operator can block a viewer whose comments are spam;
+V-Amber then ignores everything that viewer writes.
+
+The filter is the **first statement** in `ingestViewerComment`
+(`server/ws-server.js`) — before parsing, before the name cache, before
+`reservationAttention`. Placement is deliberate: a spam comment that reaches
+the parser can create a `Бронь` and a MoySklad position, and the operator
+then has to unwind both by hand. Because both VK polling and the `/efir/`
+chat funnel through `ingestViewerComment`, one filter covers both sources.
+Blocked comments still get an `INFO comment_blocked` log line, so a wrongly
+blocked buyer is recoverable from the session log.
+
+Blocking is **soft** — it is a V-Amber-side filter, not `groups.ban`. The
+spammer keeps writing in VK and sees their own comments; only processing
+stops. Chosen so the action stays reversible and needs no community
+management rights. A real VK ban would be a separate layer on top.
+
+Storage is `server/blocked-viewers-store.js`: append-only JSONL in
+`logs/blocked-viewers.jsonl`, records `block` / `unblock`, last record per
+`viewerId` wins on load. `viewerId` is always compared as a string — VK
+sends `from_id` as a number, chat sends a string id. The file holds viewer
+names, so it is PII and stays out of the `sendLogs` bundle (the bundle uses
+an explicit allowlist in `server/log-bundle.js`).
+
+Operator entry points in `web-ui/app.js`: a `🚫` button on every reservation
+row and on every "требует внимания" row (spam usually lands there — a
+reservation-shaped comment with no matching open lot), plus a
+`🚫 Блокировки` modal in the top bar for the list and unblocking.
+
+Blocking does **not** cancel reservations that viewer already made. Existing
+`Бронь` and MoySklad positions stay; the operator removes them with
+«× отменить». See [[reservation-flow]] before changing that boundary.
+
+HTTP surface: [[http-api#Blocked viewer routes]].
+
 ## Runtime files
 
 - `server/vk.js`
 - `server/ws-server.js`
+- `server/blocked-viewers-store.js`
 - `web-ui/app.js`
 
 ## Related pages

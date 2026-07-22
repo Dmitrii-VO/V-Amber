@@ -37,6 +37,14 @@ a replacement for code search, but it gives agents the right entry points.
   entries.
 - `server/wishlist-submissions.js` stores wishlist submission drafts and
   results.
+- `server/blocked-viewers-store.js` stores blocked viewers; their comments are
+  dropped at the top of `ingestViewerComment`. See
+  [[vk-comments#Blocking spammers]]. Right after that filter,
+  `ingestViewerComment` emits a `viewerComment` WS message per comment for the
+  dashboard's «Комментарии зала» feed.
+- `web-ui/hls.min.js` — hls.js vendored into the dashboard for the «Картинка
+  эфира» preview, played through the `/api/stream/hls/*` same-origin proxy
+  (`server/http-server.js`). See [[stream-integration]] / [[web-dashboard]].
 - `server/session-log.js`, `server/session-jsonl.js`,
   `server/reservation-digest-log.js`, `server/logger.js`,
   `server/log-bundle.js`, `server/bundle-index.js`, and `server/zip-writer.js`

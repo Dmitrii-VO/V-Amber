@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, randomInt, createHash } from "node:crypto";
@@ -192,7 +193,8 @@ function serializeWishlistEntry(entry) {
 
 export function createStaticServer({
   vk, moysklad, productCodeCache, config,
-  wishlistStore, wishlistSubmissions, settingsStore, diagnosticRouter, packageVersion,
+  wishlistStore, wishlistSubmissions, settingsStore, blockedViewersStore,
+  diagnosticRouter, packageVersion,
 } = {}) {
   function diag(kind, payload) {
     if (diagnosticRouter?.emitGeneric) diagnosticRouter.emitGeneric(kind, payload);
@@ -513,6 +515,52 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
       return;
     }
 
+    // Прокси HLS-превью эфира для дашборда. Cloud /live/ не отдаёт CORS, а
+    // /efir/ запрещает iframe (X-Frame-Options: DENY) — поэтому дашборд играет
+    // HLS через этот same-origin прокси. Путь после /api/stream/hls/
+    // прозрачно мапится на {viewerOrigin}/live/<path> (плейлист MediaMTX
+    // ссылается на сегменты относительными путями, так что они прилетают
+    // обратно сюда же). Один оператор смотрит свой же низконагруженный поток —
+    // проксировать сегменты через локальный node нормально.
+    if (pathname.startsWith("/api/stream/hls/")) {
+      if (request.method !== "GET") return methodNotAllowed(response, "GET");
+      const origin = config?.stream?.viewerOrigin;
+      if (!origin) {
+        jsonResponse(response, 501, { error: "stream_viewer_not_configured" });
+        return;
+      }
+      const subPath = pathname.slice("/api/stream/hls/".length);
+      // Защита от обхода каталога: сегменты MediaMTX — плоские имена файлов.
+      if (subPath.includes("..") || subPath.startsWith("/")) {
+        response.writeHead(400).end("Bad request");
+        return;
+      }
+      const target = `${origin}/live/${subPath}${urlObject.search}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), config.stream.statusTimeoutMs || 3000);
+      try {
+        const upstream = await fetch(target, { signal: controller.signal });
+        const headers = { "cache-control": "no-store" };
+        const ct = upstream.headers.get("content-type");
+        if (ct) headers["content-type"] = ct;
+        response.writeHead(upstream.status, headers);
+        if (upstream.body) {
+          Readable.fromWeb(upstream.body).pipe(response);
+        } else {
+          response.end();
+        }
+      } catch (error) {
+        // hls.js опрашивает плейлист постоянно — сбои связи с cloud шумны и
+        // ожидаемы (эфир не идёт). Тихо отдаём 502 без error-лога.
+        if (!response.headersSent) response.writeHead(502).end("Bad gateway");
+        else response.end();
+        void error;
+      } finally {
+        clearTimeout(timer);
+      }
+      return;
+    }
+
     // Прокси операторской панели «Чат зрителей» (dashboard) к chat-service:
     // читает ПУБЛИЧНУЮ ленту (viewer+service вперемешку, как у зрителей на
     // /efir/) и публикует ответы оператора как сервисные сообщения. Уже
@@ -770,6 +818,55 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         jsonResponse(response, 500, { error: "send_failed", message: error?.message || String(error) });
       }
       return;
+    }
+
+    // -------------------- Блокировка спамеров --------------------
+    //
+    // Мягкая блокировка: комментарии зрителя перестают обрабатываться в
+    // ws-server (ingestViewerComment), в самом VK они остаются. Бана в
+    // сообществе тут нет — см. server/blocked-viewers-store.js.
+
+    if (pathname === "/api/blocked-viewers" && request.method === "GET") {
+      jsonResponse(response, 200, {
+        count: blockedViewersStore?.size?.() || 0,
+        viewers: blockedViewersStore?.list?.() || [],
+      });
+      return;
+    }
+
+    if (pathname === "/api/blocked-viewers" && request.method === "POST") {
+      if (!blockedViewersStore) return jsonResponse(response, 503, { error: "store_unavailable" });
+      let body;
+      try { body = await readJsonBody(request, 4096); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const viewerId = String(body.viewerId ?? "").trim();
+      if (!viewerId) return jsonResponse(response, 400, { error: "viewerId_required" });
+
+      const entry = blockedViewersStore.block(viewerId, {
+        name: body.viewerName || body.name || "",
+        reason: body.reason || "",
+      });
+      logger.info("http", "viewer_blocked", {
+        viewerId, viewerName: entry?.name || "", reason: entry?.reason || "",
+      });
+      diag("viewer_blocked", { viewerId, viewerName: entry?.name || "", reason: entry?.reason || "" });
+      jsonResponse(response, 200, { ok: true, entry, count: blockedViewersStore.size() });
+      return;
+    }
+
+    // /api/blocked-viewers/:viewerId — снятие блокировки. viewerId у VK
+    // числовой, у чата — строковый id зрителя, поэтому шаблон широкий.
+    const blockedMatch = /^\/api\/blocked-viewers\/([^/]+)$/.exec(pathname);
+    if (blockedMatch) {
+      if (request.method !== "DELETE") return methodNotAllowed(response, "DELETE");
+      if (!blockedViewersStore) return jsonResponse(response, 503, { error: "store_unavailable" });
+      const viewerId = decodeURIComponent(blockedMatch[1]);
+      const removed = blockedViewersStore.unblock(viewerId);
+      if (!removed) return jsonResponse(response, 404, { error: "viewer_not_blocked" });
+      logger.info("http", "viewer_unblocked", { viewerId });
+      diag("viewer_unblocked", { viewerId });
+      return jsonResponse(response, 200, { ok: true, count: blockedViewersStore.size() });
     }
 
     // -------------------- Wish list --------------------

@@ -50,6 +50,11 @@
             Сводка броней
           </button>
 
+          <button id="blockedButton" class="btn btn--ghost" title="Заблокированные зрители: их комментарии не обрабатываются">
+            🚫 Блокировки
+            <span id="blockedCount" class="wishlist-badge">0</span>
+          </button>
+
           <button id="sendLogsButton" class="btn btn--ghost" title="Скачать диагностический ZIP">
             Скачать логи
           </button>
@@ -233,6 +238,45 @@
         </div>
 
         <div class="col col--chat">
+          <section id="previewPanel" class="panel" hidden>
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Картинка эфира</span>
+                <span id="previewLiveBadge" class="preview-badge">не в эфире</span>
+              </div>
+              <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">свой поток</span>
+            </div>
+            <div class="panel-body panel-body--flush">
+              <div class="preview-video-wrap">
+                <video id="streamPreview" class="preview-video" muted playsinline></video>
+                <div id="previewOverlay" class="preview-overlay">
+                  <div id="previewOverlayTitle">Эфир ещё не начался</div>
+                  <div id="previewOverlayHint" class="dim">Появится, когда пойдёт трансляция на свой поток</div>
+                </div>
+                <button id="previewUnmute" class="preview-unmute" type="button">🔇 Включить звук</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="commentsPanel" class="panel">
+            <div class="panel-head">
+              <div class="panel-title">
+                <span>Комментарии зала</span>
+                <span id="commentsCount" class="count">· 0</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:var(--gap-2);">
+                <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">VK + чат</span>
+                <button id="commentsClear" class="btn btn--ghost" type="button" title="Очистить ленту" style="padding:0 8px;">×</button>
+              </div>
+            </div>
+            <div class="panel-body panel-body--flush">
+              <div id="commentsFeed" class="comments-feed"></div>
+              <div id="commentsEmpty" class="res-empty">
+                Комментарии зрителей появятся здесь во время эфира
+              </div>
+            </div>
+          </section>
+
           <section id="chatPanel" class="panel" hidden>
             <div class="panel-head">
               <div class="panel-title">
@@ -343,6 +387,24 @@
     </div>
 
     <input id="wsUrlInput" type="hidden" value="ws://localhost:8080/ws/stt" />
+
+    <div id="blockedModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>🚫 Заблокированные зрители</h3>
+          <button id="blockedClose" class="btn btn--ghost" aria-label="Закрыть">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="dim" style="margin-top:0;">
+            Комментарии этих зрителей не обрабатываются: не создают броней,
+            не попадают в wish list и не показываются как «требует внимания».
+            В самом VK их комментарии остаются — здесь бана сообщества нет.
+          </p>
+          <div id="blockedList" class="blocked-list"></div>
+          <div id="blockedEmpty" class="wishlist-empty">Список пуст.</div>
+        </div>
+      </div>
+    </div>
 
     <div id="digestModal" class="modal" hidden>
       <div class="modal-card modal-card--wide">
@@ -506,6 +568,7 @@
       </div>
     </div>
 
+    <script src="./hls.min.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

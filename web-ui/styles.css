@@ -231,7 +231,10 @@ a { color: inherit; }
   gap: 1px; background: var(--border);
   overflow: hidden; min-height: 0; flex: 1;
 }
-.main:has(#chatPanel:not([hidden])) { grid-template-columns: 1fr 340px 380px; }
+/* Центральная колонка теперь всегда несёт ленту «Комментарии зала»
+   (#commentsPanel всегда видима), поэтому раскрываем её независимо от того,
+   настроен ли свой чат. Раньше ширина зависела только от #chatPanel. */
+.main:has(#commentsPanel:not([hidden])) { grid-template-columns: 1fr 360px 380px; }
 .col { display: grid; gap: 1px; background: var(--border); min-height: 0; min-width: 0; }
 .col--left { grid-template-rows: minmax(0, max-content) 1fr; }
 .col--left > .panel:first-child { max-height: 38vh; }
@@ -239,7 +242,13 @@ a { color: inherit; }
    (не 380px-колонка справа, где она раньше боролась за место со «Стрим»/
    «Брони»/«События»). Ширина колонки схлопывается до 0 в .main, когда чат
    не настроен — см. правило .main:has(#chatPanel:not([hidden])) выше. */
+/* Центральная колонка стекает до трёх панелей: «Картинка эфира» (свой эфир),
+   «Комментарии зала» (всегда), «Чат зрителей» (свой эфир + настроен чат).
+   Превью — auto (по высоте видео, но с потолком ниже), остальные делят 1fr. */
 .col--chat { grid-template-rows: 1fr; }
+.col--chat:has(#previewPanel:not([hidden])) { grid-template-rows: auto 1fr; }
+.col--chat:has(#chatPanel:not([hidden])) { grid-template-rows: 1fr 1fr; }
+.col--chat:has(#previewPanel:not([hidden])):has(#chatPanel:not([hidden])) { grid-template-rows: auto 1fr 1fr; }
 .col--right { grid-template-rows: 1fr 1fr; }
 /* #streamPanel is hidden (display:none) unless configured — it drops out of
    grid flow entirely, so the extra `auto` track only applies while actually
@@ -481,6 +490,23 @@ a { color: inherit; }
   white-space: nowrap;
 }
 .res-cancel:hover { border-color: var(--red-border); color: var(--red); }
+/* Бан спамера: комментарии зрителя перестают обрабатываться. */
+.res-block {
+  justify-self: end;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text-dim); border-radius: var(--radius);
+  padding: 2px 6px; font-size: var(--fs-xs); cursor: pointer;
+  line-height: 1.4;
+}
+.res-block:hover { border-color: var(--red-border); color: var(--red); }
+.attention-row__block { align-self: center; }
+.blocked-list { display: flex; flex-direction: column; gap: var(--gap-2); }
+.blocked-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--gap-3);
+  padding: var(--gap-2) var(--gap-3);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
 /* Голосовое +кол-во: сервер прислал предложение, ждём клика оператора. */
 .res-item--quantity-target {
   background: var(--amber-bg);
@@ -953,6 +979,54 @@ a { color: inherit; }
   border: 1px solid var(--border);
   border-radius: var(--radius-2, 6px);
 }
+
+/* ===== Превью эфира (свой поток) ===== */
+#previewPanel { max-height: 42vh; }
+.preview-badge {
+  font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 500;
+  letter-spacing: 0; text-transform: none;
+  padding: 1px 6px; border-radius: 4px;
+  color: var(--text-dim); background: var(--border);
+}
+.preview-badge.on { color: var(--green); background: var(--green-bg); }
+.preview-video-wrap {
+  position: relative; width: 100%; background: #000;
+  aspect-ratio: 16 / 9; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.preview-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+.preview-overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px; text-align: center;
+  padding: var(--gap-3); background: rgba(10, 10, 12, 0.82);
+  font-size: var(--fs-sm); color: var(--text-muted);
+}
+.preview-overlay.hidden { display: none; }
+.preview-unmute {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  display: none; padding: 4px 10px; font-size: var(--fs-xs); cursor: pointer;
+  color: #0a0a0c; background: var(--amber); border: none; border-radius: var(--radius);
+  font-weight: 600;
+}
+.preview-unmute.show { display: inline-block; }
+
+/* ===== Лента «Комментарии зала» ===== */
+.comments-feed {
+  height: 100%; overflow-y: auto;
+  padding: var(--gap-3) var(--gap-5);
+  display: flex; flex-direction: column; gap: var(--gap-2);
+}
+.comment-row { font-size: var(--fs-sm); line-height: 1.35; word-break: break-word; }
+.comment-meta { display: flex; align-items: center; gap: var(--gap-2); margin-bottom: 2px; }
+.comment-src {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 0 4px; border-radius: 3px; line-height: 1.5;
+}
+.comment-src--vk { color: #6ea8fe; background: rgba(110, 168, 254, 0.14); }
+.comment-src--chat { color: var(--amber); background: var(--amber-bg); }
+.comment-author { color: var(--text-muted); font-weight: 600; font-size: var(--fs-xs); }
+.comment-text { color: var(--text); }
 .manual-code__input:focus {
   outline: none;
   border-color: var(--accent, #60a5fa);

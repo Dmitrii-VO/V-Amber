@@ -62,6 +62,13 @@ const elements = {
   digestButton: $("digestButton"),
   digestModal: $("digestModal"),
   digestClose: $("digestClose"),
+
+  blockedButton: $("blockedButton"),
+  blockedCount: $("blockedCount"),
+  blockedModal: $("blockedModal"),
+  blockedClose: $("blockedClose"),
+  blockedList: $("blockedList"),
+  blockedEmpty: $("blockedEmpty"),
   digestCancel: $("digestCancel"),
   digestDate: $("digestDate"),
   digestRefresh: $("digestRefresh"),
@@ -140,6 +147,20 @@ const elements = {
   chatOperatorForm: $("chatOperatorForm"),
   chatOperatorInput: $("chatOperatorInput"),
   chatOperatorSend: $("chatOperatorSend"),
+
+  previewPanel: $("previewPanel"),
+  previewLiveBadge: $("previewLiveBadge"),
+  streamPreview: $("streamPreview"),
+  previewOverlay: $("previewOverlay"),
+  previewOverlayTitle: $("previewOverlayTitle"),
+  previewOverlayHint: $("previewOverlayHint"),
+  previewUnmute: $("previewUnmute"),
+
+  commentsPanel: $("commentsPanel"),
+  commentsCount: $("commentsCount"),
+  commentsFeed: $("commentsFeed"),
+  commentsEmpty: $("commentsEmpty"),
+  commentsClear: $("commentsClear"),
 };
 
 const state = {
@@ -710,6 +731,13 @@ function renderReservationsForLots(lots) {
       item.append(cancelBtn);
     }
 
+    // Бан спамера прямо из строки. Отмену брони это НЕ делает — блокировка
+    // влияет только на будущие комментарии, уже созданная бронь и позиция в
+    // МойСкладе остаются, их оператор снимает кнопкой «× отменить».
+    if (ev.viewerId != null) {
+      item.append(createBlockButton(ev, "спам в комментариях"));
+    }
+
     // Голосовое «+N шт»: восстанавливаем подсветку и кнопку из state, чтобы
     // предложение пережило этот ре-рендер (clearChildren выше стёр прошлый DOM).
     const pendingEntry = state.pendingQuantity.get(pendingQuantityKey(ev.viewerId, ev.commentId));
@@ -1040,8 +1068,69 @@ function handleServerMessage(payload) {
     return;
   }
 
+  if (payload.type === "viewerComment") {
+    // Лента «Комментарии зала»: каждый незаблокированный комментарий зрителя
+    // (VK или свой чат). Оператор ведёт эфир с телефона-камеры и не видит
+    // комментарии в самом VK — читает их здесь.
+    addViewerComment(payload);
+    return;
+  }
+
   logEvent(`Неизвестное сообщение: ${JSON.stringify(payload)}`, "warn");
 }
+
+// --- Лента «Комментарии зала» ---
+let viewerCommentCount = 0;
+const viewerCommentSeen = new Set();
+
+function addViewerComment(payload) {
+  const key = `${payload.source || "vk"}:${payload.commentId}`;
+  if (viewerCommentSeen.has(key)) return;
+  viewerCommentSeen.add(key);
+
+  const feed = elements.commentsFeed;
+  if (!feed) return;
+  elements.commentsEmpty.hidden = true;
+
+  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+
+  const row = document.createElement("div");
+  row.className = "comment-row";
+
+  const meta = document.createElement("div");
+  meta.className = "comment-meta";
+  const src = document.createElement("span");
+  src.className = `comment-src comment-src--${payload.source === "chat" ? "chat" : "vk"}`;
+  src.textContent = payload.source === "chat" ? "чат" : "VK";
+  const author = document.createElement("span");
+  author.className = "comment-author";
+  author.textContent = payload.viewerName || "Зритель";
+  meta.append(src, author);
+
+  const body = document.createElement("div");
+  body.className = "comment-text";
+  body.textContent = payload.text || "";
+
+  row.append(meta, body);
+  feed.appendChild(row);
+
+  if (pinned) feed.scrollTop = feed.scrollHeight;
+  while (feed.children.length > 300) feed.removeChild(feed.firstChild);
+
+  viewerCommentCount += 1;
+  if (elements.commentsCount) elements.commentsCount.textContent = `· ${viewerCommentCount}`;
+}
+
+function clearViewerComments() {
+  if (!elements.commentsFeed) return;
+  elements.commentsFeed.replaceChildren();
+  viewerCommentSeen.clear();
+  viewerCommentCount = 0;
+  if (elements.commentsCount) elements.commentsCount.textContent = "· 0";
+  elements.commentsEmpty.hidden = false;
+}
+
+elements.commentsClear?.addEventListener("click", clearViewerComments);
 
 function formatLatency(value) {
   if (typeof value !== "number") return "—";
@@ -1114,7 +1203,18 @@ function addReservationAttention(payload) {
     if (!list.children.length) banner.hidden = true;
   });
 
-  row.append(body, dismiss);
+  // Спам чаще всего оседает именно здесь: «бронь»-подобный текст без
+  // открытого лота. Поэтому бан доступен прямо из строки внимания.
+  if (payload.viewerId != null) {
+    const block = createBlockButton(
+      { viewerId: payload.viewerId, viewerName: payload.viewerName },
+      "спам в комментариях",
+    );
+    block.classList.add("attention-row__block");
+    row.append(body, block, dismiss);
+  } else {
+    row.append(body, dismiss);
+  }
   list.prepend(row);
   banner.hidden = false;
 
@@ -1725,6 +1825,95 @@ async function initStreamPanel() {
   }
 }
 
+// --- Превью эфира: HLS через локальный прокси /api/stream/hls/* ---
+// Cloud /live/ не отдаёт CORS, а /efir/ запрещает iframe (X-Frame-Options),
+// поэтому дашборд играет свой HLS-поток через same-origin прокси V-Amber.
+// Логика автоплея/ретраев зеркалит страницу зрителя deploy/stream-viewer/app.js.
+const PREVIEW_SRC = "/api/stream/hls/index.m3u8";
+const PREVIEW_RETRY_MS = 7000;
+let previewHls = null;
+let previewRetryTimer = null;
+let previewStarted = false;
+
+function previewShowOffline() {
+  elements.previewOverlay?.classList.remove("hidden");
+  if (elements.previewOverlayTitle) elements.previewOverlayTitle.textContent = "Эфир ещё не начался";
+  if (elements.previewLiveBadge) {
+    elements.previewLiveBadge.classList.remove("on");
+    elements.previewLiveBadge.textContent = "не в эфире";
+  }
+}
+
+function previewShowLive() {
+  elements.previewOverlay?.classList.add("hidden");
+  if (elements.previewLiveBadge) {
+    elements.previewLiveBadge.classList.add("on");
+    elements.previewLiveBadge.textContent = "в эфире";
+  }
+}
+
+function previewScheduleRetry() {
+  if (previewRetryTimer || !previewStarted) return;
+  previewRetryTimer = setTimeout(() => { previewRetryTimer = null; previewLoad(); }, PREVIEW_RETRY_MS);
+}
+
+function previewStopHls() {
+  if (previewHls) { previewHls.destroy(); previewHls = null; }
+}
+
+function previewLoad() {
+  const video = elements.streamPreview;
+  if (!video) return;
+  previewStopHls();
+  if (window.Hls && window.Hls.isSupported()) {
+    previewHls = new window.Hls({ liveDurationInfinity: true, maxBufferLength: 12 });
+    previewHls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      previewShowLive();
+      video.play().catch(() => {});
+    });
+    previewHls.on(window.Hls.Events.ERROR, (_e, data) => {
+      if (!data.fatal) return; // нет манифеста = эфир не идёт; лечим перезапуском
+      previewStopHls();
+      previewShowOffline();
+      previewScheduleRetry();
+    });
+    previewHls.loadSource(PREVIEW_SRC);
+    previewHls.attachMedia(video);
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = `${PREVIEW_SRC}?_=${Date.now()}`;
+    video.play().then(previewShowLive).catch(() => {});
+    video.onerror = () => {
+      video.removeAttribute("src");
+      video.load();
+      previewShowOffline();
+      previewScheduleRetry();
+    };
+    video.onplaying = previewShowLive;
+  }
+}
+
+function startStreamPreview() {
+  if (previewStarted) return;
+  previewStarted = true;
+  previewShowOffline();
+  previewLoad();
+}
+
+function stopStreamPreview() {
+  previewStarted = false;
+  if (previewRetryTimer) { clearTimeout(previewRetryTimer); previewRetryTimer = null; }
+  previewStopHls();
+  previewShowOffline();
+}
+
+elements.previewUnmute?.addEventListener("click", () => {
+  if (elements.streamPreview) elements.streamPreview.muted = false;
+  elements.previewUnmute.classList.remove("show");
+});
+elements.streamPreview?.addEventListener("playing", () => {
+  if (elements.streamPreview.muted) elements.previewUnmute?.classList.add("show");
+});
+
 // --- Панель «Чат зрителей» (dashboard) ---
 // Независима от WS-сессии распознавания речи (та открывается только по
 // «Старт») — читает публичную ленту /efir/-чата тем же HTTP-опросом, что и
@@ -2002,6 +2191,11 @@ function applyEfirMode(mode) {
   vkLiveUrlWrap.hidden = mode !== "vk";
   elements.streamPanel.hidden = !(mode === "own" && state.streamConfigured);
   elements.chatPanel.hidden = !(mode === "own" && state.chatConfigured);
+  // Превью своего потока имеет смысл только когда мы в него вещаем (свой эфир).
+  const showPreview = mode === "own" && state.streamConfigured;
+  elements.previewPanel.hidden = !showPreview;
+  if (showPreview) startStreamPreview();
+  else stopStreamPreview();
 }
 
 document.querySelectorAll("#efirModeToggle .mode-toggle__btn").forEach((btn) => {
@@ -2491,6 +2685,121 @@ async function loadDigestPreview() {
   }
 }
 
+// --- Блокировка спамеров ---
+//
+// Мягкая блокировка: сервер перестаёт обрабатывать комментарии зрителя
+// (ws-server → ingestViewerComment). В VK комментарии остаются, бана
+// сообщества здесь нет. Точки входа для оператора — кнопка «🚫» в строке
+// брони и в строке «требует внимания», то есть ровно там, где спам виден.
+
+async function refreshBlockedCount() {
+  try {
+    const response = await fetch("/api/blocked-viewers");
+    if (!response.ok) return;
+    const data = await response.json();
+    elements.blockedCount.textContent = String(data.count || 0);
+  } catch { /* панель не критична */ }
+}
+
+async function blockViewer({ viewerId, viewerName, reason }) {
+  if (viewerId == null || viewerId === "") return;
+  const who = viewerName || `id ${viewerId}`;
+  if (!window.confirm(`Заблокировать ${who}?\n\nЕго комментарии перестанут обрабатываться: без броней, без wish list. Снять блокировку можно в «🚫 Блокировки».`)) {
+    return;
+  }
+  try {
+    const response = await fetch("/api/blocked-viewers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ viewerId: String(viewerId), viewerName: viewerName || "", reason: reason || "" }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      logEvent(`Не удалось заблокировать ${who}: ${data.error || response.status}`, "warn");
+      return;
+    }
+    const data = await response.json();
+    elements.blockedCount.textContent = String(data.count || 0);
+    logEvent(`Зритель ${who} заблокирован — его комментарии игнорируются`, "warn");
+  } catch (error) {
+    logEvent(`Не удалось заблокировать ${who}: ${error?.message || error}`, "warn");
+  }
+}
+
+async function unblockViewer(viewerId) {
+  try {
+    const response = await fetch(`/api/blocked-viewers/${encodeURIComponent(viewerId)}`, { method: "DELETE" });
+    if (!response.ok) return;
+    const data = await response.json();
+    elements.blockedCount.textContent = String(data.count || 0);
+    logEvent(`Блокировка снята: id ${viewerId}`);
+    await renderBlockedList();
+  } catch (error) {
+    logEvent(`Не удалось снять блокировку: ${error?.message || error}`, "warn");
+  }
+}
+
+// Кнопка «🚫» для строки с известным зрителем. Возвращает готовый элемент —
+// вызывающий сам решает, куда его вставить.
+function createBlockButton(ev, reason) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "res-block";
+  button.title = "Заблокировать: комментарии этого зрителя перестанут обрабатываться";
+  button.textContent = "🚫";
+  button.addEventListener("click", () => {
+    void blockViewer({ viewerId: ev.viewerId, viewerName: ev.viewerName || ev.userName || "", reason });
+  });
+  return button;
+}
+
+async function renderBlockedList() {
+  let viewers = [];
+  try {
+    const response = await fetch("/api/blocked-viewers");
+    if (response.ok) {
+      const data = await response.json();
+      viewers = data.viewers || [];
+      elements.blockedCount.textContent = String(data.count || 0);
+    }
+  } catch { /* показываем пустой список */ }
+
+  clearChildren(elements.blockedList);
+  elements.blockedEmpty.hidden = viewers.length > 0;
+
+  for (const viewer of viewers) {
+    const row = document.createElement("div");
+    row.className = "blocked-row";
+
+    const body = document.createElement("div");
+    const head = document.createElement("div");
+    head.textContent = viewer.name || `id ${viewer.viewerId}`;
+    const sub = document.createElement("div");
+    sub.className = "dim";
+    const when = viewer.blockedAt ? new Date(viewer.blockedAt).toLocaleString() : "";
+    sub.textContent = [`id ${viewer.viewerId}`, when, viewer.reason].filter(Boolean).join(" · ");
+    body.append(head, sub);
+
+    const unblock = document.createElement("button");
+    unblock.type = "button";
+    unblock.className = "btn btn--ghost";
+    unblock.textContent = "Разблокировать";
+    unblock.addEventListener("click", () => { void unblockViewer(viewer.viewerId); });
+
+    row.append(body, unblock);
+    elements.blockedList.append(row);
+  }
+}
+
+function openBlockedModal() {
+  elements.blockedModal.hidden = false;
+  void renderBlockedList();
+}
+
+function closeBlockedModal() {
+  elements.blockedModal.hidden = true;
+}
+
 function openDigestModal() {
   elements.digestModal.hidden = false;
   elements.digestDate.value = digestState.date || todayLocalDate();
@@ -2553,6 +2862,12 @@ async function sendDigestMessages() {
 
 elements.digestButton.addEventListener("click", openDigestModal);
 elements.digestClose.addEventListener("click", closeDigestModal);
+elements.blockedButton.addEventListener("click", openBlockedModal);
+elements.blockedClose.addEventListener("click", closeBlockedModal);
+elements.blockedModal.addEventListener("click", (event) => {
+  if (event.target === elements.blockedModal) closeBlockedModal();
+});
+void refreshBlockedCount();
 elements.digestCancel.addEventListener("click", closeDigestModal);
 elements.digestRefresh.addEventListener("click", loadDigestPreview);
 elements.digestSend.addEventListener("click", sendDigestMessages);
@@ -3495,6 +3810,7 @@ function isEditableTarget(el) {
 function openModals() {
   return [
     elements.digestModal,
+    elements.blockedModal,
     elements.wishlistModal,
     elements.sendLogsModal,
     elements.wishlistConfirmModal,

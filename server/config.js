@@ -129,6 +129,15 @@ export const config = {
     publishUser: process.env.STREAM_PUBLISH_USER?.trim() || "",
     publishPass: process.env.STREAM_PUBLISH_PASS?.trim() || "",
     viewerUrl: process.env.STREAM_VIEWER_URL?.trim() || "",
+    // Origin страницы зрителя (без /efir/): нужен, чтобы дашборд мог показывать
+    // превью эфира. HLS с cloud (/live/) не отдаёт CORS и /efir/ запрещает
+    // iframe (X-Frame-Options: DENY), поэтому дашборд играет HLS через
+    // локальный прокси /api/stream/hls/* → {viewerOrigin}/live/* (same-origin).
+    viewerOrigin: (() => {
+      const raw = process.env.STREAM_VIEWER_URL?.trim();
+      if (!raw) return "";
+      try { return new URL(raw).origin; } catch { return ""; }
+    })(),
     statusTimeoutMs: parseIntEnv(process.env.STREAM_STATUS_TIMEOUT_MS, 3000),
   },
   // Чат зрителей на странице /efir/ (deploy/chat-service на cloud).
