@@ -308,6 +308,15 @@ a { color: inherit; }
    shrink below its own width, so flex:1 alone (old rule) let them bleed past
    the column and get clipped at the viewport edge (see note above). */
 .stream-actions { display: flex; flex-wrap: wrap; gap: var(--gap-2); }
+.stream-relay-line {
+  display: flex; align-items: center; gap: var(--gap-2);
+  font-size: var(--fs-sm); margin-bottom: var(--gap-3);
+  padding-bottom: var(--gap-3); border-bottom: 1px solid var(--border);
+}
+.stream-relay-state { font-family: var(--font-mono); font-weight: 600; }
+.stream-relay-state.ok { color: var(--green); }
+.stream-relay-state.warn { color: var(--text-muted); }
+.stream-relay-state.err { color: var(--red); }
 .stream-actions .btn { flex: 1 1 120px; }
 
 /* Пошаговый чек-лист запуска эфира (заполняется renderStreamChecklist) */

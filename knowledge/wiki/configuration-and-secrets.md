@@ -76,6 +76,14 @@ alternative to VK Live, see [[stream-integration]]:
 - `STREAM_VIEWER_URL` — public viewer page URL (`https://<domain>/efir/`,
   deploy/stream-viewer/), not the raw `.m3u8`.
 - `STREAM_STATUS_TIMEOUT_MS` — timeout for the status poll, default 3000.
+- Dual-stream to VK (ffmpeg relay, added 2026-07-22; all optional — no VK
+  target ⇒ off). `STREAM_VK_TARGET_URL` — full VK Live push URL, **or**
+  `STREAM_VK_RTMP_URL` + `STREAM_VK_KEY` (server + key from VK «Трансляции»,
+  combined as `server/key`; the key is a publish secret — `.env` only).
+  `STREAM_RELAY_SOURCE_URL` — RTMP read source, defaults to
+  `STREAM_RTMP_URL/<STREAM_PATH_NAME>`. `STREAM_FFMPEG_PATH` (default `ffmpeg`),
+  `STREAM_RELAY_RESTART_MAX` (5), `STREAM_RELAY_RESTART_DELAY_MS` (3000). See
+  [[stream-integration#Dual-stream: mirror the эфир to VK (2026-07-22)]].
 - `STREAM_CHAT_URL` — base URL of the viewer chat service
   (`https://<domain>/chat`, deploy/chat-service/ on `cloud`). Second
   reservation source alongside VK comments; the chat poller never starts

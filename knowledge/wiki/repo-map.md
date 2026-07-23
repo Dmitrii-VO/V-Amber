@@ -45,6 +45,10 @@ a replacement for code search, but it gives agents the right entry points.
 - `web-ui/hls.min.js` — hls.js vendored into the dashboard for the «Картинка
   эфира» preview, played through the `/api/stream/hls/*` same-origin proxy
   (`server/http-server.js`). See [[stream-integration]] / [[web-dashboard]].
+- `server/stream-relay.js` — V-Amber-managed ffmpeg relay that mirrors the own
+  эфир to VK Live (dual-stream). Best-effort, orchestrated by
+  `server/stream-orchestrator.js` on «Запустить/Остановить эфир». See
+  [[stream-integration#Dual-stream: mirror the эфир to VK (2026-07-22)]].
 - `server/session-log.js`, `server/session-jsonl.js`,
   `server/reservation-digest-log.js`, `server/logger.js`,
   `server/log-bundle.js`, `server/bundle-index.js`, and `server/zip-writer.js`
