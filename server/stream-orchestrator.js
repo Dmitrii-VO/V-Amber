@@ -3,7 +3,15 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { getStreamStatus } from "./stream-status.js";
 import { getObsState, configureObsStream, startObsStream, stopObsStream } from "./obs-client.js";
-import { startRelay, stopRelay, isRelayConfigured } from "./stream-relay.js";
+import { createStreamRelay } from "./stream-relay.js";
+
+// Singleton релея живёт здесь: оркестратор и так импортирует config, а
+// stream-relay.js специально от config развязан (см. комментарий там).
+const relay = createStreamRelay({ streamConfig: config.stream });
+const startRelay = () => relay.start();
+const stopRelay = () => relay.stop();
+const isRelayConfigured = () => relay.isConfigured();
+export const getRelayStatus = () => relay.status();
 
 // Оркестрация запуска эфира «одной кнопкой»: пошаговый preflight с
 // автопочинкой (прописать настройки OBS, запустить OBS), затем старт

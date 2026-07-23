@@ -1,6 +1,10 @@
 import { spawn as childSpawn } from "node:child_process";
-import { config } from "./config.js";
 import { logger } from "./logger.js";
+
+// ВНИМАНИЕ: этот модуль НЕ импортирует config.js специально. config.js при
+// загрузке требует YANDEX_SPEECHKIT_API_KEY и бросает без него — а тесты релея
+// (test/stream-relay.test.js) должны импортировать фабрику без ключа/окружения.
+// Реальный singleton с config создаётся в stream-orchestrator.js.
 
 // Дубль эфира в ВК: локальный ffmpeg читает свой поток из MediaMTX (RTMP) и
 // пушит его в ВК Live (RTMP, `-c copy` — без перекодирования, минимум CPU).
@@ -15,7 +19,7 @@ import { logger } from "./logger.js";
 // knowledge/wiki/stream-integration.md.
 
 export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
-  const cfg = streamConfig || config.stream;
+  const cfg = streamConfig || {};
   const spawn = spawnImpl || childSpawn;
   const logImpl = log || logger;
   const restartMax = Number.isFinite(cfg.relayRestartMax) ? cfg.relayRestartMax : 5;
@@ -139,11 +143,3 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
     },
   };
 }
-
-// Singleton поверх реального config/spawn — им пользуется оркестратор.
-const defaultRelay = createStreamRelay();
-
-export function startRelay() { return defaultRelay.start(); }
-export function stopRelay() { return defaultRelay.stop(); }
-export function getRelayStatus() { return defaultRelay.status(); }
-export function isRelayConfigured() { return defaultRelay.isConfigured(); }

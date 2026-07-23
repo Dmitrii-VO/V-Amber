@@ -11,8 +11,7 @@ import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 import { createReservationDigestLog } from "./reservation-digest-log.js";
 import { createAuth } from "./auth.js";
 import { getStreamStatus } from "./stream-status.js";
-import { preflightBroadcast, startBroadcast, stopBroadcast } from "./stream-orchestrator.js";
-import { getRelayStatus } from "./stream-relay.js";
+import { preflightBroadcast, startBroadcast, stopBroadcast, getRelayStatus } from "./stream-orchestrator.js";
 import { createChatClient } from "./chat-client.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
