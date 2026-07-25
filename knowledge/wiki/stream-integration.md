@@ -252,6 +252,10 @@ as preflight step 5 (`obs_preset`, after `obs_settings`). Defaults:
   `mismatches` and writes nothing.
 - macOS will prompt once for camera/microphone access for OBS; that
   consent cannot be granted over obs-websocket.
+- Operator-facing instructions for all of this live in
+  `SETUP_OBS_IPHONE.md` (Russian): what to do after updating, how to read
+  the new checklist step, and what to send us when the iPhone isn't
+  found. Keep it in sync when the preset changes.
 
 ## Chat session reset, tied to «Запустить эфир» (2026-07-06 — implemented)
 
