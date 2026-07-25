@@ -47,6 +47,37 @@ const SESQUI_WORDS = new Set(["полторы", "полтора"]);
 
 const THOUSAND_RE = /^тысяч[ауи]?$/;
 
+// Множитель тысяч может быть составным: «четырнадцать тысяч», «двадцать тысяч»,
+// «двадцать пять тысяч», «сто тысяч». THOUSANDS_MULTIPLIERS покрывает только
+// 1–10, поэтому «четырнадцать тысяч семьсот рублей» отдавало 14 ₽ вместо 14700 —
+// молча, и такая цена ушла бы в заказ (эфир 2026-07-25, лоты 03028/03029).
+// Читает число 1–999 из слов, начиная с i; возвращает null, если числа нет.
+function readSmallNumber(norm, i) {
+  let value = 0;
+  let j = i;
+
+  if (j < norm.length && HUNDREDS_WORDS.has(norm[j])) {
+    value += HUNDREDS_WORDS.get(norm[j]);
+    j += 1;
+  }
+
+  if (j < norm.length && TEEN_WORDS.has(norm[j])) {
+    value += TEEN_WORDS.get(norm[j]);
+    j += 1;
+  } else {
+    if (j < norm.length && TENS_WORDS.has(norm[j])) {
+      value += TENS_WORDS.get(norm[j]);
+      j += 1;
+    }
+    if (j < norm.length && UNIT_WORDS.has(norm[j])) {
+      value += UNIT_WORDS.get(norm[j]);
+      j += 1;
+    }
+  }
+
+  return value > 0 ? { value, next: j } : null;
+}
+
 function normalizeWord(word) {
   return word.toLowerCase().replace(/ё/g, "е");
 }
@@ -86,11 +117,13 @@ export function parseMonetaryWords(words) {
   } else if (i < norm.length && THOUSAND_RE.test(norm[i])) {
     value += 1000;
     i += 1;
-  } else if (i + 1 < norm.length && THOUSAND_RE.test(norm[i + 1])) {
-    const mult = THOUSANDS_MULTIPLIERS.get(norm[i]);
-    if (mult !== undefined) {
-      value += mult * 1000;
-      i += 2;
+  } else {
+    // Составной множитель: «две», «четырнадцать», «двадцать пять», «сто
+    // двадцать» — всё, что читается как 1–999 и упирается в «тысяч*».
+    const mult = readSmallNumber(norm, i);
+    if (mult && THOUSAND_RE.test(norm[mult.next] || "")) {
+      value += mult.value * 1000;
+      i = mult.next + 1;
     }
   }
 
