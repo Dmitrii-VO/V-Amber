@@ -14,6 +14,24 @@ bundles. The diagnostic bundle path calls `logger.flush()` before reading log
 files so the most recent server log records are included when the operator
 downloads logs immediately after an incident.
 
+Test runs (`node --test` sets `NODE_TEST_CONTEXT`) write to
+`logs/server.test.log` instead, so `npm test` no longer pollutes the real
+server log. `V_AMBER_LOG_FILE` overrides the path entirely — but log bundles
+only collect `logs/server.log*`, so an override diverts logs out of bundles.
+
+### Flood suppression in `reservation_no_open_lot`
+
+Since v0.1.70, bursts of "code without an open lot" comments (in-stream
+giveaways: viewers post hundreds of bare 3-digit numbers, e.g. 987 warns in
+ten minutes on 2026-07-25) are rate-limited by `server/comment-flood-guard.js`:
+past 8 events per 60s window the per-comment WARN and dashboard
+`reservationAttention` are suppressed. When reading logs, expect one
+`reservation_no_open_lot_flood` warn at burst start and a
+`reservation_no_open_lot_flood_ended` summary carrying `suppressed` count plus
+the first 50 suppressed events (`commentId`/`viewerId`/`code`/`source`) — those
+samples stand in for the individual lines during recovery analysis. Ambiguous
+matches against *open* lots always bypass the guard and keep their full WARN.
+
 ## Session logs
 
 Use session logs as the main source for reconstructing a broadcast after the
