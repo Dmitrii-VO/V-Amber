@@ -56,6 +56,25 @@ node --test "test/**/*.test.js"
 
 The suite changes frequently; trust `npm test` output for the current count.
 
+## Gotcha: modules that pull `config.js` fail on CI, not locally
+
+`server/config.js` resolves `YANDEX_SPEECHKIT_API_KEY` **at import time**
+and throws when it's missing. Locally `.env` supplies it, so a test that
+imports any module transitively depending on `config.js` (most of
+`server/*`) is green on the dev machine and red on CI, where there is no
+`.env` — the failure reads `Missing required environment variable`, not
+as an assertion failure. Set the key first, then import dynamically:
+
+```js
+process.env.YANDEX_SPEECHKIT_API_KEY = process.env.YANDEX_SPEECHKIT_API_KEY || "test-key";
+const { config } = await import("../server/config.js");
+```
+
+Static `import` is hoisted above the assignment, so the dynamic form is
+required. Examples: `test/config.article-triggers.test.js`,
+`test/obs-preset.test.js`. Reproduce CI locally with
+`DOTENV_CONFIG_PATH=/nonexistent node --test <file>`.
+
 ## Documentation note
 
 Some older docs still say no test command exists. Use this page and
