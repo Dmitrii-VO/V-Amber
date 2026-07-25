@@ -61,8 +61,9 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
 
   function spawnProc() {
     const ffmpeg = cfg.ffmpegPath || "ffmpeg";
+    let child;
     try {
-      proc = spawn(ffmpeg, buildArgs(), { stdio: ["ignore", "ignore", "pipe"] });
+      child = spawn(ffmpeg, buildArgs(), { stdio: ["ignore", "ignore", "pipe"] });
     } catch (error) {
       proc = null;
       state = "error";
@@ -70,20 +71,24 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
       logImpl.warn("stream-relay", "spawn_failed", { error: lastError });
       return;
     }
+    proc = child;
     state = "running";
     lastError = null;
     logImpl.info("stream-relay", "relay_started", { restarts });
 
-    proc.stderr?.on?.("data", (chunk) => {
-      const line = String(chunk).trim();
-      if (line) lastError = redact(line).slice(0, 300); // последняя строка stderr для диагностики
-    });
-    proc.on("error", (error) => {
-      lastError = redact(error?.message || String(error));
-      logImpl.warn("stream-relay", "relay_error", { error: lastError });
-    });
-    proc.on("exit", (code, signal) => {
+    // Каждый обработчик проверяет `proc === child`: после stop() или после
+    // быстрой пары stop→start сюда прилетают события УСТАРЕВШЕГО процесса —
+    // без проверки они затирали ссылку на новый ffmpeg (stop() терял его
+    // навсегда) и планировали второй параллельный релей в ВК.
+    let settled = false;
+    function handleDown(reason, meta) {
+      if (settled) return;
+      settled = true;
+      if (proc !== child) return; // событие от прошлого поколения — игнор
       proc = null;
+      // Defense-in-depth: обычно stop() зануляет proc синхронно и события
+      // после него отсекает проверка поколения выше; сюда stopping попадает
+      // только если exit пришёл в том же тике, что и kill.
       if (stopping) {
         state = "idle";
         return;
@@ -91,14 +96,37 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
       // Неожиданный выход: свой поток НЕ трогаем, только пробуем поднять
       // дубль в ВК заново — ограниченное число раз, чтобы не долбить вечно.
       state = "error";
-      logImpl.warn("stream-relay", "relay_exited", { code, signal, restarts, lastError });
+      logImpl.warn("stream-relay", reason, { ...meta, restarts, lastError });
       if (restarts < restartMax) {
         restarts += 1;
-        restartTimer = setTimeout(spawnProc, restartDelayMs);
+        restartTimer = setTimeout(() => {
+          restartTimer = null;
+          spawnProc();
+        }, restartDelayMs);
       } else {
         logImpl.warn("stream-relay", "relay_gave_up", { restartMax });
       }
+    }
+
+    child.stderr?.on?.("data", (chunk) => {
+      const line = String(chunk).trim();
+      if (line) lastError = redact(line).slice(0, 300); // последняя строка stderr для диагностики
     });
+    let spawnedOk = false;
+    child.once?.("spawn", () => {
+      spawnedOk = true;
+    });
+    child.on("error", (error) => {
+      lastError = redact(error?.message || String(error));
+      logImpl.warn("stream-relay", "relay_error", { error: lastError });
+      // Сбой самого запуска (ENOENT и т.п.) Node доставляет асинхронно через
+      // 'error' ДО 'spawn', и 'exit' после него уже не придёт. Раньше такой
+      // релей навсегда застревал в state="running" с мёртвым proc.
+      if (!spawnedOk) {
+        handleDown("relay_spawn_failed", { error: lastError });
+      }
+    });
+    child.on("exit", (code, signal) => handleDown("relay_exited", { code, signal }));
   }
 
   return {
@@ -109,6 +137,13 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
         return { ok: false, code: "not_configured", message: "Дубль в ВК не настроен (нет STREAM_VK_* / источника)" };
       }
       if (proc) return { ok: true, already: true };
+      // Отменяем ретрай, запланированный после краша: иначе start() в окне
+      // ожидания таймера спаунит свой процесс, а таймер следом — второй,
+      // и первый становится недостижимым (stop() знает только про proc).
+      if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+      }
       stopping = false;
       restarts = 0;
       lastError = null;
