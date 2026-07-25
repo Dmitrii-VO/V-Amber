@@ -416,6 +416,18 @@ export function createVkPublisher(config) {
   return {
     isEnabled,
     dmEnabled: Boolean(groupToken),
+    // Текущее давление на общую VK-очередь — для потребителей, которые могут
+    // подождать (опрос комментариев в ws-server): multiplier > 1 означает
+    // активный адаптивный backoff после VK 6, highPending — публикации,
+    // ждущие своей очереди. Опросу в такие моменты лучше отступить и не
+    // отъедать квоту у ответов покупателям.
+    getQueuePressure() {
+      return {
+        backoffMultiplier,
+        highPending: highQueue.length,
+        lowPending: lowQueue.length,
+      };
+    },
     // Возвращает (и кэширует) VK user id собственного аккаунта бота. Если
     // токена нет или users.get упал — возвращает 0; вызывающий код тогда
     // просто не фильтрует (поведение как раньше).

@@ -4,7 +4,19 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const logsDir = join(__dirname, "..", "logs");
-const logFilePath = join(logsDir, "server.log");
+
+// Тестовые прогоны (node --test выставляет NODE_TEST_CONTEXT в дочерних
+// процессах) пишут в отдельный файл: иначе каждый npm test подмешивает
+// фиктивные события в logs/server.log и локальная диагностика реальных
+// запусков тонет в тестовом шуме. V_AMBER_LOG_FILE — явный оверрайд пути
+// на крайний случай (например, увести логи на другой диск). ВНИМАНИЕ:
+// диагностический бандл (log-bundle.js) собирает именно logs/server.log —
+// с оверрайдом на другой путь server.log в бандл не попадёт.
+const overrideLogFile = process.env.V_AMBER_LOG_FILE?.trim() || "";
+const isTestRunner = Boolean(process.env.NODE_TEST_CONTEXT);
+const logFilePath = overrideLogFile
+  || join(logsDir, isTestRunner ? "server.test.log" : "server.log");
+const logFileDir = dirname(logFilePath);
 
 const ROTATE_BYTES = 10 * 1024 * 1024;
 const ROTATE_KEEP = 5;
@@ -80,7 +92,7 @@ function normalizeMeta(meta) {
 function writeLine(line) {
   writeChain = writeChain
     .then(async () => {
-      await mkdir(logsDir, { recursive: true });
+      await mkdir(logFileDir, { recursive: true });
       writesSinceRotateCheck += 1;
       if (writesSinceRotateCheck >= ROTATE_CHECK_EVERY) {
         writesSinceRotateCheck = 0;

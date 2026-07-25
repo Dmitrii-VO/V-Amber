@@ -237,6 +237,27 @@ async function main() {
   });
 
   httpServer.on("error", (error) => {
+    // Порт занят = почти всегда вторая копия V-Amber (лог 2026-07-24: двойной
+    // запуск на маке оператора). Раньше процесс молча жил дальше без HTTP —
+    // «зомби», который продолжал дёргать МойСклад и греть кеши. Завершаемся
+    // с понятным сообщением: рабочая копия уже открыта на том же порту.
+    if (error?.code === "EADDRINUSE") {
+      logger.error("http", "port_busy_exiting", {
+        port: config.port,
+        hint: "V-Amber уже запущен — вторая копия завершается",
+      });
+      console.error(
+        `\nV-Amber уже запущен: порт ${config.port} занят.\n`
+        + `Откройте http://localhost:${config.port} в браузере или закройте вторую копию приложения.\n`,
+      );
+      // flush с таймаутом: зависший write-chain (диск/антивирус) не должен
+      // воскресить того самого зомби, ради которого этот выход и написан.
+      const flushTimeout = new Promise((resolve) => {
+        setTimeout(resolve, 2000).unref?.();
+      });
+      void Promise.race([logger.flush(), flushTimeout]).finally(() => process.exit(1));
+      return;
+    }
     logger.error("http", "server_listen_failed", {
       port: config.port,
       error,
