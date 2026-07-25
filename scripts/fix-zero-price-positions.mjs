@@ -16,7 +16,18 @@ const EXECUTE = process.argv.includes("--execute");
 
 // priceRub = the price the BUYER pays (already discounted), reconstructed from the
 // эфир transcript. null = could not be reconstructed (no base price spoken) → skip.
+//
+// positionId may be omitted when only the productId is known (the session jsonl
+// records productId on reservation_finalized, never the position). Then the
+// position is resolved by listing the order's positions and matching productId.
 const FIXES = [
+  // --- эфир 2026-07-25 ---
+  // Both prices WERE voiced, as "<сумма> рублей по стоимости" — the amount sits to
+  // the LEFT of the trigger, which detectPrice did not scan. Fixed separately.
+  { code: "03116", viewer: "Марго Краснова", orderId: "c3b5619a-877b-11f1-0a80-15c30024977d", productId: "9528ccfc-4f83-11f1-0a80-0567000d1039", priceRub: 1220.0, note: "«тысяча двести двадцать рублей по стоимости» 19:04:30" },
+  { code: "03119", viewer: "Клара Дячук",    orderId: "983780fd-8784-11f1-0a80-1ad40026a2d9", productId: "01225810-4f84-11f1-0a80-0d08000d543e", priceRub: 1400.0, note: "«тысяча четыреста рублей по стоимости» 19:05:26" },
+
+  // --- эфир 2026-06-28 ---
   { code: "03081", viewer: "Елена Ушакова",   orderId: "fa299a77-731e-11f1-0a80-1ff00062702a", positionId: "9fb7ac22-7322-11f1-0a80-07770063ccce", priceRub: 3828.0,  note: "5890 −35% (система посчитала 3828)" },
   { code: "03059", viewer: "Марго Краснова",  orderId: "7c57089c-730e-11f1-0a80-0c52005fbad4", positionId: "d164eb23-7321-11f1-0a80-113c0063ec17", priceRub: 1487.5, note: "1750 −15%" },
   { code: "03082", viewer: "Марина Балашова", orderId: "7a8eb673-7320-11f1-0a80-1da6006474ee", positionId: "ec01de89-7323-11f1-0a80-1ff000631acc", priceRub: 1470.0,  note: "1470 (без скидки)" },
@@ -42,7 +53,16 @@ async function req(method, path, body) {
 console.log(`MODE: ${EXECUTE ? "EXECUTE (will PUT prices)" : "DRY-RUN (read-only)"}\n`);
 let toFix = 0, skipped = 0, fixed = 0;
 for (const f of FIXES) {
-  const pos = await req("GET", `entity/customerorder/${f.orderId}/positions/${f.positionId}`);
+  let positionId = f.positionId;
+  if (!positionId) {
+    // Resolve by productId: list the order's positions and match the assortment href.
+    const list = await req("GET", `entity/customerorder/${f.orderId}/positions?limit=100`);
+    if (list.__404) { console.log(`  ✗ ${f.code} ${f.viewer}: order NOT FOUND — skip`); skipped++; continue; }
+    const hits = (list.rows || []).filter((r) => (r.assortment?.meta?.href || "").includes(f.productId));
+    if (hits.length !== 1) { console.log(`  ✗ ${f.code} ${f.viewer}: expected 1 position for product ${f.productId}, found ${hits.length} — skip`); skipped++; continue; }
+    positionId = hits[0].id;
+  }
+  const pos = await req("GET", `entity/customerorder/${f.orderId}/positions/${positionId}`);
   if (pos.__404) { console.log(`  ✗ ${f.code} ${f.viewer}: position NOT FOUND in MoySklad (order/position cancelled?) — skip`); skipped++; continue; }
   const curRub = (pos.price || 0) / 100;
   const qty = pos.quantity;
@@ -52,7 +72,7 @@ for (const f of FIXES) {
   console.log(`  → ${tag}: current=${curRub}₽ qty=${qty}  =>  set ${f.priceRub}₽   [${f.note}]`);
   toFix++;
   if (EXECUTE) {
-    await req("PUT", `entity/customerorder/${f.orderId}/positions/${f.positionId}`, { price: Math.round(f.priceRub * 100) });
+    await req("PUT", `entity/customerorder/${f.orderId}/positions/${positionId}`, { price: Math.round(f.priceRub * 100) });
     fixed++;
     await new Promise(x => setTimeout(x, 200));
   }
