@@ -149,6 +149,37 @@ test("поздний exit старого процесса после stop→star
   assert.equal(newChild.killed, true);
 });
 
+test("start в окне ожидания рестарт-таймера отменяет таймер — второй ffmpeg не спаунится", async () => {
+  const spawn = makeFakeSpawn();
+  const relay = createStreamRelay({ streamConfig: { ...CFG, relayRestartDelayMs: 30 }, spawnImpl: spawn, log: silentLog });
+  relay.start();
+  spawn.spawned[0].emit("exit", 1, null); // краш → рестарт запланирован через 30мс
+  assert.equal(relay.status().state, "error");
+
+  relay.start(); // оператор перезапускает раньше таймера
+  assert.equal(spawn.spawned.length, 2);
+  assert.equal(relay.status().state, "running");
+
+  await delay(80); // таймер (если бы выжил) уже сработал бы
+  assert.equal(spawn.spawned.length, 2, "отменённый ретрай не спаунит третий процесс");
+  relay.stop();
+  assert.equal(spawn.spawned[1].killed, true, "stop контролирует именно новый процесс");
+});
+
+test("runtime 'error' после успешного spawn не роняет релей — ждём exit", () => {
+  const spawn = makeFakeSpawn();
+  const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: spawn, log: silentLog });
+  relay.start();
+  const child = spawn.spawned[0];
+  child.emit("spawn"); // процесс реально стартовал
+  child.emit("error", new Error("kill EPERM")); // ошибка НЕ запуска
+  assert.equal(relay.status().state, "running", "процесс жив — running сохраняется");
+
+  child.emit("exit", 1, null); // настоящий выход обрабатывается как раньше
+  assert.equal(relay.status().state, "error");
+  relay.stop();
+});
+
 test("синхронный сбой запуска ffmpeg → spawn_failed, свой эфир не затронут", () => {
   const throwingSpawn = () => { throw new Error("spawn ffmpeg ENOENT"); };
   const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: throwingSpawn, log: silentLog });

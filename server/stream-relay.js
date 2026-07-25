@@ -86,6 +86,9 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
       settled = true;
       if (proc !== child) return; // событие от прошлого поколения — игнор
       proc = null;
+      // Defense-in-depth: обычно stop() зануляет proc синхронно и события
+      // после него отсекает проверка поколения выше; сюда stopping попадает
+      // только если exit пришёл в том же тике, что и kill.
       if (stopping) {
         state = "idle";
         return;
@@ -96,7 +99,10 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
       logImpl.warn("stream-relay", reason, { ...meta, restarts, lastError });
       if (restarts < restartMax) {
         restarts += 1;
-        restartTimer = setTimeout(spawnProc, restartDelayMs);
+        restartTimer = setTimeout(() => {
+          restartTimer = null;
+          spawnProc();
+        }, restartDelayMs);
       } else {
         logImpl.warn("stream-relay", "relay_gave_up", { restartMax });
       }
@@ -131,6 +137,13 @@ export function createStreamRelay({ streamConfig, spawnImpl, log } = {}) {
         return { ok: false, code: "not_configured", message: "Дубль в ВК не настроен (нет STREAM_VK_* / источника)" };
       }
       if (proc) return { ok: true, already: true };
+      // Отменяем ретрай, запланированный после краша: иначе start() в окне
+      // ожидания таймера спаунит свой процесс, а таймер следом — второй,
+      // и первый становится недостижимым (stop() знает только про proc).
+      if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+      }
       stopping = false;
       restarts = 0;
       lastError = null;
