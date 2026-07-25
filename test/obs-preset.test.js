@@ -27,6 +27,8 @@ function makeObs(overrides = {}) {
     },
     profile: { "Output/Mode": "Simple", "SimpleOutput/VBitrate": "4500" },
     scenes: ["V-Amber"],
+    // Элементы сцен: имя сцены → список имён источников в ней.
+    sceneItems: { "V-Amber": ["iPhone — камера", "iPhone — микрофон"] },
     inputKinds: ["av_capture_input_v2", "coreaudio_input_capture", "browser_source"],
     inputs: {
       "iPhone — камера": { kind: "av_capture_input_v2", settings: { device: "cam-uid-iphone" } },
@@ -63,6 +65,12 @@ function makeObs(overrides = {}) {
         return { scenes: state.scenes.map((sceneName) => ({ sceneName })) };
       case "CreateScene":
         state.scenes.push(data.sceneName);
+        state.sceneItems[data.sceneName] = [];
+        return {};
+      case "GetSceneItemList":
+        return { sceneItems: (state.sceneItems[data.sceneName] || []).map((sourceName) => ({ sourceName })) };
+      case "CreateSceneItem":
+        state.sceneItems[data.sceneName].push(data.sourceName);
         return {};
       case "SetCurrentProgramScene":
         return {};
@@ -72,6 +80,7 @@ function makeObs(overrides = {}) {
         return { inputs: Object.entries(state.inputs).map(([inputName, v]) => ({ inputName, inputKind: v.kind })) };
       case "CreateInput":
         state.inputs[data.inputName] = { kind: data.inputKind, settings: { ...data.inputSettings } };
+        state.sceneItems[data.sceneName].push(data.inputName);
         return {};
       case "GetInputSettings":
         return { inputSettings: { ...state.inputs[data.inputName].settings } };
@@ -132,6 +141,16 @@ test("переключает источник на айфон, если выбр
   obs.state.inputs["iPhone — камера"].settings.device = "cam-uid-facetime";
   await runObsPreset(obs.request, PRESET);
   assert.equal(obs.state.inputs["iPhone — камера"].settings.device, "cam-uid-iphone");
+});
+
+test("источник есть, но не в нашей сцене — добавляем элемент, а не второй вход", async () => {
+  // OBS удаляет вход только вместе с последним его элементом на всех сценах,
+  // поэтому «вход существует» ещё не значит «источник в эфире».
+  const obs = makeObs({ sceneItems: { "V-Amber": ["iPhone — микрофон"], "Другая сцена": ["iPhone — камера"] } });
+  const report = await runObsPreset(obs.request, PRESET);
+  assert.deepEqual(obs.state.sceneItems["V-Amber"], ["iPhone — микрофон", "iPhone — камера"]);
+  assert.equal(Object.keys(obs.state.inputs).length, 2);
+  assert.match(report.changes.join(" "), /добавлен в сцену/);
 });
 
 test("айфон не подключён — предупреждение, остальное применяется", async () => {

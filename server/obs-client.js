@@ -256,6 +256,19 @@ async function ensureDeviceInput(request, spec, apply, report) {
       sceneName, inputName, inputKind: kind, inputSettings: {}, sceneItemEnabled: true,
     });
     report.changes.push(`создан источник «${inputName}»`);
+  } else {
+    // Вход может существовать, но не лежать в нашей сцене: OBS удаляет вход
+    // только когда убрали последний его элемент со всех сцен. Иначе получим
+    // настроенный источник, которого нет в эфире.
+    const { sceneItems } = await request("GetSceneItemList", { sceneName });
+    if (!(sceneItems || []).some((item) => item.sourceName === inputName)) {
+      if (!apply) {
+        report.mismatches.push(`источника «${inputName}» нет в сцене «${sceneName}»`);
+        return;
+      }
+      await request("CreateSceneItem", { sceneName, sourceName: inputName, sceneItemEnabled: true });
+      report.changes.push(`«${inputName}» добавлен в сцену «${sceneName}»`);
+    }
   }
 
   const { propertyItems } = await request("GetInputPropertiesListPropertyItems", {

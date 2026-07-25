@@ -228,7 +228,12 @@ as preflight step 5 (`obs_preset`, after `obs_settings`). Defaults:
   flip a profile out of Advanced mode. Profile params apply from the next
   stream start, not mid-stream.
 - Sources: ensures the scene (`CreateScene` + `SetCurrentProgramScene`),
-  then one input per device. Kinds are picked from `GetInputKindList`
+  then one input per device. An existing input is also checked for
+  **presence in that scene** (`GetSceneItemList` → `CreateSceneItem`):
+  OBS only drops an input when its last scene item anywhere is removed,
+  so "the input exists" does not mean "the source is on air". Only the
+  freshly created scene is switched to — an existing scene the operator
+  is sitting on is left alone. Kinds are picked from `GetInputKindList`
   (`av_capture_input_v2` → `av_capture_input` for camera,
   `coreaudio_input_capture` for mic), so a non-mac OBS just yields a
   warning instead of a failure. The device itself is resolved by
