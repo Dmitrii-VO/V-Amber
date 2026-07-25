@@ -176,7 +176,8 @@ column above "Брони", styled with the existing `.panel` classes.
   `POST /api/stream/start`, `POST /api/stream/stop` — all always `200`
   with the `{ok, steps}` shape.
 - Config: `config.obs` — `OBS_WEBSOCKET_URL` (default
-  `ws://127.0.0.1:4455`), `OBS_WEBSOCKET_PASSWORD`, `OBS_TIMEOUT_MS`.
+  `ws://127.0.0.1:4455`), `OBS_WEBSOCKET_PASSWORD`, `OBS_TIMEOUT_MS`, plus
+  the quality/source preset vars below.
   V-Amber and OBS run on the same operator machine, so localhost is right.
 
 ### Shooting from a phone while OBS/V-Amber run on the Mac (2026-07-06, question)
@@ -205,6 +206,47 @@ only an OBS scene source:
   would no longer control the эфир — the operator would have to start/stop
   the phone's RTMP push manually and only «Проверить эфир» (MediaMTX
   status) would still make sense.
+
+### OBS quality/source preset, written by V-Amber (2026-07-25 — implemented)
+
+Follow-up to the section above: instead of trusting whatever the operator
+last clicked in OBS, V-Amber now writes the known-good эфир setup itself,
+as preflight step 5 (`obs_preset`, after `obs_settings`). Defaults:
+**1920x1080 @ 30 fps, 4500 kbps, camera + mic of the connected iPhone.**
+
+- `applyObsPreset(preset, {apply})` in `server/obs-client.js` — one
+  websocket connection for the whole preset; the body is split out as
+  `runObsPreset(request, preset, {apply})` so tests drive it with a fake
+  `request()` and no socket (`test/obs-preset.test.js`).
+- Video: `SetVideoSettings` (base **and** output canvas + `fpsNumerator`
+  with denominator 1).
+- Bitrate: OBS has **no** `SetOutputSettings` in obs-websocket v5. Only
+  the profile ini is reachable, via `SetProfileParameter`, and only
+  Simple mode keeps the bitrate there (Advanced mode stores encoder
+  settings in a separate json the protocol can't touch). So the preset
+  writes `Output/Mode=Simple` + `SimpleOutput/VBitrate` — i.e. it will
+  flip a profile out of Advanced mode. Profile params apply from the next
+  stream start, not mid-stream.
+- Sources: ensures the scene (`CreateScene` + `SetCurrentProgramScene`),
+  then one input per device. Kinds are picked from `GetInputKindList`
+  (`av_capture_input_v2` → `av_capture_input` for camera,
+  `coreaudio_input_capture` for mic), so a non-mac OBS just yields a
+  warning instead of a failure. The device itself is resolved by
+  `GetInputPropertiesListPropertyItems` (property `device` / `device_id`)
+  and matched by name substring (`OBS_*_DEVICE_MATCH`, default
+  `iphone,айфон`) — UIDs differ per machine, so matching by name is the
+  only portable option.
+- **Never blocks the эфир.** Every sub-step is wrapped: failures become
+  `warnings`, the step renders as `fail` with a hint (plug in the iPhone,
+  grant camera/mic permission in System Settings), but `preflight` stays
+  `ok` — a missing iPhone must not stop a broadcast that has a working
+  scene of its own. Same non-blocking pattern as `vk_relay`.
+- Skipped entirely while OBS is streaming (video settings and profile
+  params are locked mid-output), and with `OBS_APPLY_PRESET=0`.
+- `fix:false` (the `GET /api/stream/preflight` diagnostic) only reports
+  `mismatches` and writes nothing.
+- macOS will prompt once for camera/microphone access for OBS; that
+  consent cannot be granted over obs-websocket.
 
 ## Chat session reset, tied to «Запустить эфир» (2026-07-06 — implemented)
 

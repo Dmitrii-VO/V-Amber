@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { getStreamStatus } from "./stream-status.js";
-import { getObsState, configureObsStream, startObsStream, stopObsStream } from "./obs-client.js";
+import { getObsState, configureObsStream, applyObsPreset, startObsStream, stopObsStream } from "./obs-client.js";
 import { createStreamRelay } from "./stream-relay.js";
 
 // Singleton релея живёт здесь: оркестратор и так импортирует config, а
@@ -181,7 +181,50 @@ export async function preflightBroadcast({ fix = true } = {}) {
     }
   }
 
+  // 5. Пресет качества и источников (1080p30, битрейт, камера и микрофон
+  // айфона). Never-blocking: если айфон не подключён или OBS не дал сменить
+  // настройку, оператор увидит шаг «fail», но эфир всё равно запустится —
+  // в OBS может быть своя сцена, и рвать из-за этого запуск нельзя.
+  await presetStep(steps, { fix, streaming: obs.streaming });
+
   return { ok: true, steps, obsStreaming: obs.streaming, mediamtxLive: Boolean(mtx.live) };
+}
+
+// Отдельно от preflight-цепочки: этот шаг никогда не возвращает ok:false.
+async function presetStep(steps, { fix, streaming }) {
+  if (!config.obs.applyPreset) return;
+  const label = "Качество и источники OBS";
+
+  // SetVideoSettings и настройки профиля OBS отвергает, пока идёт вывод.
+  if (streaming) {
+    steps.push(step("obs_preset", label, "ok", "OBS уже вещает — пресет не трогаем"));
+    return;
+  }
+
+  let report;
+  try {
+    report = await applyObsPreset(config.obs, { apply: fix });
+  } catch (error) {
+    steps.push(step("obs_preset", label, "fail", error?.message || String(error),
+      "Проверьте настройки видео и источники в OBS вручную."));
+    return;
+  }
+
+  const { changes, mismatches, warnings } = report;
+  const want = `${config.obs.videoWidth}x${config.obs.videoHeight} @ ${config.obs.videoFps} fps, `
+    + `${config.obs.videoBitrateKbps} кбит/с`;
+  if (warnings.length) {
+    steps.push(step("obs_preset", label, "fail", warnings.join("; "),
+      "Подключите айфон к маку кабелем и разрешите доступ к камере и микрофону "
+      + "(Системные настройки → Конфиденциальность). Остальное V-Amber пропишет сам."));
+  } else if (changes.length) {
+    steps.push(step("obs_preset", label, "fixed", changes.join("; ")));
+  } else if (mismatches.length) {
+    steps.push(step("obs_preset", label, "fail", mismatches.join("; "),
+      "Нажмите «Запустить эфир» — настройки пропишутся автоматически."));
+  } else {
+    steps.push(step("obs_preset", label, "ok", want));
+  }
 }
 
 // Дубль эфира в ВК (best-effort): после того как свой поток пошёл, поднимаем
