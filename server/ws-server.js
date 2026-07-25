@@ -17,6 +17,7 @@ import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
 import { createChatClient } from "./chat-client.js";
 import { resolveKnownCode } from "./product-code-resolver.js";
+import { createCommentFloodGuard } from "./comment-flood-guard.js";
 import {
   sendJson,
   getVkPublicationCommentId,
@@ -1524,6 +1525,12 @@ export function attachWsServer(httpServer, config, services = {}) {
     // пересекаются с VK. Денежный путь (matching лотов, сток-гейт, МойСклад)
     // общий и от источника не зависит; source решает только компонент логов и
     // канал ответа покупателю (notifyReservationStatus).
+    // Розыгрыши в эфире («угадай число») дают сотни комментариев-кодов без
+    // открытого лота за считанные минуты; без ограничителя каждый такой
+    // комментарий порождает WARN и карточку reservationAttention, погребая
+    // под собой настоящие проблемы (см. comment-flood-guard.js).
+    const noOpenLotFloodGuard = createCommentFloodGuard();
+
     function ingestViewerComment(comment) {
       const logSource = comment.source === "chat" ? "chat" : "vk";
 
@@ -1575,6 +1582,26 @@ export function attachWsServer(httpServer, config, services = {}) {
         // повторите»).
         const probe = parseReservationComment(comment.text);
         if (probe.hasReservationKeyword && probe.code) {
+          const flood = noOpenLotFloodGuard.hit();
+          if (flood.floodEnded) {
+            logger.info(logSource, "reservation_no_open_lot_flood_ended", {
+              connectionId,
+              suppressed: flood.floodEnded.suppressed,
+            });
+          }
+          if (flood.suppress) {
+            if (flood.floodStarted) {
+              logger.warn(logSource, "reservation_no_open_lot_flood", {
+                connectionId,
+                hint: "всплеск кодов без открытого лота (похоже на розыгрыш) — отдельные события подавлены до конца всплеска",
+              });
+              sendJson(websocket, {
+                type: "warning",
+                message: "Много комментариев с кодами без открытого лота (розыгрыш?) — показываю не все, бронь по ним не создаётся",
+              });
+            }
+            return;
+          }
           const reason = target?.reason || "no_open_lot";
           const knownCodes = productCodeCache?.getCodes?.() || null;
           const probeCodeResolution = knownCodes && knownCodes.size > 0
@@ -1891,6 +1918,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       const IDLE_POLL_STEP_MS = 1500;
       const IDLE_POLL_MAX_MS = 8000;
       const NO_OPEN_LOT_GRACE_MS = 30000;
+      // Пока в high-полосе VK-очереди ждут публикации (закрытия лотов,
+      // ответы о брони) — опрос комментариев не чаще этого интервала.
+      const PUBLISH_PRESSURE_POLL_MS = 4000;
 
       void (async function pollLoop() {
         let initialized = false;
@@ -2025,6 +2055,21 @@ export function attachWsServer(httpServer, config, services = {}) {
             // Тишина — плавно растягиваем интервал до потолка.
             quietCycles += 1;
             delayMs = Math.min(IDLE_POLL_MAX_MS, ACTIVE_POLL_MS + quietCycles * IDLE_POLL_STEP_MS);
+          }
+
+          // Опрос — low-priority: под rate-limit'ом (адаптивный backoff после
+          // VK 6) или при очереди публикаций отступаем, чтобы квота уходила
+          // ответам покупателям, а не чтению (эфир 2026-07-25: 52 из 63
+          // rate-limit'ов пришлись на video.getComments, и в этот момент
+          // подтверждения броней уходили со 2–3 попытки).
+          const pressure = vk.getQueuePressure?.();
+          if (pressure && consecutiveFailures === 0) {
+            if (pressure.backoffMultiplier > 1) {
+              delayMs = Math.max(delayMs, ACTIVE_POLL_MS * pressure.backoffMultiplier);
+            }
+            if (pressure.highPending > 0) {
+              delayMs = Math.max(delayMs, PUBLISH_PRESSURE_POLL_MS);
+            }
           }
           await new Promise((resolve) => {
             setTimeout(resolve, delayMs);
