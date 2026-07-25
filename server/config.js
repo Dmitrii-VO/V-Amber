@@ -187,6 +187,26 @@ export const config = {
     wsUrl: process.env.OBS_WEBSOCKET_URL?.trim() || "ws://127.0.0.1:4455",
     wsPassword: process.env.OBS_WEBSOCKET_PASSWORD?.trim() || "",
     timeoutMs: parseIntEnv(process.env.OBS_TIMEOUT_MS, 4000),
+    // Пресет качества и источников эфира: V-Amber приводит OBS оператора к
+    // одному known-good виду (1080p30, 4500 кбит/с, камера и микрофон
+    // подключённого айфона), чтобы не зависеть от того, что оператор нажал
+    // в OBS руками. Применяется в preflight перед стартом эфира и только
+    // когда OBS не вещает. OBS_APPLY_PRESET=0 полностью выключает шаг.
+    applyPreset: process.env.OBS_APPLY_PRESET !== "0",
+    videoWidth: parseIntEnv(process.env.OBS_VIDEO_WIDTH, 1920),
+    videoHeight: parseIntEnv(process.env.OBS_VIDEO_HEIGHT, 1080),
+    videoFps: parseIntEnv(process.env.OBS_VIDEO_FPS, 30),
+    videoBitrateKbps: parseIntEnv(process.env.OBS_VIDEO_BITRATE_KBPS, 4500),
+    // Сцена и источники, которые пресет создаёт/чинит. Имена — те, что
+    // оператор видит в OBS; менять их безопасно, привязки по имени.
+    sceneName: process.env.OBS_SCENE_NAME?.trim() || "V-Amber",
+    cameraInputName: process.env.OBS_CAMERA_INPUT_NAME?.trim() || "iPhone — камера",
+    micInputName: process.env.OBS_MIC_INPUT_NAME?.trim() || "iPhone — микрофон",
+    // Подстроки (регистронезависимо), по которым в списке устройств macOS
+    // ищем нужный вход. Айфон по кабелю/Continuity Camera отдаёт устройства
+    // вида «iPhone Романа» и «Микрофон iPhone».
+    cameraDeviceMatch: parseCsvEnv(process.env.OBS_CAMERA_DEVICE_MATCH, ["iphone", "айфон"]),
+    micDeviceMatch: parseCsvEnv(process.env.OBS_MIC_DEVICE_MATCH, ["iphone", "айфон"]),
   },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),
