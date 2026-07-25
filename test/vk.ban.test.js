@@ -10,10 +10,12 @@ import { createVkPublisher } from "../server/vk.js";
 function installStub() {
   const original = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = typeof input === "string" ? new URL(input) : input;
     const method = url.pathname.replace("/method/", "");
-    calls.push({ method, url });
+    // Параметры VK-вызова (включая access_token) — в теле POST, не в URL.
+    const params = init?.body instanceof URLSearchParams ? init.body : new URLSearchParams();
+    calls.push({ method, url, params });
     return { ok: true, status: 200, async json() { return { response: 1 }; } };
   };
   return { calls, restore() { globalThis.fetch = original; } };
@@ -30,9 +32,9 @@ test("banViewer банит в сообществе эфира: group_id = -liveO
     assert.equal(res.groupId, "221975350");
     const ban = stub.calls.find((c) => c.method === "groups.ban");
     assert.ok(ban, "groups.ban должен быть вызван");
-    assert.equal(ban.url.searchParams.get("group_id"), "221975350");
-    assert.equal(ban.url.searchParams.get("owner_id"), "5001");
-    assert.equal(ban.url.searchParams.get("access_token"), "user-tok");
+    assert.equal(ban.params.get("group_id"), "221975350");
+    assert.equal(ban.params.get("owner_id"), "5001");
+    assert.equal(ban.params.get("access_token"), "user-tok");
   } finally { stub.restore(); }
 });
 
@@ -66,9 +68,9 @@ test("deleteVideoComment удаляет на owner_id эфирного виде�
     assert.equal(res.ok, true);
     const del = stub.calls.find((c) => c.method === "video.deleteComment");
     assert.ok(del, "video.deleteComment должен быть вызван");
-    assert.equal(del.url.searchParams.get("owner_id"), "-221975350");
-    assert.equal(del.url.searchParams.get("comment_id"), "777");
-    assert.equal(del.url.searchParams.get("access_token"), "user-tok");
+    assert.equal(del.params.get("owner_id"), "-221975350");
+    assert.equal(del.params.get("comment_id"), "777");
+    assert.equal(del.params.get("access_token"), "user-tok");
   } finally { stub.restore(); }
 });
 

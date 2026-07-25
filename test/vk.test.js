@@ -7,14 +7,16 @@ import {
 } from "../server/vk.js";
 
 // Минимальный стаб fetch для video.createComment + загрузки фото. Маршрутизация
-// по pathname метода и наличию параметра attachments.
+// по pathname метода и наличию параметра attachments. Параметры VK-вызовов
+// (включая access_token) живут в теле POST — стаб отдаёт их как `params`.
 function installVkFetchStub(handlers) {
   const original = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (input, init) => {
     const url = typeof input === "string" ? new URL(input) : input;
     const method = url.pathname.replace("/method/", "");
-    calls.push({ method, url, init });
+    const params = init?.body instanceof URLSearchParams ? init.body : new URLSearchParams();
+    calls.push({ method, url, params, init });
 
     const makeOk = (payload) => ({
       ok: true,
@@ -32,7 +34,7 @@ function installVkFetchStub(handlers) {
       return makeOk({ response: [{ owner_id: -10, id: 99 }] });
     }
     if (method === "video.createComment") {
-      const hasAttachment = url.searchParams.has("attachments");
+      const hasAttachment = params.has("attachments");
       return makeOk(handlers.createComment(hasAttachment));
     }
     return makeOk({ response: {} });
@@ -120,10 +122,10 @@ test("publishLotCard republishes text-only when VK rejects the photo (error 100)
 
     const commentCalls = stub.calls.filter((c) => c.method === "video.createComment");
     assert.equal(commentCalls.length, 2, "should retry once without the photo");
-    assert.equal(commentCalls[0].url.searchParams.has("attachments"), true);
-    assert.equal(commentCalls[1].url.searchParams.has("attachments"), false);
+    assert.equal(commentCalls[0].params.has("attachments"), true);
+    assert.equal(commentCalls[1].params.has("attachments"), false);
     // Текстовый фолбэк показывает плейсхолдер-ссылку, хотя у товара hasPhoto.
-    assert.match(commentCalls[1].url.searchParams.get("message"), /placeholder\.jpg/);
+    assert.match(commentCalls[1].params.get("message"), /placeholder\.jpg/);
   } finally {
     stub.restore();
   }
@@ -165,10 +167,11 @@ test("rate-limit penalty decays gradually instead of resetting on first success"
 test("publishLotCard still publishes when photo upload fails", async () => {
   const original = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = typeof input === "string" ? new URL(input) : input;
     const method = url.pathname.replace("/method/", "");
-    calls.push({ method, url });
+    const params = init?.body instanceof URLSearchParams ? init.body : new URLSearchParams();
+    calls.push({ method, url, params });
     if (method === "photos.getWallUploadServer") {
       return { ok: true, status: 200, async json() { return { error: { error_code: 500, error_msg: "boom" } }; } };
     }
@@ -183,8 +186,8 @@ test("publishLotCard still publishes when photo upload fails", async () => {
     assert.equal(result.comment_id, 777);
     const commentCalls = calls.filter((c) => c.method === "video.createComment");
     assert.equal(commentCalls.length, 1);
-    assert.equal(commentCalls[0].url.searchParams.has("attachments"), false);
-    assert.match(commentCalls[0].url.searchParams.get("message"), /placeholder\.jpg/);
+    assert.equal(commentCalls[0].params.has("attachments"), false);
+    assert.match(commentCalls[0].params.get("message"), /placeholder\.jpg/);
   } finally {
     globalThis.fetch = original;
   }

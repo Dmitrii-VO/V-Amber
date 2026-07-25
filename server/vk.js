@@ -146,14 +146,10 @@ function isVkAttachmentError(error) {
 //   801 — комментарии у видео закрыты оператором.
 const VK_FATAL_ERROR_CODES = new Set([14, 15, 100, 801]);
 
-function isVkFatalError(error) {
-  return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
-}
-
+// Условие «дальше публиковать под этим видео бесполезно»: видео скрыто/
+// удалено/без прав/комментарии закрыты — все эти кейсы одинаково ломают
+// и ретраи sendWithRetry, и массовое закрытие лотов на конце эфира.
 export function isVkStreamFatalError(error) {
-  // Условие «дальше публиковать под этим видео бесполезно»: видео скрыто/
-  // удалено/без прав/комментарии закрыты — все эти кейсы одинаково ломают
-  // массовое закрытие лотов на конце эфира.
   return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
 }
 
@@ -296,19 +292,21 @@ export function createVkPublisher(config) {
   }
 
   async function callVkApi(method, params, token = userToken) {
-    const url = new URL(`https://api.vk.com/method/${method}`);
-
+    // Все параметры — включая access_token — в теле POST, не в query string:
+    // URL попадает в логи прокси/ошибок и в стек-трейсы, и токен оттуда
+    // утекает (ровно от такой утечки redact в stream-relay). VK принимает
+    // form-urlencoded тело для всех методов.
+    const body = new URLSearchParams();
     for (const [key, value] of Object.entries(params || {})) {
       if (value !== undefined && value !== null && value !== "") {
-        url.searchParams.set(key, String(value));
+        body.set(key, String(value));
       }
     }
-
-    url.searchParams.set("access_token", token);
-    url.searchParams.set("v", apiVersion);
+    body.set("access_token", token);
+    body.set("v", apiVersion);
 
     return enqueueVkApiCall(method, async () => {
-      const response = await fetch(url, { method: "POST" });
+      const response = await fetch(`https://api.vk.com/method/${method}`, { method: "POST", body });
       return parseVkResponse(response);
     }, { priority: vkCallPriority(method) });
   }
@@ -386,7 +384,7 @@ export function createVkPublisher(config) {
         // Безнадёжные ошибки (капча, закрытые комментарии и т.п.) — повтор
         // не поможет, бросаем сразу. Это снижает шум в логах и экономит
         // квоту: один такой запрос больше не превращается в 3+ выстрела.
-        if (isVkFatalError(error)) {
+        if (isVkStreamFatalError(error)) {
           logger.warn("vk", "publish_failed_fatal", {
             ...meta,
             attempt,

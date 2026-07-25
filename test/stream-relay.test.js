@@ -104,6 +104,51 @@ test("stop гасит процесс и запрещает перезапуск"
   assert.equal(spawn.spawned.length, 1);
 });
 
+test("асинхронный сбой запуска (ENOENT через 'error' без 'exit') → error + retry, не вечный running", async () => {
+  const spawn = makeFakeSpawn();
+  const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: spawn, log: silentLog });
+  relay.start();
+  assert.equal(relay.status().state, "running");
+
+  // Node доставляет ENOENT событием 'error' ДО 'spawn'; 'exit' не приходит.
+  spawn.spawned[0].emit("error", Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" }));
+  assert.equal(relay.status().state, "error");
+  assert.match(relay.status().lastError, /ENOENT/);
+
+  // Ретраи идут и исчерпываются (restartMax=2): 1 старт + 2 повтора.
+  assert.ok(await waitFor(() => spawn.spawned.length === 2), "первый ретрай после сбоя запуска");
+  spawn.spawned[1].emit("error", Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" }));
+  assert.ok(await waitFor(() => spawn.spawned.length === 3), "второй ретрай");
+  spawn.spawned[2].emit("error", Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" }));
+  await delay(40);
+  assert.equal(spawn.spawned.length, 3, "после restartMax попыток больше нет");
+  assert.equal(relay.status().state, "error");
+  relay.stop();
+});
+
+test("поздний exit старого процесса после stop→start не плодит второй ffmpeg", async () => {
+  const spawn = makeFakeSpawn();
+  const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: spawn, log: silentLog });
+  relay.start();
+  const oldChild = spawn.spawned[0];
+
+  relay.stop();               // SIGTERM отправлен, но exit ещё не пришёл
+  relay.start();              // оператор сразу перезапустил эфир
+  assert.equal(spawn.spawned.length, 2);
+  const newChild = spawn.spawned[1];
+
+  // Теперь прилетает exit УБИТОГО процесса. Раньше он затирал ссылку на
+  // новый ffmpeg и планировал рестарт — два релея лили в ВК параллельно.
+  oldChild.emit("exit", 0, "SIGTERM");
+  await delay(40);
+  assert.equal(spawn.spawned.length, 2, "рестарт от устаревшего exit не планируется");
+  assert.equal(relay.status().state, "running");
+
+  // stop() всё ещё контролирует именно НОВЫЙ процесс.
+  relay.stop();
+  assert.equal(newChild.killed, true);
+});
+
 test("синхронный сбой запуска ffmpeg → spawn_failed, свой эфир не затронут", () => {
   const throwingSpawn = () => { throw new Error("spawn ffmpeg ENOENT"); };
   const relay = createStreamRelay({ streamConfig: CFG, spawnImpl: throwingSpawn, log: silentLog });
