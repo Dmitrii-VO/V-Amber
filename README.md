@@ -142,6 +142,9 @@ node scripts/backfill-vk-id-dry-run.js
 
 ## Документация
 
+- `SETUP_OBS_IPHONE.md` - инструкция оператору: что сделать после обновления,
+  чтобы эфир шёл с камеры и микрофона айфона.
+- `SETUP_MACOS.md` - перенос и запуск приложения на MacBook.
 - `AGENTS.md` - актуальные правила работы для AI-агентов в этом репозитории.
 - `CLAUDE.md` - краткая памятка для Claude Code.
 - `Amberry_Voice_Technical_Specification.md` - продуктовая спецификация на
