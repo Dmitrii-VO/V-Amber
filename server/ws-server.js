@@ -1582,25 +1582,40 @@ export function attachWsServer(httpServer, config, services = {}) {
         // повторите»).
         const probe = parseReservationComment(comment.text);
         if (probe.hasReservationKeyword && probe.code) {
-          const flood = noOpenLotFloodGuard.hit();
-          if (flood.floodEnded) {
-            logger.info(logSource, "reservation_no_open_lot_flood_ended", {
-              connectionId,
-              suppressed: flood.floodEnded.suppressed,
+          // «ambiguous» — код подошёл к НЕСКОЛЬКИМ открытым лотам: это живой
+          // покупатель у открытого товара, а не шум розыгрыша. Такие идут
+          // оператору всегда, мимо ограничителя — иначе во время флуда
+          // повторится «перестала бронировать» (инцидент 2026-05-24).
+          const isAmbiguous = target?.reason === "ambiguous";
+          if (!isAmbiguous) {
+            // Слепок события уходит в сводку flood_ended: по server.log
+            // восстанавливают пропущенные заказы, счётчика недостаточно.
+            const flood = noOpenLotFloodGuard.hit({
+              commentId: comment.id,
+              viewerId: comment.viewerId,
+              code: probe.code,
+              source: comment.source,
             });
-          }
-          if (flood.suppress) {
-            if (flood.floodStarted) {
-              logger.warn(logSource, "reservation_no_open_lot_flood", {
+            if (flood.floodEnded) {
+              logger.info(logSource, "reservation_no_open_lot_flood_ended", {
                 connectionId,
-                hint: "всплеск кодов без открытого лота (похоже на розыгрыш) — отдельные события подавлены до конца всплеска",
-              });
-              sendJson(websocket, {
-                type: "warning",
-                message: "Много комментариев с кодами без открытого лота (розыгрыш?) — показываю не все, бронь по ним не создаётся",
+                suppressed: flood.floodEnded.suppressed,
+                samples: flood.floodEnded.samples,
               });
             }
-            return;
+            if (flood.suppress) {
+              if (flood.floodStarted) {
+                logger.warn(logSource, "reservation_no_open_lot_flood", {
+                  connectionId,
+                  hint: "всплеск кодов без открытого лота (похоже на розыгрыш) — отдельные события подавлены до конца всплеска",
+                });
+                sendJson(websocket, {
+                  type: "warning",
+                  message: "Много комментариев с кодами без открытого лота (розыгрыш?) — показываю не все, бронь по ним не создаётся",
+                });
+              }
+              return;
+            }
           }
           const reason = target?.reason || "no_open_lot";
           const knownCodes = productCodeCache?.getCodes?.() || null;

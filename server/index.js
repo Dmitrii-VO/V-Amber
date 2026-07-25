@@ -250,7 +250,12 @@ async function main() {
         `\nV-Amber уже запущен: порт ${config.port} занят.\n`
         + `Откройте http://localhost:${config.port} в браузере или закройте вторую копию приложения.\n`,
       );
-      void logger.flush().finally(() => process.exit(1));
+      // flush с таймаутом: зависший write-chain (диск/антивирус) не должен
+      // воскресить того самого зомби, ради которого этот выход и написан.
+      const flushTimeout = new Promise((resolve) => {
+        setTimeout(resolve, 2000).unref?.();
+      });
+      void Promise.race([logger.flush(), flushTimeout]).finally(() => process.exit(1));
       return;
     }
     logger.error("http", "server_listen_failed", {

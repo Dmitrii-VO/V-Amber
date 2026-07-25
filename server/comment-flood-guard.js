@@ -7,30 +7,39 @@
 // поштучно, а не десятками в минуту.
 //
 // Модель простая: фиксированные окна по windowMs. Первые threshold событий
-// каждого окна проходят как обычно; всё сверх — подавляется и считается.
-// На первом событии следующего окна отдаётся сводка о подавленном.
-export function createCommentFloodGuard({ windowMs = 60_000, threshold = 8, now = Date.now } = {}) {
+// каждого окна проходят как обычно; всё сверх — подавляется и считается,
+// первые maxSamples подавленных сохраняются целиком для итоговой сводки:
+// по server.log восстанавливают пропущенные заказы (см. wiki
+// order-recovery-from-logs), поэтому подавленные события обязаны оставлять
+// восстановимый след, а не только счётчик. Сводка отдаётся на первом событии
+// СЛЕДУЮЩЕГО окна — лениво: если после всплеска событий больше нет (конец
+// эфира, реконнект дашборда), сводка теряется. Это осознанный компромисс —
+// сами комментарии при этом остаются в VK и в ленте viewerComment.
+export function createCommentFloodGuard({ windowMs = 60_000, threshold = 8, maxSamples = 50, now = Date.now } = {}) {
   let windowStart = 0;
   let count = 0;
   let suppressed = 0;
+  let samples = [];
 
   return {
-    // Регистрирует одно событие. Возвращает:
+    // Регистрирует одно событие; sample — компактный слепок для сводки
+    //   (commentId/viewerId/код). Возвращает:
     //   suppress      — событие подавить (не логировать, не слать на дашборд);
     //   floodStarted  — это ПЕРВОЕ подавленное событие окна: самое время
     //                   один раз предупредить оператора и лог;
-    //   floodEnded    — окно сменилось, в прошлом был флуд: { suppressed } —
-    //                   сколько событий скрыто (для итоговой строки в логе).
-    hit() {
+    //   floodEnded    — окно сменилось, в прошлом был флуд:
+    //                   { suppressed, samples } для итоговой строки в логе.
+    hit(sample) {
       const ts = now();
       let floodEnded = null;
       if (ts - windowStart >= windowMs) {
         if (suppressed > 0) {
-          floodEnded = { suppressed };
+          floodEnded = { suppressed, samples };
         }
         windowStart = ts;
         count = 0;
         suppressed = 0;
+        samples = [];
       }
 
       count += 1;
@@ -39,6 +48,9 @@ export function createCommentFloodGuard({ windowMs = 60_000, threshold = 8, now 
       }
 
       suppressed += 1;
+      if (sample !== undefined && samples.length < maxSamples) {
+        samples.push(sample);
+      }
       return { suppress: true, floodStarted: suppressed === 1, floodEnded };
     },
   };

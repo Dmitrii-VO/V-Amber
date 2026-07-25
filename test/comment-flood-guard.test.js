@@ -45,18 +45,38 @@ test("новое окно сбрасывает счётчик и отдаёт с
   const guard = createCommentFloodGuard({ windowMs: 60_000, threshold: 1, now: clock.now });
 
   guard.hit();
-  guard.hit(); // suppressed 1
-  guard.hit(); // suppressed 2
+  guard.hit({ commentId: 101, code: "456" }); // suppressed 1
+  guard.hit({ commentId: 102, code: "789" }); // suppressed 2
 
   clock.advance(60_001);
   const result = guard.hit();
   assert.equal(result.suppress, false);
-  assert.deepEqual(result.floodEnded, { suppressed: 2 });
+  assert.deepEqual(result.floodEnded, {
+    suppressed: 2,
+    samples: [
+      { commentId: 101, code: "456" },
+      { commentId: 102, code: "789" },
+    ],
+  });
 
   // Следующее окно без флуда — сводки нет.
   clock.advance(60_001);
   const quiet = guard.hit();
   assert.equal(quiet.floodEnded, null);
+});
+
+test("семплы подавленных ограничены maxSamples, счётчик — нет", () => {
+  const clock = makeClock();
+  const guard = createCommentFloodGuard({ windowMs: 60_000, threshold: 0, maxSamples: 2, now: clock.now });
+
+  for (let i = 1; i <= 5; i += 1) {
+    guard.hit({ commentId: i });
+  }
+
+  clock.advance(60_001);
+  const result = guard.hit();
+  assert.equal(result.floodEnded.suppressed, 5);
+  assert.deepEqual(result.floodEnded.samples, [{ commentId: 1 }, { commentId: 2 }]);
 });
 
 test("окно без подавления не отдаёт floodEnded", () => {
