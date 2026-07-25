@@ -1,9 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runObsPreset, matchDevice } from "../server/obs-client.js";
 
 // Пресет OBS: 1080p30, фиксированный битрейт, камера и микрофон айфона.
 // Гоняем на фейковом OBS (request(type, data)) — без сокета и без OBS.
+
+// obs-client тянет config.js, а тот резолвит обязательный ключ SpeechKit на
+// импорте — ставим до динамического импорта, иначе тест падает там, где нет
+// .env (CI). Значение не важно: сокет мы не открываем.
+process.env.YANDEX_SPEECHKIT_API_KEY = process.env.YANDEX_SPEECHKIT_API_KEY || "test-key";
+
+const { runObsPreset, matchDevice } = await import("../server/obs-client.js");
 
 const PRESET = {
   videoWidth: 1920,
