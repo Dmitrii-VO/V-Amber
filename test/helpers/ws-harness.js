@@ -87,6 +87,8 @@ export function createMoyskladMock({ cardsByCode = {}, overrides = {} } = {}) {
       || (async () => ({ id: "co-test-1", positionId: "pos-created-1" }))),
     removePositionFromOrder: wrap("removePositionFromOrder",
       overrides.removePositionFromOrder || (async () => ({ ok: true }))),
+    hasPositionForProduct: wrap("hasPositionForProduct",
+      overrides.hasPositionForProduct || (async () => ({ inOpenOrder: false }))),
   };
   moysklad.calls = calls;
   moysklad.callsTo = (name) => calls.filter((c) => c.name === name);
