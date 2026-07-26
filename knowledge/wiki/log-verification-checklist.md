@@ -52,6 +52,59 @@ It never writes to logs or MoySklad. See [[service-scripts]].
 - [ ] **`cancelled` == `customer_order_cancelled` == `DELETE` calls** — every
   cancellation actually removed something in MoySklad.
 
+### 2.1 Отмены по закрытым лотам (buyer backs out after the lot is closed)
+
+Cancellation only works while the lot is **open**: `cancelReservation` in
+`ws-server.js` resolves the lot from `openLotsBySessionId` / `getOpenLots()` /
+`activeLot` and otherwise answers "Нет активного лота для отмены брони" without
+ever calling MoySklad. So two very common cases are **not** executed by the app
+and are done by the operator by hand:
+
+1. **same эфир, closed lot** — the buyer backs out an hour later, the lot is
+   already closed;
+2. **an earlier day of the same campaign** — reserved on day 1, cancels in the
+   comments of the day-3 эфир. Эфиры run several days in a row and that run is
+   **one campaign**; a бронь from a *previous* campaign (last week) is out of
+   scope — its order is normally closed/paid by then and must not be touched.
+   The campaign window is the one used for appending positions:
+   `campaignMaxGapDays` (default 3) from the newest `#Эфир <date>` marker in the
+   order description, see `findLatestBroadcastCustomerOrder` in `moysklad.js`.
+
+Nothing in section 2 catches either one: the counts of the current эфир
+reconcile perfectly while a stale reserve keeps sitting on the stock.
+
+**Reservations on a closed lot are fixed; cancellations are not.** The operator
+can now book such a comment from the attention banner («✓ забронировать», see
+[[reservation-flow]]). Cancelling a бронь whose lot is closed still has no path
+in the app — that is what the checks below are for.
+
+- [ ] **List cancel attempts that matched no open lot.** `voice_cancel_command`
+  followed by neither `reservation_cancelled` nor `reservation_cancel_no_position`
+  = the lot was already closed and the отмена silently did nothing. Also check
+  `reservation_cancel_no_position` (бронь found, but no MoySklad position saved).
+  Each one is a position to verify in MoySklad manually.
+- [ ] **Scan buyer comments for отмена/отказ against lot state.** For each cancel
+  intent, find the артикул's `lot_opened` in this session: if there is none, the
+  бронь is from an earlier broadcast; if there is one but it is followed by
+  `lot_closed` before the comment, it is the closed-lot case. Both were ignored.
+- [ ] **Cross-check the `#Эфир <date>` orders of this campaign only** — today's
+  эфир plus the previous days within `campaignMaxGapDays`. For the viewers found
+  above the position should be gone; if it is still there, the бронь is live and
+  the stock is wrongly reserved. Orders from an **earlier campaign** are not a
+  finding: they are closed and stay as they are.
+- [ ] **Stock impact.** Every un-executed cross-day cancellation keeps
+  `availableStock` lower than reality — expect it to show up as "missing" stock
+  in section 7 rather than as an error.
+- [ ] **Un-booked comments are no longer a silent loss.** Reservation-like
+  comments with no open lot land in the attention banner with a working
+  «✓ забронировать» — so a `reservation_no_open_lot` with no following
+  `attention_reservation_created` means the operator did not act on the row (or
+  the code is not in the catalog, which gets no button). Check those against
+  MoySklad.
+- [ ] Product gap, still open: **cancelling** a бронь on a closed lot — in this
+  эфир or an earlier day of the campaign — is not implemented (confirmed with the
+  operator 2026-07-26), so every such отмена is manual work in MoySklad.
+
 ## 3. Order structure integrity
 
 - [ ] **One buyer per order.** No order should map to >1 distinct `viewerId`
@@ -124,6 +177,7 @@ It never writes to logs or MoySklad. See [[service-scripts]].
 |---|---|---|
 | `moysklad_call` 401/403 wall | token dead → 0 orders | [[order-recovery-from-logs]] |
 | `product_not_found` > 0 | артикул→товар join failed | leading-zero fallback / catalog |
+| cancel command, no `reservation_cancelled` | lot already closed (this эфир or earlier day) — app can't do it | cancel the position in МойСклад by hand |
 | order with >1 `viewerId` | grouping/counterparty bug | inspect `ensureCounterparty` |
 | dup product line in order | append-quantity failed | inspect `appendPositionToCustomerOrder` |
 | live position `salePrice==0` | voiced price dropped | transcript + `fix-zero-price-positions.mjs` |
