@@ -191,7 +191,22 @@ function applyKnownCodeHints(candidates, config) {
   }
 
   const knownMatches = hinted.filter((candidate) => candidate.knownCode === true);
-  return knownMatches.length > 0 ? knownMatches : hinted;
+  if (knownMatches.length === 0) {
+    return hinted;
+  }
+
+  // Хвостовой кандидат (см. buildHundredsTailCandidate) — догадка «а вдруг это
+  // сотенный блок кода». Если каталог подтвердил и обычного кандидата, и
+  // хвостового, побеждает обычный: «артикул ноль два сто пятьдесят рублей» при
+  // каталоге с 02 и 02150 иначе давал бы ambiguous и не открывал лот вовсе.
+  // Понижением confidence это не решается — applyKnownCodeHints поднимает
+  // подтверждённые до 0.99, и оба кандидата доезжают до вызывающей стороны.
+  const withoutTailGuesses = knownMatches.filter((candidate) => candidate.exactCatalogMatchOnly !== true);
+  const winners = withoutTailGuesses.length > 0 ? withoutTailGuesses : knownMatches;
+
+  // Служебный флаг наружу не отдаём: он утекал в article_detected.allCandidates
+  // и в WS-состояние.
+  return winners.map(({ exactCatalogMatchOnly, ...candidate }) => candidate);
 }
 
 function isCodeLengthAllowed(code, config) {

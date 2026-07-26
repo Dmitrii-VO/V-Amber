@@ -392,7 +392,34 @@ test("detectArticle: обрывок не подгоняется под пост�
     "артикул ноль ноль два двести шестьдесят шесть артикул ноль ноль двести шестьдесят шесть",
     catalogConfig,
   );
+  // Проверяем именно то, что происходит: кандидат остаётся сырым «002» и ни на
+  // один каталожный код не натягивается. Лот по нему не откроется — код не
+  // пройдёт каталожный гейт в ws-server (voice_code_rejected_unknown).
+  assert.equal(result.chosen?.code, "002");
   assert.equal(catalogConfig.knownCodes.has(result.chosen?.code), false);
+});
+
+test("detectArticle: хвостовая догадка не спорит с обычным кандидатом", async () => {
+  // Каталог содержит и «02», и «02150». До фикса каталог подтверждал обоих,
+  // applyKnownCodeHints поднимал обоих до 0.99 → ambiguous → лот не открывался
+  // вовсе, хотя раньше открывался «02».
+  const config = {
+    ...baseConfig,
+    triggers: ["артикул"],
+    knownCodes: new Set(["02", "02150", "00212"]),
+  };
+  const result = await detectArticle("артикул ноль два сто пятьдесят рублей", config);
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "02");
+});
+
+test("detectArticle: служебный флаг не утекает в кандидатов", async () => {
+  // exactCatalogMatchOnly уходил в article_detected.allCandidates и в WS-состояние.
+  const result = await detectArticle("артикул ноль ноль двести двенадцать", catalogConfig);
+  assert.equal(result.chosen?.code, "00212");
+  for (const candidate of result.candidates) {
+    assert.equal("exactCatalogMatchOnly" in candidate, false);
+  }
 });
 
 test("detectArticle: без каталога поведение не меняется", async () => {
