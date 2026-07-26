@@ -348,3 +348,59 @@ test("trigger cache stays consistent across calls with the same array", async ()
   assert.equal(altHit.status, "confirmed");
   assert.equal(altHit.chosen?.code, "999");
 });
+
+// --- Ведущие нули + сотенный блок (эфир 2026-07-26) ---
+//
+// Оператор произносит коды 00XXX как «ноль ноль двести двенадцать». До фикса
+// цифровые слова давали «00», сотенный блок отбрасывался (EXTENSION_CARDINAL_LIMIT),
+// и весь диапазон был непроизносим: 17 отказов и 8 кодов вручную за один эфир.
+const catalogConfig = {
+  ...baseConfig,
+  triggers: ["артикул", "код товара"],
+  knownCodes: new Set(["00212", "00226", "00266", "00301", "00683", "00790", "00159", "02", "03172"]),
+};
+
+test("detectArticle: «ноль ноль» + сотенный блок собирается в код 00XXX", async () => {
+  for (const [transcript, expected] of [
+    ["артикул ноль ноль двести двенадцать", "00212"],
+    ["артикул ноль ноль семьсот девяносто", "00790"],
+    ["следующий браслетик артикул ноль ноль двести двадцать шесть", "00226"],
+    ["так следующий дикий камушек артикул ноль ноль шестьсот восемьдесят три", "00683"],
+    ["код товара ноль ноль сто пятьдесят девять они по скидке идут", "00159"],
+    // Три нуля: код добирается нормализацией ведущих нулей (000266 → 00266).
+    ["так артикул ноль ноль ноль двести шестьдесят шесть", "00266"],
+  ]) {
+    const result = await detectArticle(transcript, catalogConfig);
+    assert.equal(result.status, "confirmed", transcript);
+    assert.equal(result.chosen?.code, expected, transcript);
+  }
+});
+
+test("detectArticle: цена после кода не влипает в код", async () => {
+  // Хвостовой блок берётся через parseSubThousand, поэтому «тысяча четыреста»
+  // остаётся ценой, а не превращает код в 00301400.
+  const result = await detectArticle("артикул ноль ноль триста один тысяча четыреста рублей", catalogConfig);
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "00301");
+});
+
+test("detectArticle: обрывок не подгоняется под посторонний короткий код", async () => {
+  // 2026-07-26 17:06:53: из оговорки «ноль ноль два двести шестьдесят шесть»
+  // получился код «02» (Заколка Янтарная) вместо 00266 — карточка чужого
+  // товара ушла в VK. Теперь такой обрывок не матчится ни на что из каталога.
+  const result = await detectArticle(
+    "артикул ноль ноль два двести шестьдесят шесть артикул ноль ноль двести шестьдесят шесть",
+    catalogConfig,
+  );
+  assert.equal(catalogConfig.knownCodes.has(result.chosen?.code), false);
+});
+
+test("detectArticle: без каталога поведение не меняется", async () => {
+  // Второй кандидат добавляется только когда есть чем его проверить.
+  const result = await detectArticle("артикул ноль ноль двести двенадцать", {
+    ...baseConfig,
+    triggers: ["артикул"],
+  });
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.chosen?.code, "00");
+});
