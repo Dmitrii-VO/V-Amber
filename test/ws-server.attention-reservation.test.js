@@ -32,10 +32,11 @@ async function attentionFor(harness, client, { commentText = "бронь 03723",
 }
 
 test("строка внимания несёт actionId и по нему создаётся заказ", async () => {
-  const harness = await startHarness({
+  const moysklad = createMoyskladMock({
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
-    knownCodes: ["03204", "03723"],
+    overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
   });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -48,7 +49,7 @@ test("строка внимания несёт actionId и по нему соз�
 
     assert.equal(result.ok, true);
     assert.equal(result.status, "reserved");
-    const created = harness.moysklad.callsTo("createCustomerOrderReservation");
+    const created = moysklad.callsTo("createCustomerOrderReservation");
     assert.equal(created.length, 1);
     // Позиция уходит на товар из карточки, а не на код открытого лота.
     assert.equal(created[0].args[0].activeLot.product.id, "p-03723");
@@ -91,7 +92,7 @@ test("повторный клик не дублирует позицию в за
     overrides: {
       ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }),
       findBroadcastCustomerOrderForCounterparty: async () => ({ id: "co-camp-1", name: "00042" }),
-      hasPositionForProduct: async () => ({ inOpenOrder: true, orderId: "co-camp-1", orderName: "00042" }),
+      hasPositionInOrder: async () => ({ present: true, positionId: "pos-1" }),
     },
   });
   const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
@@ -184,6 +185,124 @@ test("код вне каталога не получает кнопку брон
     const attention = await attentionFor(harness, client, { commentText: "бронь 09999", commentId: 502 });
     assert.equal(attention.code, "09999");
     assert.equal(attention.actionId, undefined);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+// --- Найдено ревью перед мержем ---
+
+test("двойной клик не создаёт второй заказ", async () => {
+  // Токен намеренно не тратится до успешной записи (чтобы сбой МойСклада можно
+  // было повторить), а обработчик сообщений не сериализован — оба кадра
+  // успевали пройти проверку до первой записи и создавали ДВА заказа одному
+  // покупателю. Задержка в ensureCounterparty моделирует сетевую латентность.
+  const slow = (value) => async () => {
+    await new Promise((r) => setTimeout(r, 30));
+    return value;
+  };
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: {
+      ensureCounterparty: slow({ id: "cp-1", name: "Марго Краснова" }),
+      createCustomerOrderReservation: slow({ id: "co-new-1", positionId: "pos-1" }),
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+
+    const first = await client.waitFor((m) => m.type === "attentionReservationResult", { timeoutMs: 6000 });
+    const second = await client.waitFor((m) => m.type === "attentionReservationResult", { timeoutMs: 6000 });
+
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    const statuses = [first.status, second.status].sort();
+    assert.deepEqual(statuses, ["in_flight", "reserved"]);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("товар без цены в каталоге не уходит в заказ по 0 ₽", async () => {
+  // Лота нет — значит нет и озвученной цены, подставить её неоткуда. Раньше
+  // позиция создавалась по 0 ₽, а оператор видел зелёное «забронирован».
+  const moysklad = createMoyskladMock({
+    cardsByCode: {
+      "03204": CARD_LOT,
+      "03723": { ...CARD_CLOSED, salePrice: 0 },
+    },
+    overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    const result = await client.waitFor((m) => m.type === "attentionReservationResult", { timeoutMs: 6000 });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "no_price");
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 0);
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("без контрагента отказ, а не заказ вслепую", async () => {
+  // Без id контрагента недоступны ни поиск заказа кампании, ни проверка на
+  // дубль — значит каждый повтор писал бы новый заказ. Отказываем закрыто.
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    knownCodes: ["03204", "03723"],
+  });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    const result = await client.waitFor((m) => m.type === "attentionReservationResult", { timeoutMs: 6000 });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "no_counterparty");
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("проверка дубля смотрит в заказ кампании, а не в посторонний открытый", async () => {
+  // hasPositionForProduct берёт последний незакрытый заказ контрагента — без
+  // маркера #Эфир и без окна кампании. Если у покупателя есть посторонний
+  // ручной заказ с тем же товаром, он выглядел бы как «уже забронировано»,
+  // и бронь молча терялась бы — ровно та потеря, ради которой всё это писалось.
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: {
+      ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }),
+      findBroadcastCustomerOrderForCounterparty: async () => ({ id: "co-camp-1", name: "00042" }),
+      // Посторонний заказ с этим товаром есть...
+      hasPositionForProduct: async () => ({ inOpenOrder: true, orderId: "co-manual-9", orderName: "00099" }),
+      // ...но в заказе кампании товара нет.
+      hasPositionInOrder: async () => ({ present: false }),
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    const result = await client.waitFor((m) => m.type === "attentionReservationResult", { timeoutMs: 6000 });
+
+    assert.equal(result.status, "reserved");
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 1);
+    assert.equal(moysklad.callsTo("hasPositionInOrder")[0].args[0], "co-camp-1");
   } finally {
     await client.close();
     await harness.close();

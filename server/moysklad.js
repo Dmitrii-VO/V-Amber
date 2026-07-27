@@ -1032,6 +1032,30 @@ export function createMoySkladClient(config, options = {}) {
         ? { inOpenOrder: true, orderId: open.id, orderName: open.name || null }
         : { inOpenOrder: false };
     },
+    // Есть ли товар в КОНКРЕТНОМ заказе. В отличие от hasPositionForProduct
+    // (тот смотрит последний незакрытый заказ контрагента — без маркера #Эфир
+    // и без окна кампании), здесь проверяется ровно тот заказ, в который мы
+    // сейчас собираемся дописать позицию. Иначе посторонний ручной заказ с тем
+    // же товаром выглядел бы как «уже забронировано» и бронь молча терялась.
+    async hasPositionInOrder(orderId, productId, { source } = {}) {
+      if (!isEnabled || !orderId || !productId) {
+        return { present: false };
+      }
+      const positionsPayload = await requestJson(
+        `entity/customerorder/${orderId}/positions`,
+        { limit: 1000 },
+        { source },
+      );
+      const rows = Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [];
+      for (const row of rows) {
+        const rowProductId = row?.assortment?.id
+          || extractEntityIdFromHref(row?.assortment?.meta?.href, "product");
+        if (rowProductId === productId) {
+          return { present: true, positionId: row.id || null };
+        }
+      }
+      return { present: false };
+    },
     async checkOpenOrderPositionsForEntries(entries, { source } = {}) {
       const result = {};
       const rows = Array.isArray(entries) ? entries : [];
