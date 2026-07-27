@@ -34,15 +34,11 @@ export const HUNDREDS_WORDS = new Map([
   ["восемьсот", 800], ["девятьсот", 900],
 ]);
 
-// Множители тысяч: «две тысячи» = 2×1000. Используются price/discount.
-export const THOUSANDS_MULTIPLIERS = new Map([
-  ["одна", 1], ["один", 1], ["две", 2], ["два", 2],
-  ["три", 3], ["четыре", 4], ["пять", 5], ["шесть", 6],
-  ["семь", 7], ["восемь", 8], ["девять", 9], ["десять", 10],
-]);
+// Словаря множителей тысяч здесь больше нет: он перечислял только однословные
+// один..десять и был причиной «двенадцать тысяч девятьсот пятьдесят» → 12 ₽.
+// Любой множитель 1..999 читает readSmallNumber ниже.
 
-// «полторы тысячи» = 1500. Отдельно от THOUSANDS_MULTIPLIERS, потому что
-// множитель дробный и «полторы» без «тысячи» числом не является.
+// «полторы тысячи» = 1500. Отдельным случаем, потому что
 const SESQUI_WORDS = new Set(["полторы", "полтора"]);
 
 const THOUSAND_RE = /^тысяч[ауи]?$/;
@@ -94,26 +90,43 @@ export function parseMonetaryWords(words) {
   let value = 0;
   let i = 0;
 
-  if (
-    norm.length === 2
-    && UNIT_WORDS.has(norm[0])
-    && HUNDREDS_WORDS.has(norm[1])
-  ) {
-    return UNIT_WORDS.get(norm[0]) * 1000 + HUNDREDS_WORDS.get(norm[1]);
+  // Разговорная форма без слова «тысяч»: «две сто» = 2100, «тринадцать двести»
+  // = 13200, «девять двести пятьдесят» = 9250. Множитель — РОВНО одно слово:
+  // окно берётся из середины реплики, и составной множитель превращал бы
+  // «цена двадцать пять сто из них» в 25100 вместо 25. Форма реальная:
+  // «стоимость тринадцать двести» (эфир 2026-06-28 19:11:46) читалась как 13 ₽.
+  const colloquialHead = norm.length >= 2 && HUNDREDS_WORDS.has(norm[1])
+    ? (UNIT_WORDS.get(norm[0]) ?? TEEN_WORDS.get(norm[0]) ?? TENS_WORDS.get(norm[0]))
+    : undefined;
+  if (typeof colloquialHead === "number") {
+    let colloquialValue = colloquialHead * 1000 + HUNDREDS_WORDS.get(norm[1]);
+    let cursor = 2;
+    const colloquialRemainder = readSmallNumber(norm, cursor);
+    if (colloquialRemainder && colloquialRemainder.value < 100) {
+      colloquialValue += colloquialRemainder.value;
+      cursor = colloquialRemainder.next;
+    }
+    if (cursor === norm.length) {
+      return colloquialValue;
+    }
   }
+
+  // «N с половиной тысяч» — множитель здесь тоже любой. Ветка оставалась на
+  // узком THOUSANDS_MULTIPLIERS (1..10) даже после того, как основной путь
+  // перевели на readSmallNumber, поэтому «двенадцать с половиной тысяч»
+  // по-прежнему давало 12 ₽ — тот же механизм отказа, та же цена ошибки.
+  const half = readSmallNumber(norm, 0);
+  const isHalfThousands = Boolean(half)
+    && norm[half.next] === "с"
+    && norm[half.next + 1] === "половиной"
+    && THOUSAND_RE.test(norm[half.next + 2]);
 
   if (norm.length >= 2 && SESQUI_WORDS.has(norm[0]) && THOUSAND_RE.test(norm[1])) {
     value += 1500;
     i += 2;
-  } else if (
-    norm.length >= 4
-    && THOUSANDS_MULTIPLIERS.has(norm[0])
-    && norm[1] === "с"
-    && norm[2] === "половиной"
-    && THOUSAND_RE.test(norm[3])
-  ) {
-    value += THOUSANDS_MULTIPLIERS.get(norm[0]) * 1000 + 500;
-    i += 4;
+  } else if (isHalfThousands) {
+    value += half.value * 1000 + 500;
+    i = half.next + 3;
   } else if (i < norm.length && THOUSAND_RE.test(norm[i])) {
     value += 1000;
     i += 1;
