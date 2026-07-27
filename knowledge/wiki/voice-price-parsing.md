@@ -18,6 +18,25 @@ to the active lot before publication or reservation.
   lives in `server/ru-numerals.js` and is shared by price and discount
   detectors (it was duplicated).
 - Declined trigger forms are accepted: `по цене 990`, `стоимостью 1200`.
+- The amount may stand **to the left** of the trigger: `тысяча четыреста рублей
+  по стоимости` → `1400`. The detector scanned forward only, so this ordering
+  silently produced no price at all — эфир 2026-07-25 wrote lots `03116` and
+  `03119` into MoySklad at `0 ₽` while the operator had voiced both prices, and
+  14 more utterances that эфир went unparsed for the same reason. The backward
+  pass in `detectPriceBeforeTrigger` is a strict **fallback**: it runs only when
+  the forward pass found nothing anywhere in the utterance, so no phrase that
+  already parsed can change. Two guards keep it from inventing prices — a
+  non-money unit directly before the trigger (`сорок сантиметров по стоимости`)
+  is rejected, and a bare digit token is accepted only with an explicit money
+  word between it and the trigger (otherwise `артикул 03116 по стоимости` would
+  become `3116 ₽`).
+- Thousands multipliers may be compound: `четырнадцать тысяч семьсот` → `14700`,
+  `двадцать пять тысяч` → `25000`, `сто тысяч` → `100000`. Until 2026-07-25
+  `THOUSANDS_MULTIPLIERS` only covered 1–10, so every teen/tens multiplier
+  collapsed to the multiplier itself — `четырнадцать тысяч семьсот рублей` came
+  out as **`14 ₽`**, silently, and would have been written straight into the
+  order. Nothing was booked on such a lot in that эфир, so no order was damaged.
+  `readSmallNumber` in `server/ru-numerals.js` now reads any 1–999 multiplier.
 - Numbers followed by a non-money unit are rejected: `стоит посмотреть на
   5 минут` no longer sets the price to `5 ₽` (see `NON_MONEY_UNITS` in
   `server/price-detector.js`).

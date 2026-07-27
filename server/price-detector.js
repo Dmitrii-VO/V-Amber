@@ -28,6 +28,16 @@ const NON_MONEY_UNITS = new Set([
   "сантиметра", "сантиметров", "миллиметра", "миллиметров",
 ]);
 
+// Слова, которые могут стоять МЕЖДУ суммой и триггером в обратном порядке
+// («тысяча четыреста рублей по стоимости»): предлог «по» плюс денежные хвосты
+// из FILLER_WORDS. Отдельный набор, чтобы обратный проход не пропускал
+// значащие слова, которых нет в FILLER_WORDS.
+const BACKWARD_SKIP = new Set(["по", "за", "всего", "итого"]);
+
+// Маркеры денег: только с ними обратный проход принимает «голый» цифровой
+// токен. Без этого «артикул 03116 по стоимости» дало бы цену 3116 ₽.
+const MONEY_WORDS = new Set(["рублей", "рубля", "рубль", "руб", "рублика", "рубликов"]);
+
 function normalizeWord(word) {
   return word.toLowerCase().replace(/ё/g, "е");
 }
@@ -84,6 +94,48 @@ function parseNumericToken(token) {
   return /^\d+$/.test(token) ? Number.parseInt(token, 10) : null;
 }
 
+// Обратный проход: сумма СЛЕВА от триггера — «тысяча четыреста рублей по
+// стоимости». Реальные потери из эфира 2026-07-25: лоты 03116 и 03119 ушли в
+// МойСклад с ценой 0, хотя оператор цену назвал — прямой проход сканирует
+// только вперёд от триггера и такую форму не видит.
+//
+// Работает ТОЛЬКО как фолбэк, когда прямой проход не нашёл ничего ни по одному
+// триггеру: любая уже распознаваемая фраза сюда не доходит и поведения не
+// меняет. Плюс два ограничителя ложных срабатываний:
+//   - не-денежная единица прямо перед триггером («сорок сантиметров по
+//     стоимости») — не цена;
+//   - «голый» цифровой токен принимается только при явном денежном слове
+//     между суммой и триггером, иначе артикул превратился бы в цену.
+function detectPriceBeforeTrigger(tokens) {
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (!PRICE_TRIGGERS.has(tokens[i])) continue;
+
+    let j = i - 1;
+    let sawMoneyWord = false;
+    while (j >= 0 && (BACKWARD_SKIP.has(tokens[j]) || FILLER_WORDS.has(tokens[j]))) {
+      if (MONEY_WORDS.has(tokens[j])) sawMoneyWord = true;
+      j -= 1;
+    }
+    if (j < 0 || isNonMoneyUnit(tokens[j])) continue;
+
+    // Окна, ЗАКАНЧИВАЮЩИЕСЯ на j; длинные первыми, иначе «тысяча двести
+    // двадцать» схлопнется в «двадцать».
+    for (let len = Math.min(6, j + 1); len >= 1; len -= 1) {
+      const words = tokens.slice(j - len + 1, j + 1);
+      if (words.some((word) => FILLER_WORDS.has(word))) continue;
+      const value = parseMonetaryWords(words);
+      if (value && value > 0) return { value, trigger: tokens[i] };
+    }
+
+    const digitValue = parseNumericToken(tokens[j]);
+    if (sawMoneyWord && digitValue && digitValue > 0 && !/^0/.test(tokens[j])) {
+      return { value: digitValue, trigger: tokens[i] };
+    }
+  }
+
+  return null;
+}
+
 export function detectPrice(text) {
   const tokens = tokenize(text);
 
@@ -136,5 +188,5 @@ export function detectPrice(text) {
     }
   }
 
-  return null;
+  return detectPriceBeforeTrigger(tokens);
 }

@@ -127,3 +127,88 @@ test("detectPrice ignores numbers followed by non-money units", () => {
   assert.equal(detectPrice("это стоит посмотреть на 5 минут"), null);
   assert.equal(detectPrice("цена упала на 30 процентов"), null);
 });
+
+// Эфир 2026-07-25: лоты 03116 и 03119 ушли в МойСклад с ценой 0 ₽, хотя
+// оператор цену назвал — но в форме «<сумма> рублей ПО СТОИМОСТИ», где сумма
+// стоит СЛЕВА от триггера. Прямой проход сканирует только вперёд (j = i + 1)
+// и такую фразу не видит; все 24 удачных lot_price_changed того же эфира имели
+// обратный порядок («по стоимости тысяча четыреста»). Обе фразы — дословно из
+// транскрипта.
+test("detectPrice reads the amount stated BEFORE the trigger («… рублей по стоимости»)", () => {
+  assert.deepEqual(
+    detectPrice(
+      "так они получаются сорок сантиметров прямо идут как чокер тысяча двести двадцать рублей по стоимости",
+    ),
+    { value: 1220, trigger: "стоимости" },
+  );
+  assert.deepEqual(
+    detectPrice("тут они уже подобраны один к одному тысяча четыреста рублей по стоимости"),
+    { value: 1400, trigger: "стоимости" },
+  );
+});
+
+test("detectPrice backward scan keeps the whole amount, not its tail", () => {
+  // «тысяча двести двадцать» не должно схлопнуться в «двадцать» (20 ₽):
+  // окна перебираются от длинных к коротким.
+  assert.deepEqual(detectPrice("тысяча двести двадцать рублей по стоимости"), {
+    value: 1220,
+    trigger: "стоимости",
+  });
+  assert.deepEqual(detectPrice("две тысячи сто пятьдесят рублей цена"), {
+    value: 2150,
+    trigger: "цена",
+  });
+});
+
+test("detectPrice backward scan does not turn measurements into prices", () => {
+  // «сорок сантиметров по стоимости» без суммы — не цена 40 ₽.
+  assert.equal(detectPrice("они сорок сантиметров по стоимости"), null);
+  assert.equal(detectPrice("длина пятьдесят сантиметров цена"), null);
+});
+
+test("detectPrice backward scan does not turn an артикул into a price", () => {
+  // Голый цифровой токен слева принимается только при денежном слове между
+  // суммой и триггером, иначе «артикул 03116 по стоимости» дало бы 3116 ₽.
+  assert.equal(detectPrice("артикул 03116 по стоимости"), null);
+  assert.equal(detectPrice("код товара 12345 стоимость"), null);
+  assert.deepEqual(detectPrice("1220 рублей по стоимости"), {
+    value: 1220,
+    trigger: "стоимости",
+  });
+});
+
+// THOUSANDS_MULTIPLIERS покрывал только 1–10, поэтому «четырнадцать тысяч
+// семьсот рублей» молча схлопывалось в 14 ₽ — и такая цена ушла бы в заказ.
+// В эфире 2026-07-25 такие лоты (03028 — 12 950 ₽, 03029 — 14 700 ₽) были
+// открыты, но их никто не забронировал, иначе позиция стоила бы 12 ₽ и 14 ₽.
+test("detectPrice handles teen/tens thousands multipliers", () => {
+  assert.deepEqual(detectPrice("по стоимости четырнадцать тысяч семьсот рублей черненькие"), {
+    value: 14700,
+    trigger: "стоимости",
+  });
+  assert.deepEqual(detectPrice("по стоимости двенадцать тысяч девятьсот пятьдесят рублей"), {
+    value: 12950,
+    trigger: "стоимости",
+  });
+  assert.deepEqual(detectPrice("по стоимости двадцать пять тысяч"), {
+    value: 25000,
+    trigger: "стоимости",
+  });
+  assert.deepEqual(detectPrice("по стоимости сто тысяч"), {
+    value: 100000,
+    trigger: "стоимости",
+  });
+  // И та же форма слева от триггера, через обратный проход.
+  assert.deepEqual(detectPrice("двадцать тысяч пятьсот рублей по стоимости"), {
+    value: 20500,
+    trigger: "стоимости",
+  });
+});
+
+test("detectPrice prefers a forward amount over a backward one", () => {
+  // Обратный проход — строго фолбэк: если прямой что-то нашёл, он и выигрывает.
+  assert.deepEqual(detectPrice("сорок восемь сантиметров по стоимости пять тысяч"), {
+    value: 5000,
+    trigger: "стоимости",
+  });
+});
