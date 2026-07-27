@@ -37,6 +37,23 @@ to the active lot before publication or reservation.
   out as **`14 ₽`**, silently, and would have been written straight into the
   order. Nothing was booked on such a lot in that эфир, so no order was damaged.
   `readSmallNumber` in `server/ru-numerals.js` now reads any 1–999 multiplier.
+  The 26.07 bundle later showed the same collapse **did** reach an order:
+  `03016` «Бусы "Таблетка" пейзажные» sits in customer order `VK02988` at
+  **17 ₽** instead of 17850 ₽ («по стоимости семнадцать тысяч восемьсот
+  пятьдесят рублей», 2026-07-24 19:45:43). Fixing the parser does not fix
+  written positions — check the order, not just the code.
+- **The same narrow dictionary gated two more forms**, both fixed 2026-07-27
+  after the multiplier itself:
+  - `N с половиной тысяч` — «двенадцать с половиной тысяч» still returned
+    `12 ₽` because that branch kept checking `THOUSANDS_MULTIPLIERS`. It now
+    uses `readSmallNumber` too, and the dictionary is gone.
+  - the colloquial form with no «тысяч» at all — «две сто» = 2100 worked, but
+    «тринадцать двести» (эфир 2026-06-28 19:11:46) came out as `13 ₽`, and
+    «девять двести пятьдесят» lost its tail (9200 instead of 9250). The
+    multiplier here is deliberately limited to **one word**: the caller scans
+    windows inside a running sentence, and a compound multiplier would turn
+    «цена двадцать пять сто из них» into 25100. Hundreds can never be the
+    multiplier, or «двести пятьдесят» would read as 200250.
 - Numbers followed by a non-money unit are rejected: `стоит посмотреть на
   5 минут` no longer sets the price to `5 ₽` (see `NON_MONEY_UNITS` in
   `server/price-detector.js`).
