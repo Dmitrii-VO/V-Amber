@@ -168,6 +168,12 @@ function applyKnownCodeHints(candidates, config) {
       continue;
     }
 
+    // Кандидат, живущий только на точном совпадении (см. buildHundredsTailCandidate):
+    // не подтвердился — молча выпадает, до префиксного резолвера не доходит.
+    if (candidate.exactCatalogMatchOnly === true) {
+      continue;
+    }
+
     const prefix = resolveKnownCodePrefix(candidate.code, knownCodes, config);
     if (prefix.status === "matched") {
       hinted.push({
@@ -185,7 +191,22 @@ function applyKnownCodeHints(candidates, config) {
   }
 
   const knownMatches = hinted.filter((candidate) => candidate.knownCode === true);
-  return knownMatches.length > 0 ? knownMatches : hinted;
+  if (knownMatches.length === 0) {
+    return hinted;
+  }
+
+  // Хвостовой кандидат (см. buildHundredsTailCandidate) — догадка «а вдруг это
+  // сотенный блок кода». Если каталог подтвердил и обычного кандидата, и
+  // хвостового, побеждает обычный: «артикул ноль два сто пятьдесят рублей» при
+  // каталоге с 02 и 02150 иначе давал бы ambiguous и не открывал лот вовсе.
+  // Понижением confidence это не решается — applyKnownCodeHints поднимает
+  // подтверждённые до 0.99, и оба кандидата доезжают до вызывающей стороны.
+  const withoutTailGuesses = knownMatches.filter((candidate) => candidate.exactCatalogMatchOnly !== true);
+  const winners = withoutTailGuesses.length > 0 ? withoutTailGuesses : knownMatches;
+
+  // Служебный флаг наружу не отдаём: он утекал в article_detected.allCandidates
+  // и в WS-состояние.
+  return winners.map(({ exactCatalogMatchOnly, ...candidate }) => candidate);
 }
 
 function isCodeLengthAllowed(code, config) {
@@ -382,6 +403,55 @@ function extendWithMixedDigits(initialCode, words, startIdx) {
   return { code, consumed: idx - startIdx };
 }
 
+// Ведущие нули + сотенный блок: «артикул ноль ноль двести двенадцать» = 00212.
+// extendWithMixedDigits() такой хвост не берёт (EXTENSION_CARDINAL_LIMIT), и до
+// 2026-07-26 весь диапазон 00XXX был непроизносим: код обрывался на «00», а
+// «двести двенадцать» терялось (эфир 26.07: 17 отказов, 8 кодов вбито руками).
+// Поэтому НЕ расширяем основной кандидат, а добавляем ВТОРОЙ — с приклеенным
+// блоком — и отдаём выбор каталогу: applyKnownCodeHints() оставляет только
+// подтверждённые коды, так что «00301 тысяча четыреста» (код + цена) по-прежнему
+// разрешится в 00301, а фантом 003011400 отсеется.
+//
+// Только при загруженном каталоге: без knownCodes второй кандидат сделал бы
+// однозначный (пусть и неверный) разбор «ambiguous», а проверять его нечем.
+function buildHundredsTailCandidate(baseCandidate, words, startIdx, config) {
+  const knownCodes = normalizeKnownCodes(config?.knownCodes);
+  if (!knownCodes || knownCodes.size === 0) {
+    return null;
+  }
+
+  if (startIdx >= words.length) {
+    return null;
+  }
+
+  // Именно parseSubThousand, а не parseCardinalNumber: блок кода — максимум три
+  // цифры, а cardinal жадно съел бы и цену («триста один тысяча четыреста» →
+  // 301400 вместо 301).
+  const block = parseSubThousand(words.slice(startIdx));
+  if (!block || block.value < EXTENSION_CARDINAL_LIMIT) {
+    return null;
+  }
+
+  const code = `${baseCandidate.code}${block.value}`;
+  if (!isCodeLengthAllowed(code, config)) {
+    return null;
+  }
+
+  return {
+    code,
+    source: `${baseCandidate.source}_hundreds_tail`,
+    fragment: words.slice(0, startIdx + block.consumed).join(" "),
+    // Ниже основного кандидата: если каталог подтвердит оба, выигрывает тот,
+    // что без приклеенного блока.
+    confidence: 0.96,
+    // Только точное совпадение с каталогом (или нормализация нулей). Размытый
+    // префиксный резолвер здесь опасен: «ноль ноль два двести шестьдесят шесть»
+    // (оговорка) дал бы 002266 → обрезка до реального, но ЧУЖОГО 00226.
+    // Не подтвердилось точно — кандидата выбрасываем, а не подгоняем.
+    exactCatalogMatchOnly: true,
+  };
+}
+
 function extractLeadingCandidatesFromSuffix(suffix, config) {
   const words = splitWords(suffix);
   let index = 0;
@@ -434,12 +504,24 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
       remainingWords,
       digitSequence.consumed,
     );
-    return [{
+    const digitCandidates = [{
       code: extended.code,
       source: "digit_words",
       fragment: remainingWords.slice(0, digitSequence.consumed + extended.consumed).join(" "),
       confidence: 0.98,
     }];
+
+    const hundreds = buildHundredsTailCandidate(
+      digitCandidates[0],
+      remainingWords,
+      digitSequence.consumed + extended.consumed,
+      config,
+    );
+    if (hundreds) {
+      digitCandidates.push(hundreds);
+    }
+
+    return digitCandidates;
   }
 
   const cardinalGroups = [];
