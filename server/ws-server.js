@@ -267,6 +267,25 @@ export function attachWsServer(httpServer, config, services = {}) {
     const pendingQuantityActions = new Map();
     const PENDING_QUANTITY_TTL_MS = 60_000;
 
+    // Те же однократные токены для «забронировать из строки внимания»: покупатель
+    // написал код, под который открытого лота нет (лот закрыт час назад или это
+    // был первый день кампании), сервер бронировать сам не стал и вынес строку
+    // оператору. Клик по «✓ забронировать» возвращает actionId, а code/viewerId
+    // сервер берёт из своей map — клиентскому payload здесь верить нельзя, это
+    // прямая запись позиции в МойСклад.
+    //
+    // TTL заметно больше, чем у «+N штук»: строка внимания живёт в баннере до
+    // разбора, оператор доходит до неё между лотами, а не в ту же секунду.
+    const pendingAttentionReservations = new Map();
+    const PENDING_ATTENTION_TTL_MS = 30 * 60_000;
+    const PENDING_ATTENTION_MAX = 200;
+    // Токен намеренно НЕ тратится до успешной записи (чтобы сбой МойСклада можно
+    // было повторить тем же кликом), поэтому от двойного клика он не защищает:
+    // обработчик сообщений не сериализован, и два кадра успевают пройти peek до
+    // того, как первый допишет позицию. Получалось ДВА заказа на одного
+    // покупателя. Тот же приём, что у appendReservationQuantity (appendInFlight).
+    const attentionReservationsInFlight = new Set();
+
     function isLotPoisoned(lotSessionId) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
     }
@@ -362,6 +381,10 @@ export function attachWsServer(httpServer, config, services = {}) {
       openLotsBySessionId.clear();
       lastDetection = null;
       activeDetectionActionId = null;
+      // Токены строк внимания привязаны к комментариям прошлого эфира: после
+      // перезапуска поллер перечитает комментарии и выдаст новые.
+      pendingAttentionReservations.clear();
+      attentionReservationsInFlight.clear();
       voicePipeline.resetTriggerWindow("detection_state_reset");
     }
 
@@ -785,6 +808,55 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (!pending) return null;
       if (pending.expiresAt < Date.now()) {
         pendingQuantityActions.delete(actionId);
+        return null;
+      }
+      return pending;
+    }
+
+    // Регистрирует строку внимания как выполнимое действие «забронировать».
+    // Возвращает actionId или null, если бронировать по этой строке нельзя
+    // (нет однозначного каталожного кода — гадать в денежном пути запрещено).
+    function registerPendingAttentionReservation({ code, viewerId, viewerName, commentId, quantity, source }) {
+      if (!code || viewerId == null) {
+        return null;
+      }
+
+      const actionId = randomUUID();
+      pendingAttentionReservations.set(actionId, {
+        code: String(code),
+        viewerId,
+        viewerName: viewerName || "",
+        commentId: commentId ?? null,
+        quantity: Math.min(10, Math.max(1, Number(quantity) || 1)),
+        source: source === "chat" ? "chat" : "vk",
+        expiresAt: Date.now() + PENDING_ATTENTION_TTL_MS,
+      });
+
+      // Баннер копит строки весь эфир; без подрезки map растёт до конца сессии.
+      // Чистим просроченные, затем самые старые.
+      if (pendingAttentionReservations.size > PENDING_ATTENTION_MAX) {
+        const now = Date.now();
+        for (const [key, value] of pendingAttentionReservations) {
+          if (value.expiresAt < now) pendingAttentionReservations.delete(key);
+        }
+        while (pendingAttentionReservations.size > PENDING_ATTENTION_MAX) {
+          const oldest = pendingAttentionReservations.keys().next().value;
+          if (oldest === undefined) break;
+          pendingAttentionReservations.delete(oldest);
+        }
+      }
+
+      return actionId;
+    }
+
+    // Как peekPendingQuantityAction: токен не тратится до успешной записи,
+    // чтобы при сбое МойСклада оператор мог повторить тем же кликом.
+    function peekPendingAttentionReservation(actionId) {
+      if (!actionId) return null;
+      const pending = pendingAttentionReservations.get(actionId);
+      if (!pending) return null;
+      if (pending.expiresAt < Date.now()) {
+        pendingAttentionReservations.delete(actionId);
         return null;
       }
       return pending;
@@ -1642,6 +1714,22 @@ export function attachWsServer(httpServer, config, services = {}) {
             candidateCodes: target?.candidateCodes || [],
             openLotCodes,
           });
+          // Бронь прямо из строки внимания предлагаем только когда код
+          // однозначно резолвится в каталоге и лота под него просто нет
+          // (закрыт / другой день кампании). При reason "ambiguous" код подошёл
+          // НЕСКОЛЬКИМ открытым лотам — это разные товары, и выбирать за
+          // оператора в денежном пути нельзя.
+          const attentionActionId = reason === "no_open_lot" && probeCodeResolution.status === "matched"
+            ? registerPendingAttentionReservation({
+              code: attentionCode,
+              viewerId: comment.viewerId,
+              viewerName: viewerNameForAttention,
+              commentId: comment.id,
+              quantity: probe.quantity,
+              source: comment.source,
+            })
+            : null;
+
           sendJson(websocket, {
             type: "reservationAttention",
             reason,
@@ -1654,6 +1742,8 @@ export function attachWsServer(httpServer, config, services = {}) {
             candidateCodes: target?.candidateCodes || probeCodeResolution.candidates || [],
             openLotCodes,
             source: comment.source,
+            actionId: attentionActionId || undefined,
+            quantity: probe.quantity || 1,
           });
         }
         return;
@@ -3519,6 +3609,308 @@ export function attachWsServer(httpServer, config, services = {}) {
           }));
           logReservationFinalized(lot, appendedEvent, { appended: true, source: "voice_quantity_confirmed" });
           emitState();
+          return;
+        }
+
+        if (payload.type === "reserveFromAttention") {
+          // «✓ забронировать» в баннере «Брони требуют внимания». Покупатель
+          // написал код, под который открытого лота нет: лот закрылся раньше в
+          // этом же эфире или карточка была в другой день кампании. Обычный путь
+          // тут глухой (findCommentTarget смотрит только на ОТКРЫТЫЕ лоты), и до
+          // 2026-07-26 такие брони пропадали молча — за один эфир так потерялись
+          // две ручки 03723 (Анна Стрелкова, Марго Краснова).
+          //
+          // Лота нет, поэтому нет и стокового гейта лота: цену, остаток и товар
+          // берём прямо из карточки МойСклада. Позиция дописывается в тот же
+          // заказ кампании, что и обычная бронь (findBroadcastCustomerOrderForCounterparty).
+          const ackFail = (message, status = "failed") => {
+            sendJson(websocket, { type: "warning", message });
+            sendJson(websocket, {
+              type: "attentionReservationResult",
+              actionId: payload.actionId,
+              ok: false,
+              status,
+              message,
+            });
+          };
+
+          const pending = peekPendingAttentionReservation(payload.actionId);
+          if (!pending) {
+            ackFail("Строка устарела — попросите покупателя повторить код", "expired");
+            return;
+          }
+
+          if (attentionReservationsInFlight.has(payload.actionId)) {
+            ackFail("Бронь по этой строке уже создаётся — подождите", "in_flight");
+            return;
+          }
+
+          if (isSafeMode()) {
+            logger.warn("safe-mode", "attention_reservation_blocked", {
+              connectionId,
+              code: pending.code,
+              viewerId: pending.viewerId,
+              commentId: pending.commentId,
+            });
+            ackFail("Бронь недоступна в safe-mode", "safe_mode");
+            return;
+          }
+
+          if (!moysklad?.isEnabled) {
+            ackFail("МойСклад не настроен — бронь не создать");
+            return;
+          }
+
+          attentionReservationsInFlight.add(payload.actionId);
+          try {
+            const productCard = await moysklad.getProductCardByCode(pending.code);
+            if (!productCard?.id) {
+              logger.warn("ws", "attention_reservation_product_not_found", {
+                connectionId,
+                code: pending.code,
+                viewerId: pending.viewerId,
+              });
+              ackFail(`Товар ${pending.code} не найден в МойСкладе`, "product_not_found");
+              return;
+            }
+
+            // Лота нет — значит нет и озвученной цены, подставить её неоткуда.
+            // У товара с нулевой ценой в каталоге позиция ушла бы в заказ по
+            // 0 ₽, и оператор увидел бы зелёный «забронирован». Таких товаров
+            // в каталоге сейчас десяток (эфир 26.07), поэтому отказываем явно.
+            if (!hasUsableSalePrice(productCard)) {
+              logger.warn("ws", "attention_reservation_no_price", {
+                connectionId,
+                code: pending.code,
+                viewerId: pending.viewerId,
+                salePrice: productCard.salePrice ?? null,
+              });
+              ackFail(
+                `У ${pending.code} нет цены в МойСкладе — откройте лот и назовите цену, иначе позиция уйдёт по 0 ₽`,
+                "no_price",
+              );
+              return;
+            }
+
+            const reservation = {
+              viewerId: pending.viewerId,
+              viewerName: pending.viewerName,
+              commentId: pending.commentId,
+              quantity: pending.quantity,
+            };
+            // Псевдо-лот для записи в МойСклад: тот же контракт, что у
+            // recover-orders-from-logs.mjs. Реальным лотом он не становится —
+            // в openLotsBySessionId не попадает и карточку в VK не публикует.
+            const lotLike = {
+              code: pending.code,
+              lotSessionId: `attention-${payload.actionId}`,
+              product: {
+                id: productCard.id,
+                name: productCard.name || "",
+                salePrice: productCard.salePrice,
+                availableStock: productCard.availableStock,
+              },
+              discountAmount: 0,
+            };
+
+            // «Если не хватило, то не хватило» — в вишлист, а не в отрицательный
+            // остаток. Неизвестный остаток (null) не блокирует: оператор видит
+            // товар в руках, решение за ним (та же политика, что у голосового
+            // «+N шт»).
+            const stock = productCard.availableStock;
+            if (typeof stock === "number" && Number.isFinite(stock) && stock < pending.quantity) {
+              const entry = await addWishlistFromComment(lotLike, {
+                viewerId: pending.viewerId,
+                viewerName: pending.viewerName,
+                commentId: pending.commentId,
+                quantity: pending.quantity,
+              }, "attention_out_of_stock");
+              logger.info("ws", "attention_reservation_out_of_stock", {
+                connectionId,
+                code: pending.code,
+                viewerId: pending.viewerId,
+                viewerName: pending.viewerName,
+                availableStock: stock,
+                wishlistEntryId: entry?.id || null,
+              });
+              sessionLog.logReservationOutOfStock({
+                viewerName: pending.viewerName,
+                viewerId: pending.viewerId,
+                lotCode: pending.code,
+              });
+              pendingAttentionReservations.delete(payload.actionId);
+              // Без имени зрителя wishlistStore запись не создаёт — не выдаём это
+              // за успех, иначе покупатель тихо потеряется во второй раз.
+              sendJson(websocket, {
+                type: "attentionReservationResult",
+                actionId: payload.actionId,
+                ok: Boolean(entry),
+                status: entry ? "wishlist" : "wishlist_failed",
+                message: entry
+                  ? `${pending.code}: товара нет в наличии — покупатель в списке ожидания`
+                  : `${pending.code}: товара нет, но в список ожидания не попал — добавьте вручную`,
+              });
+              return;
+            }
+
+            const counterparty = await moysklad.ensureCounterparty({
+              viewerId: pending.viewerId,
+              viewerName: pending.viewerName,
+            });
+
+            // Без контрагента отказываем закрыто. createCustomerOrderReservation
+            // разрешил бы его сам, но тогда недоступны и поиск заказа кампании,
+            // и проверка на дубль — то есть каждый повтор писал бы новый заказ.
+            if (!counterparty?.id) {
+              logger.warn("ws", "attention_reservation_no_counterparty", {
+                connectionId,
+                code: pending.code,
+                viewerId: pending.viewerId,
+              });
+              ackFail("Не удалось определить контрагента в МойСкладе — повторите", "no_counterparty");
+              return;
+            }
+
+            const broadcastDate = new Date();
+            const customerOrderKey = buildCustomerOrderCacheKey(pending.viewerId, broadcastDate);
+
+            // Сначала кеш этой сессии — как на обычном пути брони. Иначе заказ,
+            // созданный секунду назад, ещё не виден поиску по маркеру #Эфир, и
+            // клик создаёт покупателю ВТОРОЙ заказ.
+            let existingOrder = customerOrdersByViewerId.get(customerOrderKey) || null;
+            if (existingOrder?.id) {
+              try {
+                const appendable = await moysklad.isCustomerOrderAppendable(existingOrder.id, {
+                  source: "attention_reservation",
+                });
+                if (!appendable) {
+                  customerOrdersByViewerId.delete(customerOrderKey);
+                  existingOrder = null;
+                }
+              } catch (recheckError) {
+                logger.warn("ws", "attention_reservation_cached_order_recheck_failed", {
+                  connectionId,
+                  viewerId: pending.viewerId,
+                  orderId: existingOrder.id,
+                  error: recheckError,
+                });
+                customerOrdersByViewerId.delete(customerOrderKey);
+                existingOrder = null;
+              }
+            }
+
+            if (!existingOrder?.id) {
+              existingOrder = await moysklad.findBroadcastCustomerOrderForCounterparty(
+                counterparty.id,
+                { broadcastDate, source: "attention_reservation" },
+              );
+            }
+
+            // Идемпотентность: оператор мог уже добить позицию руками или
+            // кликнуть дважды. Проверяем ИМЕННО тот заказ, куда собираемся
+            // писать: hasPositionForProduct смотрит последний незакрытый заказ
+            // контрагента — без маркера #Эфир и без окна кампании, и посторонний
+            // ручной заказ с тем же товаром выглядел бы как «уже забронировано».
+            if (existingOrder?.id) {
+              const already = await moysklad.hasPositionInOrder(existingOrder.id, productCard.id, {
+                source: "attention_reservation",
+              });
+              if (already?.present) {
+                pendingAttentionReservations.delete(payload.actionId);
+                sendJson(websocket, {
+                  type: "attentionReservationResult",
+                  actionId: payload.actionId,
+                  ok: true,
+                  status: "already_reserved",
+                  message: `${pending.code} уже есть в заказе ${existingOrder.name || existingOrder.id} — повторно не добавляю`,
+                });
+                return;
+              }
+            }
+
+            const writeResult = existingOrder?.id
+              ? await moysklad.appendPositionToCustomerOrder({
+                orderId: existingOrder.id,
+                activeLot: lotLike,
+                productCard,
+                reservation,
+                broadcastDate,
+              })
+              : await moysklad.createCustomerOrderReservation({
+                activeLot: lotLike,
+                productCard,
+                reservation,
+                counterparty,
+                broadcastDate,
+              });
+
+            // safe-mode мог переключиться в полёте — обёртка возвращает маркер.
+            if (writeResult?.skipped === true && writeResult?.safeMode === true) {
+              ackFail("Бронь недоступна в safe-mode", "safe_mode");
+              return;
+            }
+
+            const orderId = existingOrder?.id || writeResult?.id || null;
+            if (!orderId) {
+              ackFail("МойСклад не подтвердил создание заказа — повторите");
+              return;
+            }
+
+            // Кладём заказ в кеш сессии, как это делает обычный путь брони:
+            // следующая бронь этого покупателя должна дописаться СЮДА, а не
+            // создать ещё один заказ.
+            customerOrdersByViewerId.set(customerOrderKey, {
+              id: orderId,
+              name: existingOrder?.name || writeResult?.name || null,
+              counterpartyId: counterparty.id,
+            });
+
+            pendingAttentionReservations.delete(payload.actionId);
+
+            logger.info("ws", "attention_reservation_created", {
+              connectionId,
+              code: pending.code,
+              productId: productCard.id,
+              productName: productCard.name || null,
+              viewerId: pending.viewerId,
+              viewerName: pending.viewerName,
+              commentId: pending.commentId,
+              orderId,
+              positionId: writeResult?.positionId || null,
+              appended: Boolean(existingOrder?.id),
+              quantity: pending.quantity,
+              source: pending.source,
+            });
+            sessionLog.logOrderCreated({
+              viewerName: pending.viewerName,
+              viewerId: pending.viewerId,
+              orderId,
+              lotCode: pending.code,
+              appended: Boolean(existingOrder?.id),
+            });
+            // Номер заказа в ответе — не украшение: у этой брони нет строки в
+            // списке лота, поэтому отменить её кнопкой нельзя, и единственный
+            // способ откатить ошибочный клик — открыть заказ в МойСкладе.
+            sendJson(websocket, {
+              type: "attentionReservationResult",
+              actionId: payload.actionId,
+              ok: true,
+              status: "reserved",
+              message: `${pending.code} забронирован для ${pending.viewerName || `id${pending.viewerId}`}`
+                + ` — заказ ${existingOrder?.name || writeResult?.name || orderId}`,
+            });
+          } catch (error) {
+            logger.error("ws", "attention_reservation_failed", {
+              connectionId,
+              code: pending.code,
+              viewerId: pending.viewerId,
+              commentId: pending.commentId,
+              error,
+            });
+            ackFail("Не удалось создать бронь — попробуйте ещё раз");
+          } finally {
+            attentionReservationsInFlight.delete(payload.actionId);
+          }
           return;
         }
 

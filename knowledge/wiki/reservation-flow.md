@@ -62,6 +62,77 @@ Reservation-like comments in that window still become `reservationAttention`
 rows with an empty `openLotCodes` list. They are not auto-reserved because there
 is no current lot to attach stock, price, and MoySklad writes to.
 
+### Reserving straight from the attention row
+
+Buyers routinely write a code whose lot is already closed — an hour later in the
+same эфир, or on day 3 for a card shown on day 1. `findCommentTarget` only looks
+at **open** lots, so the app is deaf to those and the operator used to re-enter
+them in MoySklad by hand. Эфир 2026-07-26 lost two ручки `03723` exactly that
+way (Анна Стрелкова 16:20, Марго Краснова 16:23 — `reservation_no_open_lot`, no
+order ever created), and the banner's only button was «убрать строку».
+
+The attention row now carries a **«✓ забронировать»** action:
+
+- The server attaches a one-shot `actionId` to `reservationAttention`, and only
+  when `reason: "no_open_lot"` **and** the code resolves to exactly one catalog
+  code. `reason: "ambiguous"` gets no button — the code matched several open
+  lots, i.e. different products, and guessing on the money path is not allowed.
+- `reserveFromAttention { actionId }` carries **nothing else**. `code`,
+  `viewerId`, `commentId` and `quantity` come from `pendingAttentionReservations`
+  on the server, same rule as `appendReservationQuantity` (a raw WS message must
+  not be able to write an arbitrary position). TTL 30 min — the banner row lives
+  until the operator gets to it, unlike a voice command. The token is spent only
+  on a successful write, so a MoySklad hiccup can be retried with the same click.
+- No lot means no lot-level stock gate: price, stock and product come from
+  `getProductCardByCode`. `availableStock < quantity` → the buyer goes to
+  [[wishlist]] and **nothing** is written to MoySklad («если не хватило, то не
+  хватило»). Unknown stock (`null`) does not block — the operator is holding the
+  goods, same "operator-always-right" policy as the voice `+N шт` path.
+- **No lot also means no voiced price.** On the normal path a zero catalog price
+  is covered by the operator saying the price on air; here there is nowhere to
+  take it from, so a product with `salePrice == 0` is **refused**
+  (`status: "no_price"`) instead of writing a 0 ₽ order line under a green
+  "забронирован". There were ~13 such products in the catalog after the
+  2026-07-26 эфир.
+- The position lands in the buyer's **campaign** order. Resolution order is the
+  same as the normal бронь path and for the same reasons: the in-session
+  `customerOrdersByViewerId` cache first (re-checked with
+  `isCustomerOrderAppendable`), then `findBroadcastCustomerOrderForCounterparty`,
+  and the resulting order is written back into the cache. Skipping the cache
+  gave the buyer a second order whenever the MoySklad lookup had not caught up
+  with an order created seconds earlier.
+- **Fail closed without a counterparty.** `createCustomerOrderReservation` would
+  resolve one internally, but then neither the campaign lookup nor the duplicate
+  check is possible and every retry writes another order.
+- Duplicate protection is two-layered, because the token is deliberately *not*
+  consumed until the write succeeds (so a MoySklad hiccup can be retried with
+  the same click): `attentionReservationsInFlight` rejects a second click while
+  the first is in flight (`status: "in_flight"` — the WS message handler is not
+  serialized, so two frames otherwise both passed the token check and created
+  **two orders**), and `hasPositionInOrder(orderId, productId)` checks the
+  order that is actually about to be written. Note it is *not*
+  `hasPositionForProduct`, which looks at the buyer's latest non-closed order
+  with no `#Эфир` marker and no campaign window — an unrelated manual order
+  holding the same product would read as "already reserved" and silently drop
+  the reservation.
+- Safe mode refuses before any read or write. Result codes come back in
+  `attentionReservationResult { ok, status, message }`: `reserved`, `wishlist`,
+  `wishlist_failed`, `already_reserved`, `expired`, `in_flight`, `safe_mode`,
+  `no_price`, `no_counterparty`, `product_not_found`, `failed`.
+- **This reservation has no dashboard row and no cancel button** — there is no
+  lot to hang it on, so the addressable-cancel path (#16) cannot reach it. The
+  success message therefore names the order, which is the only way back if the
+  operator misclicks. Closing that properly belongs with closed-lot
+  cancellation, still open.
+- The buyer gets **no** public VK reply on this path (there is no lot card to
+  reply under, and error 801 on a stale card would poison an unrelated lot).
+  Logged as `attention_reservation_created` / `_out_of_stock` / `_failed`, plus a
+  session-log line via `logOrderCreated`.
+
+Tests: `test/ws-server.attention-reservation.test.js`. Cancelling a бронь on a
+closed lot is still **not** implemented — see the open item in
+[log-verification-checklist](log-verification-checklist.md) §2.1.
+
 ## Active lot state
 
 `server/ws-server.js` owns the active lot, the open-lot registry, accepted

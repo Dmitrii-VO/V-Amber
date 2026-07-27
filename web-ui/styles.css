@@ -939,6 +939,9 @@ a { color: inherit; }
 .attention-row__head { font-size: var(--fs-sm); }
 .attention-row__sub { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attention-row__dismiss { padding: 0 10px; flex: 0 0 auto; }
+/* Главное действие строки: оператор жмёт его на ходу, поэтому не ghost. */
+.attention-row__reserve { padding: 0 12px; flex: 0 0 auto; white-space: nowrap; }
+.attention-row__reserve:disabled { opacity: .6; cursor: default; }
 
 .toggle--inline { font-size: var(--fs-xs); color: var(--text-dim); }
 

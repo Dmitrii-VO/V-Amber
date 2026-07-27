@@ -1042,6 +1042,14 @@ function handleServerMessage(payload) {
     return;
   }
 
+  if (payload.type === "attentionReservationResult") {
+    // Ack на «✓ забронировать» из баннера внимания. Успех — строка уходит
+    // (бронь в МойСкладе есть), отказ — кнопка снова кликабельна: токен на
+    // сервере живёт до успешной записи, повтор безопасен.
+    handleAttentionReservationResult(payload);
+    return;
+  }
+
   if (payload.type === "voiceCancelMatch") {
     // Голосовая отмена брони (W3): сервер нашёл бронь по произнесённому имени,
     // но НЕ отменил её. Подсвечиваем строку и просим оператора подтвердить
@@ -1185,6 +1193,8 @@ document.getElementById("digestPromptDismiss")?.addEventListener("click", hideDi
 
 // Брони, требующие ручного разбора оператором (нет однозначного открытого лота).
 const reservationAttentionSeen = new Set();
+// actionId → строка баннера, ждущая ответа сервера на «✓ забронировать».
+const pendingAttentionActions = new Map();
 
 function addReservationAttention(payload) {
   const banner = document.getElementById("reservationAttentionBanner");
@@ -1214,28 +1224,58 @@ function addReservationAttention(payload) {
   sub.textContent = payload.text || "";
   body.append(head, sub);
 
+  const removeRow = () => {
+    row.remove();
+    if (!list.children.length) banner.hidden = true;
+  };
+
   const dismiss = document.createElement("button");
   dismiss.className = "btn btn--ghost attention-row__dismiss";
   dismiss.type = "button";
-  dismiss.textContent = "✓";
-  dismiss.title = "Убрать строку";
-  dismiss.addEventListener("click", () => {
-    row.remove();
-    if (!list.children.length) banner.hidden = true;
-  });
+  dismiss.textContent = "✕";
+  dismiss.title = "Убрать строку (бронь не создаётся)";
+  dismiss.addEventListener("click", removeRow);
+
+  // Раньше здесь была только галочка «убрать строку», и оператору приходилось
+  // дописывать такие брони в МойСклад руками (эфир 26.07: две ручки 03723 так и
+  // потерялись). Теперь галочка реально бронирует — сервер выдаёт actionId
+  // только когда код однозначно есть в каталоге.
+  let reserve = null;
+  if (payload.actionId) {
+    reserve = document.createElement("button");
+    reserve.className = "btn attention-row__reserve";
+    reserve.type = "button";
+    reserve.textContent = payload.quantity > 1 ? `✓ забронировать ${payload.quantity} шт` : "✓ забронировать";
+    reserve.title = `Создать бронь ${payload.code} для ${who} в МойСкладе`;
+    reserve.addEventListener("click", () => {
+      if (reserve.disabled) return;
+      if (!(state.websocket && state.websocket.readyState === 1)) {
+        logEvent("Связь с сервером не установлена — нельзя забронировать", "warn");
+        return;
+      }
+      if (!window.confirm(`Забронировать ${payload.code} для ${who}? Позиция будет создана в заказе МойСклад.`)) {
+        return;
+      }
+      reserve.disabled = true;
+      reserve.textContent = "…";
+      pendingAttentionActions.set(payload.actionId, { row, button: reserve, code: payload.code, who });
+      state.websocket.send(JSON.stringify({ type: "reserveFromAttention", actionId: payload.actionId }));
+    });
+  }
 
   // Спам чаще всего оседает именно здесь: «бронь»-подобный текст без
   // открытого лота. Поэтому бан доступен прямо из строки внимания.
+  row.append(body);
+  if (reserve) row.append(reserve);
   if (payload.viewerId != null) {
     const block = createBlockButton(
       { viewerId: payload.viewerId, viewerName: payload.viewerName },
       "спам в комментариях",
     );
     block.classList.add("attention-row__block");
-    row.append(body, block, dismiss);
-  } else {
-    row.append(body, dismiss);
+    row.append(block);
   }
+  row.append(dismiss);
   list.prepend(row);
   banner.hidden = false;
 
@@ -1244,6 +1284,29 @@ function addReservationAttention(payload) {
   while (list.children.length > 20) {
     list.lastChild.remove();
   }
+}
+
+function handleAttentionReservationResult(payload) {
+  const pending = pendingAttentionActions.get(payload.actionId);
+  pendingAttentionActions.delete(payload.actionId);
+
+  const message = payload.message
+    || (payload.ok ? "Бронь создана" : "Бронь не создана");
+  logEvent(message, payload.ok ? "info" : "warn");
+
+  if (!pending) return;
+
+  if (payload.ok) {
+    // Строку убираем целиком: разобрана, второй клик по ней уже не нужен.
+    const banner = document.getElementById("reservationAttentionBanner");
+    const list = document.getElementById("reservationAttentionList");
+    pending.row.remove();
+    if (banner && list && !list.children.length) banner.hidden = true;
+    return;
+  }
+
+  pending.button.disabled = false;
+  pending.button.textContent = "✓ забронировать";
 }
 
 function clearReservationAttention() {
