@@ -115,6 +115,13 @@ for (const e of live) {
   if (baseRub === 0) problems.push("цена 0");
   if (Number(pos.quantity) < Number(e.quantity || 1)) problems.push(`количество ${pos.quantity} < ${e.quantity}`);
   if (Math.abs(netRub - wantRub) > 0.51) {
+    // The log recorded price 0 and MoySklad has a real price: that is
+    // fix-zero-price-positions.mjs (or the operator) having repaired it. A
+    // repair, not a defect.
+    if (wantRub === 0 && netRub > 0) {
+      add("warn", `${tag} (заказ ${order.name}): в логе цена 0, в МойСкладе ${netRub}₽ — позиция уже исправлена`);
+      continue;
+    }
     problems.push(`к оплате ${netRub}₽ вместо ${wantRub}₽ (база ${baseRub}₽, скидка ${Number(pos.discount) || 0}%)`);
     // Cheaper than announced + the order was touched after the эфир ended = a
     // manual post-broadcast edit, not a lost price. Dearer than announced is
