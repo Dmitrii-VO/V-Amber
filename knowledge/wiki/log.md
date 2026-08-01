@@ -41,9 +41,37 @@ decisions here. Use a stable heading format so agents can scan recent changes.
 `stockUnknown` на бронь, `orphan_waitlist`, `manual_code_submitted` без лота,
 `suppressed` из флуд-гарда.
 
-§9 — список известных дефектов `analyze-broadcast-logs.mjs` (в т.ч. читает
-несуществующие поля `status`/`error` вместо `httpStatus`/`errorMessage`), чтобы
-зелёный вывод не принимали за пройденную проверку. Сам скрипт не трогал.
+Прежний §9 перечислял дефекты `analyze-broadcast-logs.mjs`; они закрыты в коде
+той же датой — см. запись ниже, а в §9 теперь остались только принципиальные
+пределы инструментов.
+
+## [2026-08-02] tooling | Анализатор переписан, сверка с МойСкладом появилась
+
+`analyze-broadcast-logs.mjs` переписан. Теперь принимает **папку бандла +
+`--date`** и сам собирает все session-файлы дня, `server.log*` и
+`wishlist/events.jsonl`; дедуплицирует `reservation_finalized` ключом из
+`bundle-index.js`; читает настоящие поля `moysklad_call`; выносит
+`safe_mode_logged`/`order_failed`/`stale_discarded` отдельными флагами; считает
+арифметику `effectivePrice`; ловит `discount_applied` и `lot_price_changed`
+позже первой брони лота. Общий парсер вынесен в `scripts/lib/broadcast-log.mjs`.
+
+Новый `verify-broadcast-against-moysklad.mjs` — только GET, §8 чек-листа.
+
+**Два открытия при первом же прогоне на живых данных.** Первое: позиция в
+МойСкладе хранит **базовую цену и процент скидки раздельно**
+(`buildCustomerOrderPosition`), поэтому сравнивать `price` с `effectivePrice`
+бессмысленно — надо `price × (1 − discount/100)`. Первая версия скрипта из-за
+этого объявила дефектом каждую позицию со скидкой.
+
+Второе: `effectivePrice` в логе — **снимок на момент финализации**. Оператор
+после эфира проставил 5% на все заказы (`updated` заказов на 20–170 минут
+позже последнего события лога), и лог об этом не знает ничего. Отсюда правило
+в скрипте: дороже лога = ошибка (покупатель платит больше объявленного),
+дешевле на заказе, правленном после эфира = предупреждение.
+
+Ещё одна поправка по фактам: `added` в session jsonl — **не** источник
+wish list (на 2026-08-01 там 1 запись из 4). Считать надо
+`wishlist/events.jsonl`.
 
 ## [2026-07-21] feat | Soft blocking of comment spammers
 

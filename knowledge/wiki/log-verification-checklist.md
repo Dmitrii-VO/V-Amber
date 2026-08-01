@@ -24,17 +24,23 @@ That leaves four blind spots, all of them things that have already gone wrong:
   count in §2–§3.
 
 Closing those requires §8, which queries MoySklad. Do not report an эфир as
-"verified" on sections 0–7 alone.
+"verified" on sections 0–7 alone — on 2026-08-01 they came back almost clean
+while MoySklad held one бронь that no longer existed and 43 positions the
+operator had re-priced afterwards.
 
 ## The analyzer
 
+Two read-only scripts, run in this order. Neither writes anything.
+
 ```bash
-node scripts/analyze-broadcast-logs.mjs path/to/sessions/<эфир-date>_*.jsonl
+node scripts/analyze-broadcast-logs.mjs path/to/bundle --date 2026-08-01
+node scripts/verify-broadcast-against-moysklad.mjs path/to/bundle --date 2026-08-01
 ```
 
-Read-only; never writes to logs or MoySklad. See [[service-scripts]]. It covers
-most of §1–§6 — but see **§9 for what it currently gets wrong**; a green run is
-not a pass.
+The first covers §0–§7 from the logs (pass the **bundle directory** plus the
+date — it then picks up every session file of that эфир *and* `server.log`, and
+prints named red flags). The second is §8: it GETs the orders from MoySklad and
+diffs them against the logs. See [[service-scripts]].
 
 ---
 
@@ -48,7 +54,10 @@ not a pass.
 - [ ] **One эфир = several session files.** Every reconnect/restart opens a new
   jsonl (`2026-07-26` has three, `2026-08-01` two in the same bundle). Pass *all*
   files of that date, or you verify half the broadcast. Check `session_ended`
-  `reason` on each — an abrupt end is itself a finding.
+  `reason` on each — an abrupt end is itself a finding. The **newest** session
+  usually has no `session_ended` at all and that is normal: the operator
+  downloads the bundle while the эфир is still running (compare the last event
+  against `meta.generatedAt` before calling it a crash).
 - [ ] **`meta.json`** — note `vamberVersion`, `platform` (operator runs
   **darwin/Mac**, not this repo), and `integrationsEnabled` (`moysklad`, `vk`,
   `speechkit` all `true`?). If `moysklad:false`, no orders could have been
@@ -258,11 +267,14 @@ in the app — that is what the checks below are for.
 
 ## 6. Wishlist (out_of_stock overflow)
 
+- [ ] **Count `added` from `wishlist/events.jsonl`, not from the session jsonl.**
+  The session stream carries only a stray subset (1 of 4 on 2026-08-01), so
+  counting there invents missing buyers. Filter the wishlist events to the эфир
+  window. `INDEX.md` calls the same event `wishlist_added`, and
+  `reservation_out_of_stock` exists as its own kind alongside the `out_of_stock`
+  finalization status — do not count both.
 - [ ] **Every `out_of_stock` reservation has a matching wishlist `added` event.**
   Counts must be equal — an OOS бронь with no wishlist entry is a lost buyer.
-  Note the two spellings: the session jsonl kind is `added`, `INDEX.md` reports it
-  as `wishlist_added`; and `reservation_out_of_stock` exists as its own event kind
-  alongside the `out_of_stock` finalization status — do not count both.
 - [ ] **`added` with `trigger:"order_failed"`** — these are not overflow buyers,
   they are §2 failures that were parked in the wishlist. `INDEX.md` lists them as
   incidents. Every one is a buyer who wanted an in-stock item and got nothing.
@@ -291,49 +303,61 @@ in the app — that is what the checks below are for.
 
 ## 8. MoySklad ground truth — the part the logs cannot do
 
-Nothing above proves a single order exists. Do this for any эфир that matters,
-and always after a §1, §2 or §4 finding.
+Nothing above proves a single order exists. Run this for any эфир that matters,
+and always after a §1, §2 or §4 finding:
 
-- [ ] **Pull the orders with the `#Эфир <date>` marker** for the campaign window
-  and diff them against the deduped live positions from §2:
-  - in MoySklad, absent from logs → a `stale_discarded` write, a recovery-script
-    re-run, or a manual operator order;
-  - in logs, absent from MoySklad → the write never landed; go back to §1.
-- [ ] **Compare prices position-by-position**, not just against zero: the position
-  `price` (kopecks) must equal `effectivePrice × 100` from §4. This is where a
-  wrong discount shows up.
-- [ ] **Verify cancellations actually happened.** Every `cancelled` бронь → the
-  position is gone. Every un-executed отмена from §2.3 → the position is still
-  there and must be removed by hand.
-- [ ] **Look for duplicate orders per buyer** in the window (the `stale_discarded`
-  orphan-prevention path exists precisely because this used to happen).
-- [ ] **Check order state.** A заказ the operator has already проведено/paid must
-  not be touched by any fix script — this is the guardrail behind
+```bash
+node scripts/verify-broadcast-against-moysklad.mjs path/to/bundle --date 2026-08-01
+```
+
+GET-only. What it checks, and what you still do by hand:
+
+- [ ] **Every live бронь → order + position exist**, quantity is not short, and
+  the money matches. Missing position = the бронь is in the log and nowhere else.
+- [ ] **Price, computed the MoySklad way.** A position stores the **base price
+  plus a discount percent** (`buildCustomerOrderPosition` in `moysklad.js`), so
+  what the buyer pays is `price × (1 − discount/100)`. Comparing `price` alone
+  reports every discounted position as broken. The script compares the net.
+- [ ] **Направление расхождения решает всё.** Dearer than the log = defect, the
+  buyer is charged more than they were told. Cheaper, on an order whose `updated`
+  is later than the last log event = a **post-эфир manual edit** (the operator
+  applying a blanket discount, for instance) — expected, and invisible to §0–§7.
+  The script grades these `⚠`, not `✗`.
+- [ ] **`effectivePrice` in the log is a snapshot at finalize time.** A discount
+  voiced after the бронь does *not* rewrite the logged бронь — so a whole эфир
+  can диff cleanly against MoySklad and still show "wrong" prices in the log.
+- [ ] **Cancellations really removed.** Every `cancelled` бронь → position gone.
+  Every un-executed отмена from §2.3 → position still there, remove it by hand.
+- [ ] **`stale_discarded` positions** — expected to exist in MoySklad even though
+  the dashboard never showed them.
+- [ ] **Orders with the `#Эфир <date>` marker that the logs never mention** — a
+  recovery-script re-run or a manual operator order.
+- [ ] **>1 order per buyer in the campaign window** — the merge should have made
+  it one.
+- [ ] Still manual: **order state**. A заказ the operator has already проведено or
+  paid must not be touched by any fix script — the guardrail behind
   `campaignMaxGapDays`.
-- [ ] Tools that already talk to MoySklad: `find-overbooked.js`,
+- [ ] Other MoySklad-aware tools: `find-overbooked.js`,
   `fix-zero-price-positions.mjs` (dry-run by default), `merge-broadcast-orders.mjs`
-  (dry-run by default), `recover-orders-from-logs.mjs`. There is **no dedicated
-  log↔MoySklad diff script yet** — this section is manual today.
+  (dry-run by default), `recover-orders-from-logs.mjs`.
 
-## 9. Known blind spots of `analyze-broadcast-logs.mjs`
+## 9. Limits of the tooling
 
-Verified 2026-08-02 against a real bundle. Until these are fixed, a green run is
-not a pass:
+Both scripts share `scripts/lib/broadcast-log.mjs`, so they cannot disagree
+about what a live бронь is. What they still do not tell you:
 
-- **Counts `reservation_finalized` raw** (§2.0) — cancelled броней are still
-  counted as live, so its numbers disagree with `INDEX.md`.
-- **Reads the wrong `moysklad_call` fields** — it looks for `status`/`error`,
-  the events carry `httpStatus`/`errorMessage`. Failures are detected only via
-  the `ok` flag, and the printed detail lines come out `undefined`. It never
-  looks at `attempts` or `durationMs`.
-- **Asserts `vk_comment == reservation_detected`**, which is not a real invariant
-  (§2.2).
-- **Never reads `server.log`** — so every cancellation check, `reservation_no_open_lot`,
-  the flood guard and `invalid_discount` are outside its view.
-- **No `safe_mode_logged` / `order_failed` / `stale_discarded` reporting** — they
-  land in the generic status dump with no flag raised.
-- **Pricing check is `salePrice <= 0` only** — no `effectivePrice` arithmetic.
-- Its final "no structural red flags" line ignores pricing and everything above.
+- **Nothing outside the campaign window.** A бронь from an earlier campaign that
+  should have been cancelled is out of scope by design (§2.3).
+- **Cancel matching is by count, not by pairing.** `analyze` reports
+  `voice_cancel_command` minus results; which specific отмена fell through, you
+  find by reading `server.log` around the timestamp.
+- **Comment intent is not parsed.** A buyer writing «отменяю» in free text
+  without triggering the voice/command path leaves no event at all.
+- **Post-эфир edits are detected, not explained** — the diff shows a value
+  changed and that the order was touched later; whether that edit was correct is
+  the operator's call.
+- **Transcript is not read.** Every "the price was probably voiced" judgement in
+  §4 is still a human reading `sessions/*.md` around the lot.
 
 ---
 
