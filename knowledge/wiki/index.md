@@ -81,7 +81,8 @@ change.
   from эфир session logs after a mid-broadcast MoySklad auth failure.
 - [[log-verification-checklist]] — Step-by-step checklist to verify an эфир from
   its log bundle (MoySklad call health, order structure, pricing, waitlist,
-  wishlist) with the read-only `analyze-broadcast-logs` helper.
+  wishlist) with the read-only `analyze-broadcast-logs` helper, plus the
+  MoySklad ground-truth pass the logs alone cannot give you.
 - [[reservation-digests]] — VK DM summaries for open live-commerce reservations.
 
 ## Source snapshots

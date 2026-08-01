@@ -3,6 +3,48 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-08-02] wiki | Чек-лист проверки логов: что он на самом деле доказывает
+
+Пересобрал [[log-verification-checklist]] по реальному бандлу
+(`v-amber-logs-2026-08-01`) и коду. Главное, что было неверно или отсутствовало:
+
+**Чек-лист выдавал самоотчёт приложения за проверку МойСклада.** Ни анализатор,
+ни один пункт §1–§7 не делает ни одного запроса в МойСклад — проверяется только
+то, что приложение *считает*, что оно записало. Отсюда четыре слепые зоны:
+невыполненный вызов не логируется вообще; неверная, но ненулевая цена выглядит
+здоровой; правки после эфира невидимы; а `stale_discarded` — позиция, которая
+**реально создана** в МойСкладе, но выпадает из всех счётчиков. Добавлен §8 —
+сверка с ground truth; отдельного скрипта под неё пока нет.
+
+**`reservation_finalized` — append-only, а считали его сырым.** Отмена
+перезаписывает бронь вторым событием (`previousStatus`), поэтому наивный счёт
+держит отменённые как живые и расходится с `INDEX.md`. Считать надо последний
+статус по ключу `lotSessionId+commentId+viewerId+positionId`, как
+`reservationKey()` в `bundle-index.js`.
+
+**Три статуса из девяти вообще не упоминались**: `safe_mode_logged` (в МойСклад
+не ушло ничего), `order_failed` (покупатель уехал в wishlist без заказа) и
+`stale_discarded`. Плюс safe mode теперь проверяется в §0 первым делом — до
+любых сверок.
+
+**Правило `vk_comment == reservation_detected` было просто неверным** — обычный
+чат в комментариях его ломает на любом эфире.
+
+**Половина проверок §2.3 (отмены) читается из `server.log`, а не из jsonl** —
+`voice_cancel_command`, `reservation_cancelled`, `reservation_no_open_lot`,
+флуд-гард, `invalid_discount` живут только там, и анализатор их не видит.
+Отдельно: один эфир = несколько session-файлов (реконнекты), брать надо все.
+
+Новые проверки: арифметика `effectivePrice == salePrice − discountAmount`
+(единственное, что ловит неверную ненулевую цену), `lot_price_changed` после
+финализации, `attempts>1` у `moysklad_call` как ранний признак деградации,
+`stockUnknown` на бронь, `orphan_waitlist`, `manual_code_submitted` без лота,
+`suppressed` из флуд-гарда.
+
+§9 — список известных дефектов `analyze-broadcast-logs.mjs` (в т.ч. читает
+несуществующие поля `status`/`error` вместо `httpStatus`/`errorMessage`), чтобы
+зелёный вывод не принимали за пройденную проверку. Сам скрипт не трогал.
+
 ## [2026-07-21] feat | Soft blocking of comment spammers
 
 The operator can now block a viewer, after which V-Amber ignores everything
