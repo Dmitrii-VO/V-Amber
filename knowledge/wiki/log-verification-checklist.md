@@ -134,10 +134,19 @@ events therefore double-counts cancelled броней as live.
 
 ### 2.2 Cross-event reconciliation
 
-- [ ] **`reservation_detected` ≤ `vk_comment`, and the gap is normal.** Most
-  comments are chatter; the old "these two must be equal" rule was wrong. What
-  matters is the *shape*: a gap that suddenly widens usually means a giveaway
-  burst or a closed lot, and pairs with `reservation_no_open_lot` in `server.log`.
+- [ ] **Do not compare `vk_comment` with `reservation_detected` at all.**
+  `logVkComment` is called *after* the comment has already parsed as a бронь
+  (`ws-server.js`, inside the accept path), so the two counts are equal by
+  construction — 53 = 53 on 2026-08-01 — and prove nothing. The old rule "these
+  must match" was measuring the same event twice.
+- [ ] **The real gap is invisible.** A comment carrying a code but no
+  reservation keyword (`03786 справа`, `можно 03759`) returns
+  `hasReservationKeyword:false` from `parseReservationComment`, and
+  `ingestViewerComment` then drops it **with no log line anywhere** — it only
+  flashes past in the operator's live comment feed. Silent losses of this class
+  cannot be counted from a bundle at all; the only trace is the operator saying
+  "оно не бронирует". `reservation_no_open_lot` covers just the case where the
+  keyword *did* match but no lot was open. See [[vk-comments]].
 - [ ] **live (deduped `reserved` + `reserved_appended`) == `customer_order_created`.**
 - [ ] **`cancelled` == `customer_order_cancelled` == DELETE calls** — every
   cancellation actually removed something in MoySklad. Also check

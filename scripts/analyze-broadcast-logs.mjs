@@ -114,7 +114,10 @@ for (const [s, n] of Object.entries(statuses).sort((a, b) => b[1] - a[1])) {
 }
 p(`\n    live positions (reserved + reserved_appended): ${live.length} в ${new Set(live.map((e) => e.orderId)).size} заказах`);
 p(`    customer_order_created events: ${by(events, "customer_order_created").length}   customer_order_cancelled: ${by(events, "customer_order_cancelled").length}`);
-p(`    vk_comment=${by(events, "vk_comment").length}  reservation_detected=${by(events, "reservation_detected").length}  (детекций всегда меньше — остальное обычный чат)`);
+// vk_comment пишется уже ВНУТРИ пути приёма брони, поэтому равен
+// reservation_detected по построению и ничего не доказывает. Комментарии,
+// отброшенные из-за отсутствия ключевого слова, не логируются нигде.
+p(`    vk_comment=${by(events, "vk_comment").length}  reservation_detected=${by(events, "reservation_detected").length}  (одно и то же событие; отброшенные комментарии в логи не попадают вовсе)`);
 const legacy = by(events, "reservation_accepted").length;
 if (legacy) p(`    reservation_accepted (legacy, НЕ считать за бронь): ${legacy}`);
 
