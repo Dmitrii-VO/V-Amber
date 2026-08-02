@@ -125,8 +125,11 @@ in the app — that is what the checks below are for.
   read the transcript around that lot** — the operator usually *did* voice a price.
 - [ ] Known causes of a dropped voiced price (all seen 2026-06-28):
   - price/discount spoken **before** `lot_opened` → not attached to the lot;
-  - price/discount spoken **after** the бронь was already finalized → the later
-    `lot_price_changed` does **not** backfill an already-created order position;
+  - a **price** spoken after the бронь was already finalized → the later
+    `lot_price_changed` does **not** backfill an already-created order position.
+    A **discount** does since 2026-08-02: `applyDiscount` reprices every live
+    position of the lot and logs `position_pricing_backfilled` (`updated`/`failed`
+    counts). A `failed > 0` there is a position still on the old price;
   - a discount % voiced with **no base price** → `discount_skipped:
     trigger_matched_but_no_amount_extracted` → stays 0.
 - [ ] **Review `discount_skipped` reasons.** `trigger_matched_but_no_amount_extracted`

@@ -41,18 +41,33 @@ function normalizeStateName(name) {
   return String(name || "").trim().toLowerCase().replace(/ё/g, "е");
 }
 
+// Скидка в МойСкладе хранится ПРОЦЕНТОМ поверх базовой цены позиции, а не
+// уменьшенной ценой. Одна формула на создание позиции и на её пересчёт
+// (updateCustomerOrderPositionPricing) — иначе две ветки разъезжаются и
+// покупатель платит не то, что объявили.
+function buildPositionPricing(salePrice, discountAmount) {
+  const price = Number(salePrice);
+  const discount = Number(discountAmount);
+  const pricing = { price: toMinorUnits(price) };
+  pricing.discount = Number.isFinite(price) && price > 0 && Number.isFinite(discount) && discount > 0
+    ? Math.min(100, (discount / price) * 100)
+    : 0;
+  return pricing;
+}
+
 function buildCustomerOrderPosition({ config, activeLot, productCard, reservation }) {
   const quantity = Math.max(1, Number(reservation?.quantity) || 1);
   const salePrice = Number(getEffectiveSalePrice(activeLot, productCard) || 0);
   const discountAmount = Number(activeLot?.discountAmount || 0);
+  const { price, discount } = buildPositionPricing(salePrice, discountAmount);
   const position = {
     quantity,
-    price: toMinorUnits(salePrice),
+    price,
     reserve: quantity,
     assortment: buildEntityMeta(config.baseUrl, "product", activeLot.product.id),
   };
-  if (Number.isFinite(salePrice) && salePrice > 0 && Number.isFinite(discountAmount) && discountAmount > 0) {
-    position.discount = Math.min(100, (discountAmount / salePrice) * 100);
+  if (discount > 0) {
+    position.discount = discount;
   }
   return position;
 }
@@ -1391,6 +1406,51 @@ export function createMoySkladClient(config, options = {}) {
         alreadyGone: Boolean(result?.alreadyGone),
       });
       return { ok: true, alreadyGone: Boolean(result?.alreadyGone) };
+    },
+
+    // Пересчёт цены/скидки уже существующей позиции заказа.
+    //
+    // Нужен, когда скидка на лот объявлена ПОСЛЕ того, как бронь уже ушла в
+    // МойСклад: applyDiscount меняет только лот и карточку VK, а созданная
+    // позиция остаётся по полной цене (эфир 2026-08-01, лот 03737 — скидка
+    // через 4 секунды после трёх броней; оператор потом правил заказы руками).
+    //
+    // Метод обёрнут wrapWithSafeMode в index.js. Позиции, удалённой покупателем
+    // или оператором, уже нет — 404 отдаём как alreadyGone, а не как ошибку,
+    // чтобы отмена брони не ломала пересчёт остальных позиций лота.
+    async updateCustomerOrderPositionPricing({ orderId, positionId, salePrice, discountAmount, source } = {}) {
+      if (!isEnabled || !orderId || !positionId) {
+        return null;
+      }
+      const price = Number(salePrice);
+      if (!Number.isFinite(price) || price <= 0) {
+        logger.warn("moysklad", "position_pricing_skipped_no_price", { orderId, positionId, salePrice });
+        return { ok: false, reason: "no_price" };
+      }
+
+      const pricing = buildPositionPricing(price, discountAmount);
+      try {
+        await patchJson(
+          `entity/customerorder/${orderId}/positions/${positionId}`,
+          pricing,
+          { source },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/HTTP 404/.test(message)) {
+          logger.info("moysklad", "position_pricing_already_gone", { orderId, positionId });
+          return { ok: true, alreadyGone: true };
+        }
+        throw error;
+      }
+
+      logger.info("moysklad", "customer_order_position_repriced", {
+        orderId,
+        positionId,
+        salePrice: price,
+        discountPercent: pricing.discount,
+      });
+      return { ok: true, alreadyGone: false, discountPercent: pricing.discount };
     },
 
     // Bulk-выгрузка обогащённой информации по товарам: id, имя, поставщик
