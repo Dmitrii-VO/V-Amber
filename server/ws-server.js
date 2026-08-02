@@ -1618,6 +1618,11 @@ export function attachWsServer(httpServer, config, services = {}) {
       const viewerName = comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "";
       const notifyOperator = (type, message) => sendJson(websocket, { type, message });
 
+      // Дедуп раньше любой реакции: повторная доставка комментария не должна
+      // ни удалять позицию второй раз, ни дёргать оператора тем же вопросом.
+      if (processedCancelCommentIds.has(comment.id)) return;
+      addBoundedId(processedCancelCommentIds, comment.id);
+
       if (!parsed.code) {
         // «отмена» без кода: у покупателя может быть несколько броней, гадать
         // нельзя. Отдаём оператору — он видит ленту комментариев.
@@ -1631,9 +1636,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         notifyOperator("warning", `${viewerName || "Покупатель"} просит отмену, но не назвал артикул — уточните`);
         return;
       }
-      if (processedCancelCommentIds.has(comment.id)) return;
-      addBoundedId(processedCancelCommentIds, comment.id);
-
       const knownCodes = productCodeCache?.getCodes?.() || null;
       const resolution = knownCodes && knownCodes.size > 0
         ? resolveKnownCode(parsed.code, knownCodes)
