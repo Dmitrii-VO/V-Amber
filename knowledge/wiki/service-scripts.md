@@ -75,16 +75,54 @@ creating a new order. Companion to `recover-orders-from-logs`.
 ## analyze-broadcast-logs
 
 ```bash
-node scripts/analyze-broadcast-logs.mjs path/to/sessions/2026-06-28_*.jsonl
+node scripts/analyze-broadcast-logs.mjs path/to/bundle --date 2026-08-01
+node scripts/analyze-broadcast-logs.mjs path/to/sessions/2026-08-01_*.jsonl   # тоже работает
 ```
 
-Read-only health analyzer for one эфир's session jsonl files. Prints MoySklad
-call health (ok/err per verb), reservation status breakdown, reconciliation
-(comments/detected/positions/orders), order-structure integrity (one buyer per
-order, no duplicate product lines, `product_not_found`), pricing red flags
-(positions written at price 0, `discount_skipped` reasons), and
-waitlist/wishlist coverage. Drives [[log-verification-checklist]]. Writes
-nothing.
+Read-only health analyzer for one эфир. **Prefer the bundle + `--date` form**:
+it picks up every session file of that day (one эфир spans several — each
+reconnect starts a new one), reads `server.log*` for the checks that exist only
+there, and reads `wishlist/events.jsonl` for overflow buyers.
+
+Prints, with named red flags at the end: bundle orientation (sessions, safe-mode
+toggles, truncation), MoySklad call health (ok/err per verb, httpStatus
+breakdown, retries, slowest calls), reservation statuses **deduplicated the way
+`bundle-index.js` does it** (`reservation_finalized` is append-only), the
+`safe_mode_logged` / `order_failed` / `stale_discarded` trio, cancellations and
+`reservation_no_open_lot` from `server.log`, order structure, pricing
+(`effectivePrice` arithmetic, late `lot_price_changed`, discount outcomes),
+waitlist, wishlist and stock-unknown lots. Since 0.1.78 it also reports buyer
+cancellations (`reservation_cancelled_by_comment` by path, and the
+`cancel_comment_not_executed` reasons the app declined) and the discount
+backfill — a late discount is flagged only when no successful
+`position_pricing_backfilled` followed it, while a late **price** is always
+flagged because prices are still not backfilled. `--json` for a machine-readable
+dump; exit code 1 when any red flag fires. Writes nothing.
+
+Parsing lives in `scripts/lib/broadcast-log.mjs`, shared with
+`verify-broadcast-against-moysklad` so the two cannot disagree about what a live
+бронь is. Drives [[log-verification-checklist]].
+
+## verify-broadcast-against-moysklad
+
+```bash
+node scripts/verify-broadcast-against-moysklad.mjs path/to/bundle --date 2026-08-01
+```
+
+GET-only diff between the log bundle and MoySklad — §8 of
+[[log-verification-checklist]], the part `analyze-broadcast-logs` structurally
+cannot do. For every live бронь it checks the order and position exist, the
+quantity is not short and the net price matches; positions store a **base price
+plus a discount percent**, so it compares `price × (1 − discount/100)`, not
+`price`. Cancelled броней must be gone; `stale_discarded` ones must be present.
+It also lists orders carrying the `#Эфир <date>` marker that the logs never
+mention, and buyers with more than one order in the campaign window (`--gap`,
+default 3 days).
+
+Direction matters: **dearer** than the log is an error (the buyer is charged
+more than announced), **cheaper** on an order whose `updated` postdates the эфир
+is a post-broadcast operator edit and is reported as a warning. `--limit N` for a
+smoke test. Needs `MOYSKLAD_LOGIN`/`MOYSKLAD_PASSWORD`; issues no writes.
 
 ## fix-zero-price-positions
 

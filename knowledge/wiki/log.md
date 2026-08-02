@@ -3,6 +3,76 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-08-02] wiki | Чек-лист проверки логов: что он на самом деле доказывает
+
+Пересобрал [[log-verification-checklist]] по реальному бандлу
+(`v-amber-logs-2026-08-01`) и коду. Главное, что было неверно или отсутствовало:
+
+**Чек-лист выдавал самоотчёт приложения за проверку МойСклада.** Ни анализатор,
+ни один пункт §1–§7 не делает ни одного запроса в МойСклад — проверяется только
+то, что приложение *считает*, что оно записало. Отсюда четыре слепые зоны:
+невыполненный вызов не логируется вообще; неверная, но ненулевая цена выглядит
+здоровой; правки после эфира невидимы; а `stale_discarded` — позиция, которая
+**реально создана** в МойСкладе, но выпадает из всех счётчиков. Добавлен §8 —
+сверка с ground truth; отдельного скрипта под неё пока нет.
+
+**`reservation_finalized` — append-only, а считали его сырым.** Отмена
+перезаписывает бронь вторым событием (`previousStatus`), поэтому наивный счёт
+держит отменённые как живые и расходится с `INDEX.md`. Считать надо последний
+статус по ключу `lotSessionId+commentId+viewerId+positionId`, как
+`reservationKey()` в `bundle-index.js`.
+
+**Три статуса из девяти вообще не упоминались**: `safe_mode_logged` (в МойСклад
+не ушло ничего), `order_failed` (покупатель уехал в wishlist без заказа) и
+`stale_discarded`. Плюс safe mode теперь проверяется в §0 первым делом — до
+любых сверок.
+
+**Правило `vk_comment == reservation_detected` было просто неверным** — обычный
+чат в комментариях его ломает на любом эфире.
+
+**Половина проверок §2.3 (отмены) читается из `server.log`, а не из jsonl** —
+`voice_cancel_command`, `reservation_cancelled`, `reservation_no_open_lot`,
+флуд-гард, `invalid_discount` живут только там, и анализатор их не видит.
+Отдельно: один эфир = несколько session-файлов (реконнекты), брать надо все.
+
+Новые проверки: арифметика `effectivePrice == salePrice − discountAmount`
+(единственное, что ловит неверную ненулевую цену), `lot_price_changed` после
+финализации, `attempts>1` у `moysklad_call` как ранний признак деградации,
+`stockUnknown` на бронь, `orphan_waitlist`, `manual_code_submitted` без лота,
+`suppressed` из флуд-гарда.
+
+Прежний §9 перечислял дефекты `analyze-broadcast-logs.mjs`; они закрыты в коде
+той же датой — см. запись ниже, а в §9 теперь остались только принципиальные
+пределы инструментов.
+
+## [2026-08-02] tooling | Анализатор переписан, сверка с МойСкладом появилась
+
+`analyze-broadcast-logs.mjs` переписан. Теперь принимает **папку бандла +
+`--date`** и сам собирает все session-файлы дня, `server.log*` и
+`wishlist/events.jsonl`; дедуплицирует `reservation_finalized` ключом из
+`bundle-index.js`; читает настоящие поля `moysklad_call`; выносит
+`safe_mode_logged`/`order_failed`/`stale_discarded` отдельными флагами; считает
+арифметику `effectivePrice`; ловит `discount_applied` и `lot_price_changed`
+позже первой брони лота. Общий парсер вынесен в `scripts/lib/broadcast-log.mjs`.
+
+Новый `verify-broadcast-against-moysklad.mjs` — только GET, §8 чек-листа.
+
+**Два открытия при первом же прогоне на живых данных.** Первое: позиция в
+МойСкладе хранит **базовую цену и процент скидки раздельно**
+(`buildCustomerOrderPosition`), поэтому сравнивать `price` с `effectivePrice`
+бессмысленно — надо `price × (1 − discount/100)`. Первая версия скрипта из-за
+этого объявила дефектом каждую позицию со скидкой.
+
+Второе: `effectivePrice` в логе — **снимок на момент финализации**. Оператор
+после эфира проставил 5% на все заказы (`updated` заказов на 20–170 минут
+позже последнего события лога), и лог об этом не знает ничего. Отсюда правило
+в скрипте: дороже лога = ошибка (покупатель платит больше объявленного),
+дешевле на заказе, правленном после эфира = предупреждение.
+
+Ещё одна поправка по фактам: `added` в session jsonl — **не** источник
+wish list (на 2026-08-01 там 1 запись из 4). Считать надо
+`wishlist/events.jsonl`.
+
 ## [2026-07-21] feat | Soft blocking of comment spammers
 
 The operator can now block a viewer, after which V-Amber ignores everything
