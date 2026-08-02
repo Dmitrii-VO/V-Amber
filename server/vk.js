@@ -718,6 +718,34 @@ export function createVkPublisher(config) {
       );
     },
 
+    // Инструкция зрителям под видео эфира. Не привязана к лоту: это общий
+    // текст «как бронировать», который идёт по таймеру, поэтому и проверка
+    // здесь только на настроенность VK.
+    async publishViewerInstruction(message) {
+      if (!isEnabled || !message) {
+        logger.info("vk", "publish_skipped_not_configured", {
+          kind: "viewer_instruction",
+          hasUserToken: Boolean(userToken),
+          ownerId: liveOwnerId || null,
+          videoId: liveVideoId || null,
+        });
+        return { ok: false, skipped: true };
+      }
+
+      return sendWithRetry(
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+          message,
+        }), videoToken),
+        {
+          kind: "viewer_instruction",
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+        },
+      );
+    },
+
     async publishPriceUpdate(activeLot) {
       if (!isEnabled || !activeLot?.lotSessionId) {
         logger.info("vk", "publish_skipped_not_configured", {

@@ -370,6 +370,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     stateSnapshotInterval.unref();
 
     function resetDetectionState() {
+      stopViewerInstructions();
       commentPollingGeneration += 1;
       commentPollingActive = false;
       commentPollingLastCommentId = 0;
@@ -1602,6 +1603,79 @@ export function attachWsServer(httpServer, config, services = {}) {
     // комментарий порождает WARN и карточку reservationAttention, погребая
     // под собой настоящие проблемы (см. comment-flood-guard.js).
     const noOpenLotFloodGuard = createCommentFloodGuard();
+
+    // Периодическая инструкция зрителям. Зрители подключаются к эфиру в разное
+    // время, и формат брони («номер артикула отдельным комментарием») половина
+    // зала не видела. Идёт в VK-комментарии и в чат /efir/ одновременно —
+    // это две разные аудитории.
+    let instructionTimer = null;
+    let instructionVariantIndex = 0;
+
+    function stopViewerInstructions() {
+      if (instructionTimer) {
+        clearTimeout(instructionTimer);
+        instructionTimer = null;
+      }
+    }
+
+    async function publishViewerInstruction() {
+      const variants = config.viewerInstructions?.variants || [];
+      if (variants.length === 0) return;
+      // Варианты чередуются: VK режет подряд идущие одинаковые комментарии
+      // под одним видео, и одинаковый текст каждые полчаса читается как спам.
+      const message = variants[instructionVariantIndex % variants.length];
+      instructionVariantIndex += 1;
+
+      const results = await Promise.allSettled([
+        vk.publishViewerInstruction(message),
+        chatClient?.postServiceMessage?.(message),
+      ]);
+      const vkResult = results[0].status === "fulfilled" ? results[0].value : null;
+      const chatResult = results[1].status === "fulfilled" ? results[1].value : null;
+      logger.info("vk", "viewer_instruction_published", {
+        connectionId,
+        variantIndex: (instructionVariantIndex - 1) % variants.length,
+        vk: vkResult?.ok === true,
+        vkSkipped: Boolean(vkResult?.skipped),
+        chat: chatResult?.ok === true,
+      });
+    }
+
+    // Планировщик на setTimeout, а не setInterval: публикация может занять
+    // секунды (ретраи VK), и следующая пауза должна отсчитываться от конца
+    // предыдущей — иначе при затыке VK инструкции пойдут очередью подряд.
+    function scheduleViewerInstruction(delayMs) {
+      stopViewerInstructions();
+      instructionTimer = setTimeout(() => {
+        instructionTimer = null;
+        // Эфир мог кончиться, пока таймер тикал.
+        if (!activeRunId) return;
+        void publishViewerInstruction()
+          .catch((error) => {
+            logger.error("vk", "viewer_instruction_failed", { connectionId, error });
+          })
+          .finally(() => {
+            if (activeRunId) {
+              scheduleViewerInstruction(viewerInstructionIntervalMs());
+            }
+          });
+      }, delayMs);
+      instructionTimer.unref?.();
+    }
+
+    // Нижняя граница — в миллисекундах, а не в минутах: из окружения интервал
+    // приходит целым числом минут (parseIntEnv), а тесты гоняют доли минуты.
+    function viewerInstructionIntervalMs() {
+      const minutes = Number(config.viewerInstructions?.intervalMinutes);
+      return Math.max(1000, (Number.isFinite(minutes) && minutes > 0 ? minutes : 30) * 60_000);
+    }
+
+    function startViewerInstructions() {
+      if (config.viewerInstructions?.enabled === false) return;
+      if (instructionTimer) return;
+      const firstDelayMin = Number(config.viewerInstructions?.firstDelayMinutes);
+      scheduleViewerInstruction(Math.max(0, Number.isFinite(firstDelayMin) ? firstDelayMin : 2) * 60_000);
+    }
 
     // Комментарии-отмены обрабатываются один раз: поллер VK может отдать один и
     // тот же комментарий повторно, а второй проход искал бы позицию, которой уже
@@ -3523,6 +3597,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           session = openSpeechKitSession(runId, makeHandlers);
 
           resetDetectionState();
+          // Строго ПОСЛЕ resetDetectionState: тот гасит таймер инструкций
+          // вместе с остальным состоянием эфира, и запуск до него был бы
+          // немедленно отменён.
+          startViewerInstructions();
           emitState();
           return;
         }

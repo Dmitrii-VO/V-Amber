@@ -44,6 +44,7 @@ export function createVkMock(overrides = {}) {
     publishPriceUpdate: wrap("publishPriceUpdate", overrides.publishPriceUpdate || (async () => {})),
     publishDiscountUpdate: wrap("publishDiscountUpdate", overrides.publishDiscountUpdate || (async () => {})),
     publishReservationReply: wrap("publishReservationReply", overrides.publishReservationReply || (async () => {})),
+    publishViewerInstruction: wrap("publishViewerInstruction", overrides.publishViewerInstruction || (async () => ({ ok: true }))),
     getComments: wrap("getComments", overrides.getComments
       || (async () => ({ items: [...commentItems], profiles: [...profiles] }))),
     setLiveVideoUrl: wrap("setLiveVideoUrl", overrides.setLiveVideoUrl || (() => {})),
@@ -135,6 +136,7 @@ export function createChatClientMock() {
       serviceMessages.push(text);
       return { ok: true };
     },
+    serviceMessages,
     pushMessage({ viewerId, name, phone = "", text }) {
       latestSeq += 1;
       queue.push({
@@ -190,6 +192,9 @@ function buildConfig(overrides = {}) {
       ...(overrides.articleExtraction || {}),
     },
     discount: { triggers: ["скидка", "скидку", "скидки"], ...(overrides.discount || {}) },
+    // По умолчанию в тестах инструкция выключена: иначе её таймер стрелял бы
+    // посреди чужих сценариев. Тесты инструкции включают её явно.
+    viewerInstructions: { enabled: false, ...(overrides.viewerInstructions || {}) },
     speechkit: { ...(overrides.speechkit || {}) },
     moysklad: {},
     vk: {},
