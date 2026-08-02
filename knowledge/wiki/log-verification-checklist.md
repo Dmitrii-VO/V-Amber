@@ -73,10 +73,13 @@ and are done by the operator by hand:
 Nothing in section 2 catches either one: the counts of the current эфир
 reconcile perfectly while a stale reserve keeps sitting on the stock.
 
-**Reservations on a closed lot are fixed; cancellations are not.** The operator
-can now book such a comment from the attention banner («✓ забронировать», see
-[[reservation-flow]]). Cancelling a бронь whose lot is closed still has no path
-in the app — that is what the checks below are for.
+**Both are fixed now.** The operator can book such a comment from the attention
+banner («✓ забронировать»), and since 2026-08-02 a buyer comment («отмена 03770»)
+cancels their own бронь even when the lot is closed or belongs to an earlier day
+of the campaign — see [[reservation-flow]]. The checks below still matter for
+эфиры recorded **before** that, and for the cases the app declines: a проведённый
+order, an unknown артикул, «отмена» with no code, or an эфир where no lot was
+open at all (the comment poller is not running then).
 
 - [ ] **List cancel attempts that matched no open lot.** `voice_cancel_command`
   followed by neither `reservation_cancelled` nor `reservation_cancel_no_position`
@@ -101,9 +104,10 @@ in the app — that is what the checks below are for.
   `attention_reservation_created` means the operator did not act on the row (or
   the code is not in the catalog, which gets no button). Check those against
   MoySklad.
-- [ ] Product gap, still open: **cancelling** a бронь on a closed lot — in this
-  эфир or an earlier day of the campaign — is not implemented (confirmed with the
-  operator 2026-07-26), so every such отмена is manual work in MoySklad.
+- [ ] **Buyer-initiated cancellations** now log `reservation_cancelled_by_comment`
+  (`path: open_lot | closed_lot`). A `cancel_comment_not_executed` with its
+  `reason` is the list of отмен the app declined — each one is manual work in
+  MoySklad, and `no_order` usually means the order was already проведён.
 
 ## 3. Order structure integrity
 

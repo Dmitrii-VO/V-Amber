@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseReservationComment, parseWishlistComment } from "../server/reservation-parser.js";
+import { parseReservationComment, parseWishlistComment, parseCancelComment } from "../server/reservation-parser.js";
 
 test("canonical 'бронь <код>' still matches", () => {
   assert.deepEqual(parseReservationComment("бронь 03204"), { hasReservationKeyword: true, code: "03204", quantity: 1 });
@@ -226,4 +226,44 @@ test("parseWishlistComment is unchanged", () => {
   assert.deepEqual(parseWishlistComment("СПИСОК 03220"), { hasWishlistKeyword: true, code: "03220" });
   assert.deepEqual(parseWishlistComment("список"), { hasWishlistKeyword: true, code: null });
   assert.deepEqual(parseWishlistComment("привет"), { hasWishlistKeyword: false, code: null });
+});
+
+test("parseCancelComment: реальные формулировки отмены", () => {
+  for (const text of [
+    "отмена 03770",
+    "отменяю 03770",
+    "отмени 03770",
+    "отказываюсь от 03770",
+    "снимите 03770",
+    "уберите 03770 пожалуйста",
+    "передумала 03770",
+  ]) {
+    assert.deepEqual(parseCancelComment(text), { hasCancelKeyword: true, code: "03770" }, text);
+  }
+});
+
+test("parseCancelComment: намерение без кода — код null, но намерение видно", () => {
+  assert.deepEqual(parseCancelComment("отмена"), { hasCancelKeyword: true, code: null });
+  assert.deepEqual(parseCancelComment("отказываюсь"), { hasCancelKeyword: true, code: null });
+});
+
+test("parseCancelComment: бронь отменой не считается", () => {
+  for (const text of ["03770", "бронь 03770", "беру 03770", "+03770", "список 03770"]) {
+    assert.deepEqual(parseCancelComment(text), { hasCancelKeyword: false, code: null }, text);
+  }
+});
+
+test("parseCancelComment: расплывчатые формы не отменяют — цена ошибки выше", () => {
+  // «не буду»/«не надо»/«нет» в живом чате встречаются постоянно и почти
+  // никогда не означают отмену конкретной брони.
+  for (const text of ["не буду 03770", "не надо 03770", "нет 03770", "а 03770 ещё есть?"]) {
+    assert.equal(parseCancelComment(text).hasCancelKeyword, false, text);
+  }
+});
+
+test("parseCancelComment: код активного лота выигрывает у телефона", () => {
+  assert.deepEqual(
+    parseCancelComment("отмена 12, мой 89991234567", { preferredCode: "12" }),
+    { hasCancelKeyword: true, code: "12" },
+  );
 });
