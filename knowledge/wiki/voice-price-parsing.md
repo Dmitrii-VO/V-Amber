@@ -119,6 +119,32 @@ system does not yet know the conditions). «без скидки» is also `null`
 fractions («пополам/наполовину») are out of scope — the operator does not use
 them.
 
+### A discount announced after the first бронь (2026-08-02)
+
+`applyDiscount` used to change only the lot and the VK card, so a бронь created
+seconds earlier stayed in MoySklad at full price. Эфир 2026-08-01, lot 03737:
+three броней at 15:50:23–24, discount at 15:50:28 — all three went out at full
+price and the operator repriced the orders by hand afterwards.
+
+`backfillLotPositionPricing` (`ws-server.js`) now reprices every **live**
+(`reserved` / `reserved_appended`) бронь of that lot through
+`moysklad.updateCustomerOrderPositionPricing`, addressing the saved
+`orderId`/`positionId` so no neighbouring position is touched. Rules worth
+keeping:
+
+- MoySklad stores a **base price plus a discount percent**, never a reduced
+  price. `buildPositionPricing` is the single formula for both creating and
+  repricing a position — split them and the buyer pays something nobody announced.
+- Cancelled броней are skipped, and a position deleted meanwhile (404) counts as
+  `alreadyGone`, not as a failure — an отмена must not break the repricing of
+  the rest of the lot.
+- Safe mode does nothing here (the wrapper *and* an explicit pre-check), and a
+  MoySklad failure never rolls back the discount on the lot: the discount is
+  already correct for every **subsequent** бронь. The operator gets a warning
+  naming the lot, and `position_pricing_backfilled` logs `updated`/`failed`.
+- A voiced **price** change after the бронь is still not backfilled — only
+  discounts are. Tests: `test/ws-server.discount-backfill.test.js`.
+
 ## Runtime files
 
 - `server/price-detector.js`

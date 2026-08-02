@@ -188,6 +188,7 @@ async function main() {
       "createCustomerOrderReservation",
       "appendPositionToCustomerOrder",
       "removePositionFromOrder",
+      "updateCustomerOrderPositionPricing",
       "createPurchaseOrder",
     ],
     "moysklad",

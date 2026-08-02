@@ -2263,6 +2263,97 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
+    // Пересчитывает цену/скидку у позиций лота, которые УЖЕ созданы в МойСкладе.
+    // Вызывается после изменения скидки лота: без этого покупатель, забронировавший
+    // за секунду до объявления скидки, платит полную цену, а оператор правит заказ
+    // руками. Позиции лота адресуются сохранёнными orderId/positionId — соседние
+    // позиции того же товара в других заказах не трогаются.
+    //
+    // Никогда не роняет вызывающий поток: скидка на лоте уже применена, и сбой
+    // МойСклада не должен отменять её для последующих броней.
+    async function backfillLotPositionPricing(lot, { reason } = {}) {
+      const state = ensureReservationState(lot);
+      const events = Array.isArray(state.events) ? state.events : [];
+      const targets = events.filter((event) => (
+        (event.status === "reserved" || event.status === "reserved_appended")
+        && event.customerOrder?.id
+        && event.customerOrder?.positionId
+      ));
+      if (targets.length === 0) {
+        return { updated: 0, failed: 0, skipped: 0 };
+      }
+
+      if (isSafeMode()) {
+        logger.warn("safe-mode", "position_pricing_backfill_blocked", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          positions: targets.length,
+        });
+        return { updated: 0, failed: 0, skipped: targets.length };
+      }
+
+      const salePrice = Number(getLotEffectivePrice(lot) || 0);
+      const discountAmount = Number(lot.discountAmount || 0);
+      let updated = 0;
+      let failed = 0;
+      for (const event of targets) {
+        try {
+          const result = await moysklad.updateCustomerOrderPositionPricing({
+            orderId: event.customerOrder.id,
+            positionId: event.customerOrder.positionId,
+            salePrice,
+            discountAmount,
+            source: "discount_backfill",
+          });
+          if (result?.skipped === true && result?.safeMode === true) {
+            return { updated, failed, skipped: targets.length - updated - failed };
+          }
+          if (result?.ok) updated += 1;
+        } catch (error) {
+          failed += 1;
+          logger.error("moysklad", "position_pricing_backfill_failed", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            orderId: event.customerOrder.id,
+            positionId: event.customerOrder.positionId,
+            viewerId: event.viewerId,
+            error,
+          });
+        }
+      }
+
+      if (updated > 0 || failed > 0) {
+        logger.info("moysklad", "position_pricing_backfilled", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          reason: reason || null,
+          salePrice,
+          discountAmount,
+          updated,
+          failed,
+        });
+        sessionLog.logPositionPricingBackfilled({
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          reason: reason || null,
+          salePrice,
+          discountAmount,
+          updated,
+          failed,
+        });
+      }
+      if (failed > 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Скидка применена, но ${failed} уже созданн${failed === 1 ? "ая бронь" : "ых броней"} по лоту ${lot.code} не пересчитал${failed === 1 ? "ась" : "ись"} — проверьте цены в МойСкладе`,
+        });
+      }
+      return { updated, failed, skipped: 0 };
+    }
+
     async function applyDiscount(input, transcript = null) {
       // Раньше здесь требовался vkPublication.commentId — это блокировало
       // применение скидки в safe mode и при любых сбоях публикации в VK
@@ -2349,6 +2440,12 @@ export function attachWsServer(httpServer, config, services = {}) {
         descriptor,
         transcript,
       });
+
+      // Скидку, объявленную ПОСЛЕ первых броней, надо донести до уже созданных
+      // позиций: applyDiscount меняет лот, а позиция в МойСкладе остаётся по
+      // полной цене. Эфир 2026-08-01, лот 03737 — скидка через 4 секунды после
+      // трёх броней, все три ушли по полной цене, оператор правил заказы руками.
+      await backfillLotPositionPricing(activeLot, { reason: "discount_applied" });
 
       // Публикация апдейта в VK имеет смысл только если карточка лота уже
       // ушла туда и лот не «битый». Иначе пропускаем без шума — скидка во
