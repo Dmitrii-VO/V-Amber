@@ -207,6 +207,35 @@ export function parseReservationComment(text, options = {}) {
   };
 }
 
+// Отмена брони комментарием покупателя. Требует и намерение, и код: «отмена»
+// без кода отменить нечего (у покупателя может быть несколько броней), а код
+// без намерения — это обычная бронь.
+//
+// Слова подобраны по реальным комментариям: покупатели пишут «отмена 03770»,
+// «отменяю 03770», «отказываюсь от 03770», «снимите 03770», «уберите 03770»,
+// «передумала 03770». Намеренно НЕ включены «не буду», «не надо», «нет» —
+// слишком много ложных срабатываний в живом чате, а цена ошибки здесь выше,
+// чем у пропуска: снятая по ошибке бронь = потерянная продажа.
+const CANCEL_TOKEN_PATTERNS = [
+  new RegExp(`^отмен[${CYR}]*$`),      // отмена, отмену, отменяю, отменить, отмени, отмените
+  new RegExp(`^отказ[${CYR}]*$`),      // отказ, отказываюсь, отказалась
+  new RegExp(`^сним[${CYR}]*$`),       // снимите, сними, снимаю
+  new RegExp(`^снят[${CYR}]*$`),       // снять, снята
+  new RegExp(`^убер[${CYR}]*$`),       // уберите, убери, уберу
+  new RegExp(`^передума[${CYR}]*$`),   // передумал, передумала, передумаю
+];
+
+export function parseCancelComment(text, options = {}) {
+  const { preferredCode = null } = options;
+  const normalized = normalize(text);
+  if (!normalized) return { hasCancelKeyword: false, code: null };
+  const tokens = tokenize(normalized);
+  const hasCancelKeyword = tokens.some((token) =>
+    CANCEL_TOKEN_PATTERNS.some((pattern) => pattern.test(token)));
+  if (!hasCancelKeyword) return { hasCancelKeyword: false, code: null };
+  return { hasCancelKeyword: true, code: pickBestCode(normalized, preferredCode) };
+}
+
 export function parseWishlistComment(text) {
   const normalized = normalize(text);
   if (!normalized) return { hasWishlistKeyword: false, code: null };

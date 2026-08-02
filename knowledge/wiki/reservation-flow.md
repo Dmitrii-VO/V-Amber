@@ -129,9 +129,42 @@ The attention row now carries a **«✓ забронировать»** action:
   Logged as `attention_reservation_created` / `_out_of_stock` / `_failed`, plus a
   session-log line via `logOrderCreated`.
 
-Tests: `test/ws-server.attention-reservation.test.js`. Cancelling a бронь on a
-closed lot is still **not** implemented — see the open item in
-[log-verification-checklist](log-verification-checklist.md) §2.1.
+Tests: `test/ws-server.attention-reservation.test.js`.
+
+### Cancelling by buyer comment, including a closed lot (2026-08-02)
+
+The operator's «× отменить» button only reaches броней of an **open** lot, so
+every buyer who backed out later was unwound by hand in MoySklad — 13 positions
+across the эфиры of 24–26 July alone. A buyer comment now does it:
+
+- `parseCancelComment` (`reservation-parser.js`) requires **both** an intent word
+  and a code: `отмен*`, `отказ*`, `сним*`, `снят*`, `убер*`, `передума*`.
+  Deliberately excluded are `не буду` / `не надо` / `нет` — too common in a live
+  chat, and a wrongly cancelled бронь is a lost sale, worse than a missed отмена.
+  «отмена» with no code goes to the operator as a question, never a guess.
+- **Cancel is parsed before бронь.** «отменяю бронь 03770» carries both keywords
+  and must not read as a new reservation.
+- **Safety is the counterparty, not a permission check.** The order is resolved
+  from the comment author's `viewerId`, so a comment can only ever reach that
+  buyer's own position — a joke or a stranger's comment has nothing to delete.
+- Two paths. The lot is still open → the ordinary `cancelReservationEvent`, which
+  also rolls back `committedReservationCount` (the MoySklad path cannot: there is
+  no lot to roll back). The lot is closed or belongs to an earlier day of the
+  campaign → `getProductCardByCode` → `ensureCounterparty({createIfMissing:false})`
+  → `findBroadcastCustomerOrderForCounterparty` → `hasPositionInOrder` →
+  `removePositionFromOrder`. A **проведённый/paid order is filtered out inside the
+  lookup**, so it can never be touched; the operator gets a warning instead.
+- Every outcome reaches the operator: `info` on success (naming the order),
+  `warning` on anything else — no counterparty, no order, no position, safe mode,
+  MoySklad failure. Logged as `reservation_cancelled_by_comment` (with `path`) or
+  `cancel_comment_not_executed` (with `reason`).
+- Repeat delivery of the same comment is a no-op (`processedCancelCommentIds`),
+  otherwise the second pass would report a false "бронь не найдена".
+- **The comment poller only runs while some lot is open** (plus a 30 s grace), so
+  a cancellation arriving in a dead эфир is not seen at all — same limit as every
+  other comment path.
+
+Tests: `test/ws-server.cancel-by-comment.test.js`, `test/reservation-parser.test.js`.
 
 ## Active lot state
 
