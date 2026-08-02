@@ -10,7 +10,7 @@ import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
-import { parseReservationComment, parseWishlistComment } from "./reservation-parser.js";
+import { parseReservationComment, parseWishlistComment, parseCancelComment } from "./reservation-parser.js";
 import { parseCancelCommand } from "./cancel-command-parser.js";
 import { parseQuantityCommand } from "./quantity-command-parser.js";
 import { matchNameAgainst } from "./name-matcher.js";
@@ -370,6 +370,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     stateSnapshotInterval.unref();
 
     function resetDetectionState() {
+      stopViewerInstructions();
       commentPollingGeneration += 1;
       commentPollingActive = false;
       commentPollingLastCommentId = 0;
@@ -1603,6 +1604,247 @@ export function attachWsServer(httpServer, config, services = {}) {
     // под собой настоящие проблемы (см. comment-flood-guard.js).
     const noOpenLotFloodGuard = createCommentFloodGuard();
 
+    // Периодическая инструкция зрителям. Зрители подключаются к эфиру в разное
+    // время, и формат брони («номер артикула отдельным комментарием») половина
+    // зала не видела. Идёт в VK-комментарии и в чат /efir/ одновременно —
+    // это две разные аудитории.
+    let instructionTimer = null;
+    let instructionVariantIndex = 0;
+
+    function stopViewerInstructions() {
+      if (instructionTimer) {
+        clearTimeout(instructionTimer);
+        instructionTimer = null;
+      }
+    }
+
+    async function publishViewerInstruction() {
+      const variants = config.viewerInstructions?.variants || [];
+      if (variants.length === 0) return;
+      // Варианты чередуются: VK режет подряд идущие одинаковые комментарии
+      // под одним видео, и одинаковый текст каждые полчаса читается как спам.
+      const message = variants[instructionVariantIndex % variants.length];
+      instructionVariantIndex += 1;
+
+      const results = await Promise.allSettled([
+        vk.publishViewerInstruction(message),
+        chatClient?.postServiceMessage?.(message),
+      ]);
+      const vkResult = results[0].status === "fulfilled" ? results[0].value : null;
+      const chatResult = results[1].status === "fulfilled" ? results[1].value : null;
+      logger.info("vk", "viewer_instruction_published", {
+        connectionId,
+        variantIndex: (instructionVariantIndex - 1) % variants.length,
+        vk: vkResult?.ok === true,
+        vkSkipped: Boolean(vkResult?.skipped),
+        chat: chatResult?.ok === true,
+      });
+    }
+
+    // Планировщик на setTimeout, а не setInterval: публикация может занять
+    // секунды (ретраи VK), и следующая пауза должна отсчитываться от конца
+    // предыдущей — иначе при затыке VK инструкции пойдут очередью подряд.
+    function scheduleViewerInstruction(delayMs) {
+      stopViewerInstructions();
+      instructionTimer = setTimeout(() => {
+        instructionTimer = null;
+        // Эфир мог кончиться, пока таймер тикал.
+        if (!activeRunId) return;
+        void publishViewerInstruction()
+          .catch((error) => {
+            logger.error("vk", "viewer_instruction_failed", { connectionId, error });
+          })
+          .finally(() => {
+            if (activeRunId) {
+              scheduleViewerInstruction(viewerInstructionIntervalMs());
+            }
+          });
+      }, delayMs);
+      instructionTimer.unref?.();
+    }
+
+    // Нижняя граница — в миллисекундах, а не в минутах: из окружения интервал
+    // приходит целым числом минут (parseIntEnv), а тесты гоняют доли минуты.
+    function viewerInstructionIntervalMs() {
+      const minutes = Number(config.viewerInstructions?.intervalMinutes);
+      return Math.max(1000, (Number.isFinite(minutes) && minutes > 0 ? minutes : 30) * 60_000);
+    }
+
+    function startViewerInstructions() {
+      if (config.viewerInstructions?.enabled === false) return;
+      if (instructionTimer) return;
+      const firstDelayMin = Number(config.viewerInstructions?.firstDelayMinutes);
+      scheduleViewerInstruction(Math.max(0, Number.isFinite(firstDelayMin) ? firstDelayMin : 2) * 60_000);
+    }
+
+    // Комментарии-отмены обрабатываются один раз: поллер VK может отдать один и
+    // тот же комментарий повторно, а второй проход искал бы позицию, которой уже
+    // нет, и слал оператору ложное «бронь не найдена».
+    const processedCancelCommentIds = createBoundedIdSet();
+
+    // Отмена брони комментарием покупателя — включая закрытый лот и предыдущий
+    // день кампании, чего кнопка оператора не умеет (она живёт на открытом лоте).
+    //
+    // Безопасность держится на контрагенте: заказ находится по viewerId автора
+    // комментария, поэтому снять можно ТОЛЬКО собственную бронь — чужой или
+    // шуточный комментарий физически не дотянется до чужого заказа.
+    async function handleBuyerCancelComment(comment, parsed, logSource) {
+      const viewerName = comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "";
+      const notifyOperator = (type, message) => sendJson(websocket, { type, message });
+
+      // Дедуп раньше любой реакции: повторная доставка комментария не должна
+      // ни удалять позицию второй раз, ни дёргать оператора тем же вопросом.
+      if (processedCancelCommentIds.has(comment.id)) return;
+      addBoundedId(processedCancelCommentIds, comment.id);
+
+      if (!parsed.code) {
+        // «отмена» без кода: у покупателя может быть несколько броней, гадать
+        // нельзя. Отдаём оператору — он видит ленту комментариев.
+        logger.warn(logSource, "cancel_comment_without_code", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName,
+          text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
+        });
+        notifyOperator("warning", `${viewerName || "Покупатель"} просит отмену, но не назвал артикул — уточните`);
+        return;
+      }
+      const knownCodes = productCodeCache?.getCodes?.() || null;
+      const resolution = knownCodes && knownCodes.size > 0
+        ? resolveKnownCode(parsed.code, knownCodes)
+        : { status: "no_catalog", code: parsed.code };
+      const code = resolution.status === "matched" ? resolution.code : parsed.code;
+
+      // 1. Лот ещё открыт и бронь жива в памяти — идём обычным путём: он
+      // откатывает счётчик стока лота, чего путь через МойСклад сделать не может.
+      const { lot } = findOpenLotBySpokenCode(code);
+      if (lot) {
+        const events = Array.isArray(ensureReservationState(lot).events) ? ensureReservationState(lot).events : [];
+        const event = events.find((candidate) =>
+          String(candidate.viewerId) === String(comment.viewerId)
+          && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
+        if (event) {
+          const { status } = await cancelReservationEvent(lot, event, { reason: "buyer_comment" });
+          logger.info(logSource, "reservation_cancelled_by_comment", {
+            connectionId,
+            commentId: comment.id,
+            viewerId: comment.viewerId,
+            viewerName,
+            code,
+            path: "open_lot",
+            status,
+          });
+          notifyOperator(
+            status === "cancelled" ? "info" : "warning",
+            status === "cancelled"
+              ? `${viewerName || "Покупатель"} отменил бронь ${code} — позиция снята`
+              : `${viewerName || "Покупатель"} просит отмену ${code}, снять не удалось (${status}) — проверьте МойСклад`,
+          );
+          return;
+        }
+      }
+
+      // 2. Лот закрыт (в этом эфире или в предыдущий день кампании) — брони в
+      // памяти нет. Ищем позицию прямо в заказе покупателя.
+      if (isSafeMode()) {
+        logger.warn("safe-mode", "cancel_comment_blocked", {
+          connectionId, commentId: comment.id, viewerId: comment.viewerId, code,
+        });
+        notifyOperator("warning", `Отмена ${code} от ${viewerName || "покупателя"} не выполнена: safe-mode`);
+        return;
+      }
+
+      const fail = (reason, message) => {
+        logger.warn(logSource, "cancel_comment_not_executed", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName,
+          code,
+          reason,
+        });
+        notifyOperator("warning", message);
+      };
+
+      try {
+        const productCard = await moysklad.getProductCardByCode(code);
+        if (!productCard?.id) {
+          fail("product_not_found", `Отмена ${code} от ${viewerName || "покупателя"}: артикул не найден в каталоге — снимите вручную`);
+          return;
+        }
+        // createIfMissing:false — нет контрагента, значит и заказа нет; создавать
+        // покупателя ради отмены бессмысленно.
+        const counterparty = await moysklad.ensureCounterparty({
+          viewerId: comment.viewerId,
+          viewerName,
+          createIfMissing: false,
+        });
+        if (!counterparty?.id) {
+          fail("no_counterparty", `Отмена ${code} от ${viewerName || "покупателя"}: покупатель не найден в МойСкладе — снимите вручную`);
+          return;
+        }
+        // Тот же поиск, что и у брони: заказ кампании, закрытые/оплаченные
+        // состояния отсекаются внутри — оплаченный заказ трогать нельзя.
+        const order = await moysklad.findBroadcastCustomerOrderForCounterparty(counterparty.id, {
+          broadcastDate: new Date(comment.createdAt || Date.now()),
+          source: logSource,
+        });
+        if (!order?.id) {
+          fail("no_order", `Отмена ${code} от ${viewerName || "покупателя"}: открытого заказа эфира нет — возможно, он уже проведён`);
+          return;
+        }
+        const position = await moysklad.hasPositionInOrder(order.id, productCard.id, { source: logSource });
+        if (!position?.present || !position.positionId) {
+          fail("no_position", `Отмена ${code} от ${viewerName || "покупателя"}: позиции в заказе ${order.name || order.id} нет — уже снята?`);
+          return;
+        }
+
+        const result = await moysklad.removePositionFromOrder({
+          orderId: order.id,
+          positionId: position.positionId,
+          source: logSource,
+        });
+        if (result?.skipped === true && result?.safeMode === true) {
+          notifyOperator("warning", `Отмена ${code} не выполнена: safe-mode`);
+          return;
+        }
+
+        logger.info(logSource, "reservation_cancelled_by_comment", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName,
+          code,
+          path: "closed_lot",
+          orderId: order.id,
+          positionId: position.positionId,
+          alreadyGone: Boolean(result?.alreadyGone),
+          status: "cancelled",
+        });
+        sessionLog.logOrderCancelled({
+          viewerName,
+          viewerId: comment.viewerId,
+          lotCode: code,
+          orderId: order.id,
+        });
+        // Кэш заказов зрителя сбрасываем: следующая его бронь должна
+        // переразрешиться через МойСклад, а не дописаться в заказ, из которого
+        // мы только что удалили позицию.
+        deleteCustomerOrderCacheForViewer(comment.viewerId);
+        notifyOperator("info", `${viewerName || "Покупатель"} отменил бронь ${code} по закрытому лоту — позиция снята из ${order.name || "заказа"}`);
+      } catch (error) {
+        logger.error("moysklad", "cancel_comment_failed", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          code,
+          error,
+        });
+        notifyOperator("warning", `Отмена ${code} от ${viewerName || "покупателя"} не прошла — снимите позицию вручную`);
+      }
+    }
+
     function ingestViewerComment(comment) {
       const logSource = comment.source === "chat" ? "chat" : "vk";
 
@@ -1642,6 +1884,18 @@ export function attachWsServer(httpServer, config, services = {}) {
         createdAt: comment.createdAt || new Date().toISOString(),
         source: comment.source === "chat" ? "chat" : "vk",
       });
+
+      // Отмена разбирается ДО брони: «отменяю бронь 03770» содержит и «отмена»,
+      // и «бронь», и трактовать это как новую бронь нельзя.
+      const cancelComment = parseCancelComment(comment.text, { preferredCode: activeLot?.code || null });
+      if (cancelComment.hasCancelKeyword) {
+        handleBuyerCancelComment(comment, cancelComment, logSource).catch((error) => {
+          logger.error(logSource, "cancel_comment_handler_failed", {
+            connectionId, commentId: comment.id, viewerId: comment.viewerId, error,
+          });
+        });
+        return;
+      }
 
       const target = findCommentTarget(comment.text);
       if (!target || !target.lot) {
@@ -2263,6 +2517,203 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
+    // Отмена одной подтверждённой брони: адресный DELETE позиции в МойСкладе +
+    // откат счётчиков лота. Вынесено из обработчика `cancelReservation`, чтобы
+    // тем же путём шла отмена по комментарию покупателя — иначе две ветки
+    // по-разному откатывают сток и кэш заказов.
+    //
+    // Возвращает { status } вместо того, чтобы слать сообщения самой: у кнопки
+    // оператора и у комментария покупателя разные тексты.
+    async function cancelReservationEvent(lot, event, { reason = "operator_cancelled" } = {}) {
+      const orderId = event.customerOrder?.id;
+      const positionId = event.customerOrder?.positionId;
+      if (!orderId || !positionId) {
+        logger.warn("ws", "reservation_cancel_no_position", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          orderId: orderId || null,
+        });
+        return { status: "no_position" };
+      }
+
+      // Safe-mode: явная проверка ДО вызова (в обвязке wrapWithSafeMode
+      // дублируется ниже на случай флипа в полёте). Никаких реальных
+      // удалений и мутаций состояния в safe-mode.
+      if (isSafeMode()) {
+        logger.warn("safe-mode", "reservation_cancel_blocked", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+        });
+        return { status: "safe_mode" };
+      }
+
+      let result;
+      try {
+        result = await moysklad.removePositionFromOrder({ orderId, positionId });
+      } catch (error) {
+        logger.error("moysklad", "reservation_cancel_failed", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          orderId,
+          positionId,
+          error,
+        });
+        return { status: "failed" };
+      }
+
+      // safe-mode: wrapWithSafeMode вернул {skipped, safeMode} — реального
+      // удаления не было, состояние не трогаем.
+      if (result && result.skipped === true && result.safeMode === true) {
+        logger.warn("safe-mode", "reservation_cancel_blocked", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+        });
+        return { status: "safe_mode" };
+      }
+
+      const state = ensureReservationState(lot);
+      const released = Math.max(1, Number(event.quantity) || 1);
+      state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - released);
+      // Снимаем зрителя из принятых, чтобы тот же покупатель мог
+      // забронировать заново (или поллер VK принял его новый комментарий).
+      state.acceptedUserIds.delete(event.viewerId);
+      // Сбрасываем in-memory маппинг заказа этого зрителя, чтобы следующая
+      // бронь переразрешилась через МойСклад, а не дописала позицию в заказ,
+      // из которого мы только что удалили позицию. Чистим все dated-cache
+      // записи зрителя: после отмены безопаснее заново спросить МойСклад.
+      deleteCustomerOrderCacheForViewer(event.viewerId);
+      const previousStatus = event.status;
+      event.status = "cancelled";
+
+      logger.info("ws", "reservation_cancelled", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        code: lot.code,
+        commentId: event.commentId,
+        viewerId: event.viewerId,
+        viewerName: event.viewerName,
+        orderId,
+        positionId,
+        previousStatus,
+        quantityReleased: released,
+        alreadyGone: Boolean(result?.alreadyGone),
+        reason,
+      });
+      sessionLog.logOrderCancelled({
+        viewerName: event.viewerName,
+        viewerId: event.viewerId,
+        lotCode: lot.code,
+        orderId,
+      });
+      logReservationFinalized(lot, event, {
+        reason,
+        previousStatus,
+        quantityReleased: released,
+        alreadyGone: Boolean(result?.alreadyGone),
+      });
+      emitState();
+      return { status: "cancelled", orderId, positionId, released };
+    }
+
+    // Пересчитывает цену/скидку у позиций лота, которые УЖЕ созданы в МойСкладе.
+    // Вызывается после изменения скидки лота: без этого покупатель, забронировавший
+    // за секунду до объявления скидки, платит полную цену, а оператор правит заказ
+    // руками. Позиции лота адресуются сохранёнными orderId/positionId — соседние
+    // позиции того же товара в других заказах не трогаются.
+    //
+    // Никогда не роняет вызывающий поток: скидка на лоте уже применена, и сбой
+    // МойСклада не должен отменять её для последующих броней.
+    async function backfillLotPositionPricing(lot, { reason } = {}) {
+      const state = ensureReservationState(lot);
+      const events = Array.isArray(state.events) ? state.events : [];
+      const targets = events.filter((event) => (
+        (event.status === "reserved" || event.status === "reserved_appended")
+        && event.customerOrder?.id
+        && event.customerOrder?.positionId
+      ));
+      if (targets.length === 0) {
+        return { updated: 0, failed: 0, skipped: 0 };
+      }
+
+      if (isSafeMode()) {
+        logger.warn("safe-mode", "position_pricing_backfill_blocked", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          positions: targets.length,
+        });
+        return { updated: 0, failed: 0, skipped: targets.length };
+      }
+
+      const salePrice = Number(getLotEffectivePrice(lot) || 0);
+      const discountAmount = Number(lot.discountAmount || 0);
+      let updated = 0;
+      let failed = 0;
+      for (const event of targets) {
+        try {
+          const result = await moysklad.updateCustomerOrderPositionPricing({
+            orderId: event.customerOrder.id,
+            positionId: event.customerOrder.positionId,
+            salePrice,
+            discountAmount,
+            source: "discount_backfill",
+          });
+          if (result?.skipped === true && result?.safeMode === true) {
+            return { updated, failed, skipped: targets.length - updated - failed };
+          }
+          if (result?.ok) updated += 1;
+        } catch (error) {
+          failed += 1;
+          logger.error("moysklad", "position_pricing_backfill_failed", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            orderId: event.customerOrder.id,
+            positionId: event.customerOrder.positionId,
+            viewerId: event.viewerId,
+            error,
+          });
+        }
+      }
+
+      if (updated > 0 || failed > 0) {
+        logger.info("moysklad", "position_pricing_backfilled", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          reason: reason || null,
+          salePrice,
+          discountAmount,
+          updated,
+          failed,
+        });
+        sessionLog.logPositionPricingBackfilled({
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          reason: reason || null,
+          salePrice,
+          discountAmount,
+          updated,
+          failed,
+        });
+      }
+      if (failed > 0) {
+        sendJson(websocket, {
+          type: "warning",
+          message: `Скидка применена, но ${failed} уже созданн${failed === 1 ? "ая бронь" : "ых броней"} по лоту ${lot.code} не пересчитал${failed === 1 ? "ась" : "ись"} — проверьте цены в МойСкладе`,
+        });
+      }
+      return { updated, failed, skipped: 0 };
+    }
+
     async function applyDiscount(input, transcript = null) {
       // Раньше здесь требовался vkPublication.commentId — это блокировало
       // применение скидки в safe mode и при любых сбоях публикации в VK
@@ -2349,6 +2800,12 @@ export function attachWsServer(httpServer, config, services = {}) {
         descriptor,
         transcript,
       });
+
+      // Скидку, объявленную ПОСЛЕ первых броней, надо донести до уже созданных
+      // позиций: applyDiscount меняет лот, а позиция в МойСкладе остаётся по
+      // полной цене. Эфир 2026-08-01, лот 03737 — скидка через 4 секунды после
+      // трёх броней, все три ушли по полной цене, оператор правил заказы руками.
+      await backfillLotPositionPricing(activeLot, { reason: "discount_applied" });
 
       // Публикация апдейта в VK имеет смысл только если карточка лота уже
       // ушла туда и лот не «битый». Иначе пропускаем без шума — скидка во
@@ -3140,6 +3597,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           session = openSpeechKitSession(runId, makeHandlers);
 
           resetDetectionState();
+          // Строго ПОСЛЕ resetDetectionState: тот гасит таймер инструкций
+          // вместе с остальным состоянием эфира, и запуск до него был бы
+          // немедленно отменён.
+          startViewerInstructions();
           emitState();
           return;
         }
@@ -3352,106 +3813,17 @@ export function attachWsServer(httpServer, config, services = {}) {
             return;
           }
 
-          const orderId = event.customerOrder?.id;
-          const positionId = event.customerOrder?.positionId;
-          if (!orderId || !positionId) {
-            logger.warn("ws", "reservation_cancel_no_position", {
-              connectionId,
-              lotSessionId: lot.lotSessionId,
-              commentId: event.commentId,
-              viewerId: event.viewerId,
-              orderId: orderId || null,
-            });
+          const { status } = await cancelReservationEvent(lot, event, { reason: "operator_cancelled" });
+          if (status === "no_position") {
             sendJson(websocket, {
               type: "warning",
               message: "Нет связанной позиции МойСклад — отмените заказ вручную",
             });
-            return;
-          }
-
-          // Safe-mode: явная проверка ДО вызова (в обвязке wrapWithSafeMode
-          // дублируется ниже на случай флипа в полёте). Никаких реальных
-          // удалений и мутаций состояния в safe-mode — только warning.
-          if (isSafeMode()) {
-            logger.warn("safe-mode", "reservation_cancel_blocked", {
-              connectionId,
-              lotSessionId: lot.lotSessionId,
-              commentId: event.commentId,
-              viewerId: event.viewerId,
-            });
+          } else if (status === "safe_mode") {
             sendJson(websocket, { type: "warning", message: "Отмена брони недоступна в safe-mode" });
-            return;
-          }
-
-          let result;
-          try {
-            result = await moysklad.removePositionFromOrder({ orderId, positionId });
-          } catch (error) {
-            logger.error("moysklad", "reservation_cancel_failed", {
-              connectionId,
-              lotSessionId: lot.lotSessionId,
-              commentId: event.commentId,
-              viewerId: event.viewerId,
-              orderId,
-              positionId,
-              error,
-            });
+          } else if (status === "failed") {
             sendJson(websocket, { type: "warning", message: "Не удалось отменить бронь — попробуйте ещё раз" });
-            return;
           }
-
-          // safe-mode: wrapWithSafeMode вернул {skipped, safeMode} — реального
-          // удаления не было, состояние не трогаем.
-          if (result && result.skipped === true && result.safeMode === true) {
-            logger.warn("safe-mode", "reservation_cancel_blocked", {
-              connectionId,
-              lotSessionId: lot.lotSessionId,
-              commentId: event.commentId,
-              viewerId: event.viewerId,
-            });
-            sendJson(websocket, { type: "warning", message: "Отмена брони недоступна в safe-mode" });
-            return;
-          }
-
-          const released = Math.max(1, Number(event.quantity) || 1);
-          state.committedReservationCount = Math.max(0, (state.committedReservationCount || 0) - released);
-          // Снимаем зрителя из принятых, чтобы тот же покупатель мог
-          // забронировать заново (или поллер VK принял его новый комментарий).
-          state.acceptedUserIds.delete(event.viewerId);
-          // Сбрасываем in-memory маппинг заказа этого зрителя, чтобы следующая
-          // бронь переразрешилась через МойСклад, а не дописала позицию в заказ,
-          // из которого мы только что удалили позицию. Чистим все dated-cache
-          // записи зрителя: после отмены безопаснее заново спросить МойСклад.
-          deleteCustomerOrderCacheForViewer(event.viewerId);
-          const previousStatus = event.status;
-          event.status = "cancelled";
-
-          logger.info("ws", "reservation_cancelled", {
-            connectionId,
-            lotSessionId: lot.lotSessionId,
-            code: lot.code,
-            commentId: event.commentId,
-            viewerId: event.viewerId,
-            viewerName: event.viewerName,
-            orderId,
-            positionId,
-            previousStatus,
-            quantityReleased: released,
-            alreadyGone: Boolean(result?.alreadyGone),
-          });
-          sessionLog.logOrderCancelled({
-            viewerName: event.viewerName,
-            viewerId: event.viewerId,
-            lotCode: lot.code,
-            orderId,
-          });
-          logReservationFinalized(lot, event, {
-            reason: "operator_cancelled",
-            previousStatus,
-            quantityReleased: released,
-            alreadyGone: Boolean(result?.alreadyGone),
-          });
-          emitState();
           return;
         }
 

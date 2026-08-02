@@ -15,8 +15,9 @@ only that the app *believed* it wrote the right thing. It does not read MoySklad
 
 That leaves four blind spots, all of them things that have already gone wrong:
 
-- a call that was never attempted logs **nothing** (a cancellation on a closed
-  lot, §2.1) — no error to find;
+- a call that was never attempted logs **nothing** — an отмена the app declines
+  now leaves `cancel_comment_not_executed` (§2.3), but a comment the parser never
+  recognised as an отмена at all still leaves no trace whatsoever;
 - a position written with a **wrong but non-zero** price looks perfectly healthy;
 - anything changed in MoySklad **after** the эфир (operator edits, manual
   cancellations, a re-run of a recovery script) is invisible;
@@ -145,7 +146,10 @@ events therefore double-counts cancelled броней as live.
   `ingestViewerComment` then drops it **with no log line anywhere** — it only
   flashes past in the operator's live comment feed. Silent losses of this class
   cannot be counted from a bundle at all; the only trace is the operator saying
-  "оно не бронирует". `reservation_no_open_lot` covers just the case where the
+  "оно не бронирует". Decided 2026-08-02 not to widen the parser but to repeat a
+  **periodic instruction** to viewers instead (see [[vk-comments]]), so on эфиры
+  from that version on, expect the share of такие comments to fall rather than
+  the log to explain them. `reservation_no_open_lot` covers just the case where the
   keyword *did* match but no lot was open. See [[vk-comments]].
 - [ ] **live (deduped `reserved` + `reserved_appended`) == `customer_order_created`.**
 - [ ] **`cancelled` == `customer_order_cancelled` == DELETE calls** — every
@@ -159,11 +163,13 @@ events therefore double-counts cancelled броней as live.
 
 ### 2.3 Отмены по закрытым лотам (buyer backs out after the lot is closed)
 
-Cancellation only works while the lot is **open**: `cancelReservation` in
-`ws-server.js` resolves the lot from `openLotsBySessionId` / `getOpenLots()` /
-`activeLot` and otherwise answers "Нет активного лота для отмены брони" without
-ever calling MoySklad. So two very common cases are **not** executed by the app
-and are done by the operator by hand:
+The operator's «× отменить» button still only reaches броней of an **open** lot:
+`cancelReservation` in `ws-server.js` resolves the lot from `openLotsBySessionId`
+/ `getOpenLots()` / `activeLot` and otherwise answers "Нет активного лота для
+отмены брони" without ever calling MoySklad. Until 2026-08-02 that left two very
+common cases to be done by hand — a **buyer comment** now covers both, but every
+эфир recorded before that still needs the checks below, and so does any отмена
+the app declines:
 
 1. **same эфир, closed lot** — the buyer backs out an hour later, the lot is
    already closed;
@@ -178,10 +184,13 @@ and are done by the operator by hand:
 Nothing in §2.2 catches either one: the counts of the current эфир reconcile
 perfectly while a stale reserve keeps sitting on the stock.
 
-**Reservations on a closed lot are fixed; cancellations are not.** The operator
-can now book such a comment from the attention banner («✓ забронировать», see
-[[reservation-flow]]). Cancelling a бронь whose lot is closed still has no path
-in the app — that is what the checks below are for.
+**Both are fixed now.** The operator can book such a comment from the attention
+banner («✓ забронировать»), and since 2026-08-02 a buyer comment («отмена 03770»)
+cancels their own бронь even when the lot is closed or belongs to an earlier day
+of the campaign — see [[reservation-flow]]. The checks below still matter for
+эфиры recorded **before** that, and for the cases the app declines: a проведённый
+order, an unknown артикул, «отмена» with no code, or an эфир where no lot was
+open at all (the comment poller is not running then).
 
 > All events in this subsection live in **`server.log`**, not the session jsonl,
 > and the analyzer does not report any of them.
@@ -208,9 +217,12 @@ in the app — that is what the checks below are for.
   `attention_reservation_created` means the operator did not act on the row (or
   the code is not in the catalog, which gets no button). With the flood guard in
   play, count `suppressed` too. Check those against MoySklad.
-- [ ] Product gap, still open: **cancelling** a бронь on a closed lot — in this
-  эфир or an earlier day of the campaign — is not implemented (confirmed with the
-  operator 2026-07-26), so every such отмена is manual work in MoySklad.
+- [ ] **Buyer-initiated cancellations** log `reservation_cancelled_by_comment`
+  with `path: open_lot | closed_lot`. A `cancel_comment_not_executed` and its
+  `reason` is the list of отмен the app declined and left to the operator:
+  `no_order` usually means the order was already проведён, `no_counterparty` that
+  the buyer is not in MoySklad at all, `product_not_found` an артикул outside the
+  catalog.
 
 ## 3. Order structure integrity
 
@@ -244,8 +256,11 @@ in the app — that is what the checks below are for.
   amount parsed to something nonsensical and was thrown away.
 - [ ] Known causes of a dropped voiced price (all seen 2026-06-28):
   - price/discount spoken **before** `lot_opened` → not attached to the lot;
-  - price/discount spoken **after** the бронь was already finalized → the later
-    `lot_price_changed` does **not** backfill an already-created order position;
+  - a **price** spoken after the бронь was already finalized → the later
+    `lot_price_changed` does **not** backfill an already-created order position.
+    A **discount** does since 2026-08-02: `applyDiscount` reprices every live
+    position of the lot and logs `position_pricing_backfilled` (`updated`/`failed`
+    counts). A `failed > 0` there is a position still on the old price;
   - a discount % voiced with **no base price** → `discount_skipped:
     trigger_matched_but_no_amount_extracted` → stays 0.
 - [ ] **Flag every `lot_price_changed` that is later than a `reservation_finalized`
@@ -360,8 +375,10 @@ about what a live бронь is. What they still do not tell you:
 - **Cancel matching is by count, not by pairing.** `analyze` reports
   `voice_cancel_command` minus results; which specific отмена fell through, you
   find by reading `server.log` around the timestamp.
-- **Comment intent is not parsed.** A buyer writing «отменяю» in free text
-  without triggering the voice/command path leaves no event at all.
+- **A comment the parser did not read as an отмена leaves nothing.** Buyer
+  comments are parsed for cancel intent since 0.1.78, but only for the words in
+  `parseCancelComment` — «не буду», «не надо», «нет» are deliberately not among
+  them, and such a comment is invisible in the bundle.
 - **Post-эфир edits are detected, not explained** — the diff shows a value
   changed and that the order was touched later; whether that edit was correct is
   the operator's call.
@@ -381,13 +398,15 @@ about what a live бронь is. What they still do not tell you:
 | status `order_failed` | POST failed, buyer parked in wishlist | contact buyer / create by hand |
 | status `stale_discarded` | order **exists** in MoySklad, app lost track | add to the §8 diff |
 | `product_not_found` > 0 | артикул→товар join failed | leading-zero fallback / catalog |
-| cancel command, no `reservation_cancelled` | lot already closed (this эфир or earlier day) — app can't do it | cancel the position in МойСклад by hand |
+| `cancel_comment_not_executed` | отмена the app declined (`reason`) | снять позицию в МойСкладе руками |
+| voice cancel, no `reservation_cancelled` (до 0.1.78) | lot already closed — старые эфиры | cancel the position in МойСклад by hand |
 | `reservation_no_open_lot_flood_ended` | comments were suppressed | add `suppressed` to the missed count |
 | order with >1 `viewerId` | grouping/counterparty bug | inspect `ensureCounterparty` |
 | dup product line in order | append-quantity failed | inspect `appendPositionToCustomerOrder` |
 | live position `salePrice==0` | voiced price dropped | transcript + `fix-zero-price-positions.mjs` |
 | `effectivePrice != salePrice - discountAmount` | discount math wrong | §8 price diff |
-| `lot_price_changed` after finalize | correction never reached the position | patch by hand |
+| `lot_price_changed` after finalize | **цена** правится только вручную | patch by hand |
+| `position_pricing_backfilled` с `failed>0` | скидка не догнала часть позиций | сверить цены в МойСкладе |
 | `discount_skipped` / `invalid_discount` on real lots | lost discount | [[voice-price-parsing]] |
 | pending != promoted, `orphan_waitlist` | buyer stuck in waitlist | inspect promotion path |
 | out_of_stock != wishlist added | lost overflow buyer | inspect wishlist sink |

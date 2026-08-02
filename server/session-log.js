@@ -253,6 +253,16 @@ export function createSessionLog() {
       jsonlEvent("vk_comment", { commentId, viewerId, viewerName, text, createdAt, lotCode });
     },
 
+    // Пересчёт цены уже созданных позиций лота после объявления скидки.
+    // В .md пишем строкой — оператору важно видеть, что старые брони догнали
+    // новую цену; в jsonl — для сверки с МойСкладом по чек-листу.
+    logPositionPricingBackfilled({ code, lotSessionId, reason, salePrice, discountAmount, updated, failed } = {}) {
+      append(`- ${nowTime()} **Пересчёт броней** лот ${code}: ${updated} позиц. по ${Math.max(0, Number(salePrice || 0) - Number(discountAmount || 0))} ₽${failed ? `, не удалось: ${failed}` : ""}`);
+      jsonlEvent("position_pricing_backfilled", {
+        code, lotSessionId, reason: reason || null, salePrice, discountAmount, updated, failed,
+      });
+    },
+
     logStateSnapshot(payload = {}) {
       // Снимок состояния для реконструкции «что было в момент X».
       // Раз в 30 секунд + на ключевых изменениях.

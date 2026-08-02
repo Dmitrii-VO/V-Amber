@@ -91,8 +91,13 @@ breakdown, retries, slowest calls), reservation statuses **deduplicated the way
 `safe_mode_logged` / `order_failed` / `stale_discarded` trio, cancellations and
 `reservation_no_open_lot` from `server.log`, order structure, pricing
 (`effectivePrice` arithmetic, late `lot_price_changed`, discount outcomes),
-waitlist, wishlist and stock-unknown lots. `--json` for a machine-readable dump;
-exit code 1 when any red flag fires. Writes nothing.
+waitlist, wishlist and stock-unknown lots. Since 0.1.78 it also reports buyer
+cancellations (`reservation_cancelled_by_comment` by path, and the
+`cancel_comment_not_executed` reasons the app declined) and the discount
+backfill — a late discount is flagged only when no successful
+`position_pricing_backfilled` followed it, while a late **price** is always
+flagged because prices are still not backfilled. `--json` for a machine-readable
+dump; exit code 1 when any red flag fires. Writes nothing.
 
 Parsing lives in `scripts/lib/broadcast-log.mjs`, shared with
 `verify-broadcast-against-moysklad` so the two cannot disagree about what a live

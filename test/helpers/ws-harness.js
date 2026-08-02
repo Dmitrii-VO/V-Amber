@@ -44,6 +44,7 @@ export function createVkMock(overrides = {}) {
     publishPriceUpdate: wrap("publishPriceUpdate", overrides.publishPriceUpdate || (async () => {})),
     publishDiscountUpdate: wrap("publishDiscountUpdate", overrides.publishDiscountUpdate || (async () => {})),
     publishReservationReply: wrap("publishReservationReply", overrides.publishReservationReply || (async () => {})),
+    publishViewerInstruction: wrap("publishViewerInstruction", overrides.publishViewerInstruction || (async () => ({ ok: true }))),
     getComments: wrap("getComments", overrides.getComments
       || (async () => ({ items: [...commentItems], profiles: [...profiles] }))),
     setLiveVideoUrl: wrap("setLiveVideoUrl", overrides.setLiveVideoUrl || (() => {})),
@@ -87,6 +88,8 @@ export function createMoyskladMock({ cardsByCode = {}, overrides = {} } = {}) {
       || (async () => ({ id: "co-test-1", positionId: "pos-created-1" }))),
     removePositionFromOrder: wrap("removePositionFromOrder",
       overrides.removePositionFromOrder || (async () => ({ ok: true }))),
+    updateCustomerOrderPositionPricing: wrap("updateCustomerOrderPositionPricing",
+      overrides.updateCustomerOrderPositionPricing || (async () => ({ ok: true, alreadyGone: false }))),
     hasPositionForProduct: wrap("hasPositionForProduct",
       overrides.hasPositionForProduct || (async () => ({ inOpenOrder: false }))),
     hasPositionInOrder: wrap("hasPositionInOrder",
@@ -133,6 +136,7 @@ export function createChatClientMock() {
       serviceMessages.push(text);
       return { ok: true };
     },
+    serviceMessages,
     pushMessage({ viewerId, name, phone = "", text }) {
       latestSeq += 1;
       queue.push({
@@ -188,6 +192,9 @@ function buildConfig(overrides = {}) {
       ...(overrides.articleExtraction || {}),
     },
     discount: { triggers: ["скидка", "скидку", "скидки"], ...(overrides.discount || {}) },
+    // По умолчанию в тестах инструкция выключена: иначе её таймер стрелял бы
+    // посреди чужих сценариев. Тесты инструкции включают её явно.
+    viewerInstructions: { enabled: false, ...(overrides.viewerInstructions || {}) },
     speechkit: { ...(overrides.speechkit || {}) },
     moysklad: {},
     vk: {},
@@ -213,6 +220,7 @@ function createSessionLogMock() {
     logOrphanWaitlist: noop,
     logWaitlistMigratedToWishlist: noop,
     logDiscount: noop,
+    logPositionPricingBackfilled: noop,
     logLotOpened: noop,
     logSessionStart: noop,
     logTranscriptFinal: noop,

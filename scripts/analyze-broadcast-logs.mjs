@@ -130,6 +130,9 @@ const noOpenLot = byMessage(srv, "reservation_no_open_lot");
 const floodEnded = byMessage(srv, "reservation_no_open_lot_flood_ended");
 const suppressed = floodEnded.reduce((s, e) => s + (Number(e.suppressed) || 0), 0);
 const attention = byMessage(srv, "attention_reservation_created");
+// Отмена по комментарию покупателя (0.1.78+): работает и по закрытому лоту.
+const commentCancels = byMessage(srv, "reservation_cancelled_by_comment");
+const commentCancelsDeclined = byMessage(srv, "cancel_comment_not_executed");
 p(`\n[2.3] Отмены и комментарии без лота (из server.log)`);
 p(`    voice_cancel_command=${voiceCancels.length}  reservation_cancelled=${cancelled.length}  no_position=${cancelNoPos.length}  failed=${cancelFailed.length}`);
 const unmatchedCancels = Math.max(0, voiceCancels.length - cancelled.length - cancelNoPos.length);
@@ -138,6 +141,14 @@ if (unmatchedCancels > 0) {
   flag(`~${unmatchedCancels} голосовых отмен не выполнены (закрытый лот) — снимать позиции в МойСкладе вручную`);
 }
 if (cancelFailed.length) flag(`${cancelFailed.length} отмен упали с ошибкой (reservation_cancel_failed)`);
+p(`    отмены комментарием: ${commentCancels.length} (открытый лот: ${commentCancels.filter((e) => e.path === "open_lot").length}, закрытый: ${commentCancels.filter((e) => e.path === "closed_lot").length})`);
+if (commentCancelsDeclined.length) {
+  const reasons = {};
+  for (const e of commentCancelsDeclined) reasons[e.reason || "?"] = (reasons[e.reason || "?"] || 0) + 1;
+  p(`    ✗ отмен отклонено приложением: ${commentCancelsDeclined.length}  ${JSON.stringify(reasons)}`);
+  for (const e of commentCancelsDeclined.slice(0, 10)) p(`       ! ${e.ts} ${e.code} ${e.viewerName} — ${e.reason}`);
+  flag(`${commentCancelsDeclined.length} отмен покупателей приложение не выполнило — снимать позиции вручную`);
+}
 p(`    reservation_no_open_lot=${noOpenLot.length}  подавлено флуд-гардом=${suppressed}  attention_reservation_created=${attention.length}`);
 if (noOpenLot.length + suppressed > 0 && attention.length === 0) {
   p(`    ⚠ ни одна строка «требует внимания» не была забронирована оператором`);
@@ -186,8 +197,17 @@ for (const e of finalized) {
 }
 // A discount voiced after the first бронь of the lot is the same trap: applyDiscount
 // only updates the lot and the VK card, never an already-created position.
-const latePriceChanges = [...by(events, "lot_price_changed"), ...by(events, "discount_applied")]
+const lateChanges = [...by(events, "lot_price_changed"), ...by(events, "discount_applied")]
   .filter((e) => firstFinalizeByLot.has(e.lotSessionId) && String(e.ts) > String(firstFinalizeByLot.get(e.lotSessionId)));
+// Скидка с 0.1.78 догоняет уже созданные позиции, поэтому «поздняя» скидка —
+// проблема только если пересчёта после неё не было или он частично упал.
+// Поздняя ЦЕНА не бэкфилится до сих пор — она проблема всегда.
+const latePriceChanges = lateChanges.filter((e) => {
+  if (e.kind !== "discount_applied") return true;
+  return !by(events, "position_pricing_backfilled").some((b) => (
+    b.lotSessionId === e.lotSessionId && String(b.ts) >= String(e.ts) && !(Number(b.failed) > 0)
+  ));
+});
 
 p(`\n[4] Pricing & discounts`);
 p(`    позиций с ценой 0: ${zeroPrice.length}   ${zeroPrice.length === 0 ? "✓" : "⚠ читать транскрипт — цену скорее всего называли"}`);
@@ -201,7 +221,12 @@ const reasons = {};
 for (const e of discSkipped) reasons[e.reason || "?"] = (reasons[e.reason || "?"] || 0) + 1;
 for (const [r, n] of Object.entries(reasons)) p(`       skip: ${r}: ${n}`);
 if (invalidDiscount.length) flag(`${invalidDiscount.length} невалидных скидок отброшено (invalid_discount)`);
-p(`    цена/скидка изменены ПОСЛЕ первой брони лота: ${latePriceChanges.length}${latePriceChanges.length ? " ⚠ правка не дошла до уже созданных позиций" : ""}`);
+const backfills = by(events, "position_pricing_backfilled");
+const backfillFailed = backfills.reduce((sum, e) => sum + (Number(e.failed) || 0), 0);
+const backfillUpdated = backfills.reduce((sum, e) => sum + (Number(e.updated) || 0), 0);
+p(`    пересчёт позиций после скидки: ${backfills.length} раз, позиций обновлено ${backfillUpdated}, не удалось ${backfillFailed}`);
+if (backfillFailed > 0) flag(`${backfillFailed} позиций не пересчитаны после скидки — проверить цены в МойСкладе`);
+p(`    правок цены/скидки после первой брони: ${lateChanges.length}, из них не дошли до позиций: ${latePriceChanges.length}${latePriceChanges.length ? " ⚠" : ""}`);
 for (const e of latePriceChanges.slice(0, 10)) p(`       ⚠ ${e.ts} ${e.kind} lot=${e.code || e.lotSessionId} → ${e.newPrice ?? e.price ?? e.salePrice ?? "?"}`);
 if (latePriceChanges.length) flag(`правок цены/скидки после создания позиции: ${latePriceChanges.length} — в МойСклад они не попали`);
 
@@ -253,9 +278,9 @@ if (asJson) {
     date, sessions: sessions.length, events: events.length,
     moysklad: { calls: msCalls.length, errors: msErrors.length, httpStatuses, retried: msRetried.length },
     reservations: { rawEvents: rawFinalizedEvents, unique: finalized.length, statuses, live: live.length, orders: orders.size },
-    cancels: { voice: voiceCancels.length, done: cancelled.length, noPosition: cancelNoPos.length, failed: cancelFailed.length, unmatched: unmatchedCancels },
+    cancels: { byComment: commentCancels.length, declined: commentCancelsDeclined.length, voice: voiceCancels.length, done: cancelled.length, noPosition: cancelNoPos.length, failed: cancelFailed.length, unmatched: unmatchedCancels },
     noOpenLot: { logged: noOpenLot.length, suppressed, attentionCreated: attention.length },
-    pricing: { zero: zeroPrice.length, mismatched: mismatches.length, discountApplied: discApplied, discountSkipped: discSkipped.length, invalidDiscount: invalidDiscount.length, latePriceChanges: latePriceChanges.length },
+    pricing: { zero: zeroPrice.length, mismatched: mismatches.length, discountApplied: discApplied, discountSkipped: discSkipped.length, backfilled: backfillUpdated, backfillFailed, invalidDiscount: invalidDiscount.length, latePriceChanges: latePriceChanges.length },
     waitlist: { pending: wlPending, promoted: wlPromoted, orphan: orphanWaitlist },
     wishlist: { outOfStock: oos.length, added: wishAdded.length, fromOrderFailed: wishFromFailure.length },
     stock: { lotsUnknown: lotsUnknownStock.length, reservationsUnknown: stockUnknown.length },
