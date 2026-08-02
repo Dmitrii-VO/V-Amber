@@ -197,7 +197,7 @@ async function main() {
   const rawVk = createVkPublisher(config.vk);
   const vk = wrapWithSafeMode(
     rawVk,
-    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishPriceUpdate", "publishReservationReply", "sendDirectMessage"],
+    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishPriceUpdate", "publishReservationReply", "publishViewerInstruction", "sendDirectMessage"],
     "vk",
   );
 

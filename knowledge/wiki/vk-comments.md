@@ -104,6 +104,34 @@ back to the user token — was the last that worked (28 successful
 publishes, 0 errors). The fix above restores that user-token behavior
 while keeping the group token for DMs.
 
+## Periodic viewer instruction (2026-08-02)
+
+Viewers join an эфир at different times, so half the room never sees the
+reservation format and writes «03786 справа» — a comment the parser drops
+without a trace. Decided with the operator: instead of widening the parser,
+the app repeats a short instruction on a timer.
+
+- `config.viewerInstructions` — `enabled` (`VIEWER_INSTRUCTIONS_ENABLED=0` to
+  turn off), `intervalMinutes` (30), `firstDelayMinutes` (2, so viewers of the
+  first half hour see it at all), `variants`.
+- **Variants rotate.** VK filters repeated identical comments under one video,
+  and the same text every 30 minutes reads as spam to a human too.
+- Posted to **both** channels at once — `video.createComment` for VK and a chat
+  service message for `/efir/`. They are different audiences.
+- Scheduled with `setTimeout`, re-armed after the previous publication finishes,
+  not `setInterval`: a slow VK retry would otherwise queue instructions back to
+  back.
+- Started **after** `resetDetectionState()` in the `start` handler — that reset
+  clears the timer along with the rest of эфир state, so starting before it was
+  silently cancelled (cost an hour of debugging; the timer never fired).
+- Stops with the эфир (`resetDetectionState`), and the callback re-checks
+  `activeRunId` in case the broadcast ended while it was pending.
+- `publishViewerInstruction` is in the safe-mode write list, so a dry run posts
+  nothing. Logged as `viewer_instruction_published` with the variant index and
+  per-channel outcome.
+
+Tests: `test/ws-server.viewer-instructions.test.js`.
+
 ## Blocking spammers
 
 Added 2026-07-21. The operator can block a viewer whose comments are spam;
