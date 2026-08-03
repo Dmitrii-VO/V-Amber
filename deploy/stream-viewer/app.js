@@ -16,6 +16,34 @@
   var hls = null;
   var retryTimer = null;
 
+  // Подвисания воспроизведения. Нужны, чтобы плашка «смотреть в ВК» из
+  // фоновой строчки становилась заметной ровно тем зрителям, у кого видео
+  // реально сыпется, — остальных она не отвлекает. Считаем события за окно:
+  // одиночная заминка бывает у всех, две подряд — уже плохая связь.
+  var TROUBLE_WINDOW_MS = 60000;
+  var TROUBLE_CALM_MS = 180000;
+  var TROUBLE_MIN_EVENTS = 2;
+  var troubleAt = [];
+
+  function markPlaybackTrouble() {
+    var now = Date.now();
+    troubleAt = troubleAt.filter(function (ts) { return now - ts < TROUBLE_WINDOW_MS; });
+    troubleAt.push(now);
+    if (troubleAt.length >= TROUBLE_MIN_EVENTS && window.efirOnPlaybackTrouble) {
+      window.efirOnPlaybackTrouble(true);
+    }
+  }
+
+  // Связь восстановилась — через TROUBLE_CALM_MS без заминок плашка снова
+  // становится фоновой, чтобы не кричать на зрителя весь эфир из-за одного
+  // плохого участка.
+  setInterval(function () {
+    if (!troubleAt.length) return;
+    if (Date.now() - troubleAt[troubleAt.length - 1] < TROUBLE_CALM_MS) return;
+    troubleAt = [];
+    if (window.efirOnPlaybackTrouble) window.efirOnPlaybackTrouble(false);
+  }, 30000);
+
   function showOffline() {
     overlay.classList.remove('hidden');
     overlayTitle.textContent = 'Эфир ещё не начался';
@@ -60,6 +88,9 @@
         video.play().catch(function () {});
       });
       hls.on(Hls.Events.ERROR, function (_e, data) {
+        // bufferStalledError — «картинка встала, ждём данные»: не фатально,
+        // hls.js разберётся сам, но для зрителя это ровно то самое «тормозит».
+        if (data.details === 'bufferStalledError' || data.fatal) markPlaybackTrouble();
         if (!data.fatal) return;
         // нет манифеста = эфир не идёт; всё остальное тоже лечим перезапуском
         stopHls();
@@ -84,6 +115,14 @@
       overlayHint.textContent = 'Откройте страницу в Safari, Chrome или Яндекс.Браузере';
     }
   }
+
+  // Safari/iOS играет HLS нативно, без событий hls.js: там признак заминки —
+  // штатный `waiting` (буфер опустел).
+  video.addEventListener('waiting', function () {
+    // Только после того, как воспроизведение реально пошло: `waiting` на
+    // старте и после переключения звука — норма, а не проблема связи.
+    if (video.currentTime > 0 && !video.paused) markPlaybackTrouble();
+  });
 
   // автовоспроизведение разрешено только без звука — предлагаем включить
   video.addEventListener('playing', function () {
@@ -141,10 +180,16 @@
   var lotMeta = document.getElementById('lotMeta');
   var lotHint = document.getElementById('lotHint');
 
+  var mirrorBar = document.getElementById('mirrorBar');
+  var mirrorLink = document.getElementById('mirrorLink');
+  var mirrorText = document.getElementById('mirrorText');
+
   var auth = null;
   var lastSeq = null;
   var polling = false;
   var lotRev = null;
+  var mirrorUrl = '';
+  var playbackTrouble = false;
 
   // Возврат из VK: callback чат-сервиса редиректит на
   // /efir/#chatAuth=<base64url(json)> (инлайн-мостик запрещён CSP).
@@ -232,6 +277,30 @@
     while (log.children.length > 300) log.removeChild(log.firstChild);
   }
 
+  // Плашка «смотреть в ВК». Ссылку присылает V-Amber (см. cross-promo.js) и
+  // только пока ВК-эфир реально идёт — на той стороне у состояния есть TTL,
+  // поэтому мёртвая ссылка тут появиться не может. Показываем её всем и сразу
+  // (зритель с плохой связью не должен ждать сообщения бота), но в спокойном
+  // виде; заметной она становится, если плеер начал реально спотыкаться.
+  function renderMirror() {
+    if (!mirrorUrl) {
+      mirrorBar.hidden = true;
+      return;
+    }
+    mirrorLink.href = mirrorUrl;
+    mirrorBar.className = 'mirror' + (playbackTrouble ? ' mirror--alert' : '');
+    mirrorText.textContent = playbackTrouble
+      ? 'Видео подтормаживает — этот же эфир идёт в ВК'
+      : 'Тормозит видео или нет звука?';
+    mirrorBar.hidden = false;
+  }
+
+  window.efirOnPlaybackTrouble = function (trouble) {
+    if (playbackTrouble === trouble) return;
+    playbackTrouble = trouble;
+    renderMirror();
+  };
+
   function formatPrice(value) {
     // 2290 → «2 290 ₽»; Intl есть во всех целевых браузерах, но узкий
     // неразрывный пробел местами рисуется квадратом — ставим обычный NBSP.
@@ -289,6 +358,11 @@
     var url = API + '/messages' + (lastSeq === null ? '' : '?after=' + lastSeq);
     fetch(url).then(function (r) { return r.json(); }).then(function (data) {
       renderLot(data.lot || null);
+      var nextMirror = (data.broadcast && data.broadcast.vkMirrorUrl) || '';
+      if (nextMirror !== mirrorUrl) {
+        mirrorUrl = nextMirror;
+        renderMirror();
+      }
       var items = data.messages || [];
       // appendMessages двигает lastSeq по каждому реально полученному
       // сообщению. На latestSeq (глобальный максимум) не прыгаем: выдача

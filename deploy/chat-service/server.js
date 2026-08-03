@@ -46,6 +46,11 @@ const LOT_BODY_LIMIT = 3_000_000;
 const MAX_LOT_PHOTO_BYTES = 1_500_000;
 const MAX_LOT_TEXT_LENGTH = 120;
 const LOT_STATUSES = new Set(["open", "closed"]);
+// Состояние эфира (сейчас — ссылка на зеркало в ВК для плашки под плеером).
+// В отличие от карточки лота оно НЕ персистится и живёт по TTL: V-Amber
+// подтверждает его каждые ~5 минут, и если он замолчал (упал, закрыли ноутбук,
+// кончился эфир), плашка со ссылкой на давно погасший ВК-эфир гаснет сама.
+const BROADCAST_STATE_TTL_MS = Number(process.env.BROADCAST_STATE_TTL_MS) || 12 * 60_000;
 
 if (!OPERATOR_TOKEN) {
   console.error("OPERATOR_TOKEN is required (X-Chat-Token secret for the operator feed)");
@@ -248,6 +253,34 @@ function publicMessage(record) {
   return { seq: record.seq, ts: record.ts, name: record.name, text: record.text, kind: record.kind };
 }
 
+// ── Состояние эфира (плашка «смотреть в ВК») ───────────────────────────────
+let broadcastState = null; // {vkMirrorUrl, ts}
+
+// Ссылка уходит в href на публичной странице, поэтому принимаем только явный
+// https-адрес vk.com — не «любую строку от оператора» и тем более не
+// javascript:/data:.
+function normalizeMirrorUrl(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const allowed = host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
+    return url.protocol === "https:" && allowed ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function currentBroadcastState() {
+  if (!broadcastState) return { vkMirrorUrl: "" };
+  if (Date.now() - broadcastState.ts > BROADCAST_STATE_TTL_MS) {
+    broadcastState = null;
+    return { vkMirrorUrl: "" };
+  }
+  return { vkMirrorUrl: broadcastState.vkMirrorUrl };
+}
+
 // ── Карточка лота ──────────────────────────────────────────────────────────
 function lotText(raw) {
   return String(raw || "").replace(/\s+/g, " ").trim().slice(0, MAX_LOT_TEXT_LENGTH);
@@ -330,6 +363,7 @@ const server = createServer(async (request, response) => {
         viewers: viewersById.size,
         sessionStartSeq,
         lot: currentLot ? { code: currentLot.code, status: currentLot.status, rev: currentLot.rev } : null,
+        vkMirror: Boolean(currentBroadcastState().vkMirrorUrl),
       });
     }
 
@@ -499,7 +533,22 @@ const server = createServer(async (request, response) => {
         latestSeq: lastSeq,
         messages: slice.map(publicMessage),
         lot: currentLot,
+        broadcast: currentBroadcastState(),
       });
+    }
+
+    if (route === "GET /chat/state") {
+      return sendJson(response, 200, currentBroadcastState());
+    }
+
+    // V-Amber подтверждает состояние эфира каждые несколько минут:
+    // { vkMirrorUrl } — показать плашку, пустая строка — убрать.
+    if (route === "POST /chat/state") {
+      if (!isOperator(request)) return sendJson(response, 401, { error: "unauthorized" });
+      const body = await readJsonBody(request);
+      const vkMirrorUrl = normalizeMirrorUrl(body?.vkMirrorUrl);
+      broadcastState = vkMirrorUrl ? { vkMirrorUrl, ts: Date.now() } : null;
+      return sendJson(response, 200, currentBroadcastState());
     }
 
     if (route === "GET /chat/lot") {
@@ -568,8 +617,10 @@ const server = createServer(async (request, response) => {
       if (!isOperator(request)) return sendJson(response, 401, { error: "unauthorized" });
       const record = appendMessage({ viewerId: null, name: SERVICE_NAME, text: "Новая сессия", kind: "session" });
       sessionStartSeq = record.seq;
-      // Карточка прошлого эфира не должна висеть над чистым чатом.
+      // Карточка и ссылка на зеркало прошлого эфира не должны висеть над
+      // чистым чатом; актуальные V-Amber пришлёт заново в ближайшие минуты.
       setCurrentLot(null, null);
+      broadcastState = null;
       return sendJson(response, 200, { seq: record.seq });
     }
 

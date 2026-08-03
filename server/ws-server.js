@@ -17,6 +17,7 @@ import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
 import { createChatClient } from "./chat-client.js";
 import { createViewerLotPublisher } from "./viewer-lot.js";
+import { createCrossPromoPublisher } from "./cross-promo.js";
 import { resolveKnownCode } from "./product-code-resolver.js";
 import { createCommentFloodGuard } from "./comment-flood-guard.js";
 import {
@@ -180,6 +181,20 @@ export function attachWsServer(httpServer, config, services = {}) {
     // VK-комментариях). Синхронизируется из emitState(), дедупит сама.
     const viewerLot = services.viewerLotPublisher || createViewerLotPublisher({
       chatClient,
+      logger,
+      connectionId,
+    });
+    // Подсказки «вторая площадка» в оба канала + плашка со ссылкой на /efir/.
+    // Публикует только когда вторая площадка реально в эфире (см. cross-promo.js).
+    const crossPromo = services.crossPromoPublisher || createCrossPromoPublisher({
+      config,
+      vk,
+      chatClient,
+      // Пробу своей площадки инжектит server/index.js. Импортировать
+      // stream-status.js здесь нельзя: он тянет server/config.js, а тот —
+      // `dotenv/config`, и .env разработчика протёк бы в тесты (заодно
+      // включив им auth и настоящие адреса MediaMTX/ВК).
+      getStreamStatus: services.getStreamStatus || null,
       logger,
       connectionId,
     });
@@ -1632,6 +1647,9 @@ export function attachWsServer(httpServer, config, services = {}) {
         clearTimeout(instructionTimer);
         instructionTimer = null;
       }
+      // Перекрёстные подсказки живут тем же циклом эфира: старт вместе с
+      // инструкциями, остановка — здесь же, включая снятие плашки у зрителей.
+      crossPromo.stop();
     }
 
     async function publishViewerInstruction() {
@@ -1687,6 +1705,9 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     function startViewerInstructions() {
+      // Подсказки про запасную площадку заводятся вместе с инструкциями, но
+      // своим флагом: их можно выключить отдельно (CROSS_PROMO_ENABLED=0).
+      crossPromo.start();
       if (config.viewerInstructions?.enabled === false) return;
       if (instructionTimer) return;
       const firstDelayMin = Number(config.viewerInstructions?.firstDelayMinutes);

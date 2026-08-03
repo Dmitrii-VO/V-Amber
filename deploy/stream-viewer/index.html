@@ -105,6 +105,37 @@
   }
   .unmute.show { display: block; }
 
+  /* ── Плашка «смотреть в ВК» ── */
+  .stage { min-width: 0; }
+  .mirror {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--muted);
+    background: var(--panel);
+  }
+  .mirror[hidden] { display: none; }
+  /* Плеер реально подтормаживает — подсказка перестаёт быть фоновой. */
+  .mirror--alert {
+    color: var(--text);
+    border-color: var(--amber);
+    background: rgba(232, 163, 61, .14);
+  }
+  .mirror a {
+    color: var(--amber);
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .mirror a:hover { text-decoration: underline; }
+
   /* ── Правая колонка: карточка лота + чат ── */
   .side {
     display: flex;
@@ -305,14 +336,20 @@
   <span id="liveBadge" class="badge"><span class="dot"></span>В ЭФИРЕ</span>
 </header>
 <main>
-  <div class="player">
-    <video id="video" playsinline autoplay muted></video>
-    <div id="overlay" class="overlay">
-      <div class="icon">🕯️</div>
-      <div id="overlayTitle" class="title">Эфир ещё не начался</div>
-      <div id="overlayHint" class="hint">Страница обновится сама, когда начнётся трансляция</div>
+  <div class="stage">
+    <div class="player">
+      <video id="video" playsinline autoplay muted></video>
+      <div id="overlay" class="overlay">
+        <div class="icon">🕯️</div>
+        <div id="overlayTitle" class="title">Эфир ещё не начался</div>
+        <div id="overlayHint" class="hint">Страница обновится сама, когда начнётся трансляция</div>
+      </div>
+      <button id="unmute" class="unmute">🔊 Включить звук</button>
     </div>
-    <button id="unmute" class="unmute">🔊 Включить звук</button>
+    <div id="mirrorBar" class="mirror" hidden>
+      <span id="mirrorText">Тормозит видео или нет звука?</span>
+      <a id="mirrorLink" href="#" target="_blank" rel="noopener">Смотреть этот эфир в ВК →</a>
+    </div>
   </div>
 
   <aside class="side">

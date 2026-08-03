@@ -18,6 +18,7 @@ import { createBlockedViewersStore } from "./blocked-viewers-store.js";
 import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
+import { getStreamStatus } from "./stream-status.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sessionsDir = join(__dirname, "..", "logs", "sessions");
@@ -197,7 +198,7 @@ async function main() {
   const rawVk = createVkPublisher(config.vk);
   const vk = wrapWithSafeMode(
     rawVk,
-    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishPriceUpdate", "publishReservationReply", "publishViewerInstruction", "sendDirectMessage"],
+    ["publishLotCard", "publishLotClosed", "publishDiscountUpdate", "publishPriceUpdate", "publishReservationReply", "publishViewerInstruction", "publishCrossPromo", "sendDirectMessage"],
     "vk",
   );
 
@@ -235,6 +236,10 @@ async function main() {
     blockedViewersStore,
     diagnosticRouter,
     packageVersion,
+    // Проба «своя площадка в эфире» для перекрёстных подсказок. Инжектится
+    // отсюда, а не импортируется в ws-server: тот не должен тянуть
+    // server/config.js (и вместе с ним dotenv) — см. комментарий там.
+    getStreamStatus,
   });
 
   httpServer.on("error", (error) => {

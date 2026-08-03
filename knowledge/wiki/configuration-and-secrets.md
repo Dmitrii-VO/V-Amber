@@ -94,6 +94,16 @@ alternative to VK Live, see [[stream-integration]]:
   phone numbers.
 - `STREAM_CHAT_TIMEOUT_MS` / `STREAM_CHAT_POLL_MS` — request timeout and
   poll interval, both default 3000.
+- Cross-promo between the two platforms (added 2026-08-04; on by default,
+  `CROSS_PROMO_ENABLED=0` turns it off). `CROSS_PROMO_INTERVAL_MIN` (25) —
+  how often the messages go out; `CROSS_PROMO_PROBE_INTERVAL_MIN` (5) — how
+  often both platforms are probed and the `/efir/` mirror banner refreshed;
+  `CROSS_PROMO_FIRST_DELAY_MIN` (12) — delay before the first messages.
+  `CROSS_PROMO_VK_VARIANTS` / `CROSS_PROMO_CHAT_VARIANTS` — texts,
+  **pipe-separated** (`|`), `{url}` is substituted with the destination.
+  The links themselves are not configured here: they come from
+  `STREAM_VIEWER_URL` and from the VK video already being polled. See
+  [[stream-integration#Перекрёстные подсказки между площадками (2026-08-04)]].
 - `OBS_WEBSOCKET_URL` / `OBS_WEBSOCKET_PASSWORD` / `OBS_TIMEOUT_MS` —
   obs-websocket endpoint on the operator machine (default
   `ws://127.0.0.1:4455`, timeout 4000ms) for the one-button broadcast
