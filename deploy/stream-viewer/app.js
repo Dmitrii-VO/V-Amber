@@ -132,9 +132,19 @@
   var vkAuthBtn = document.getElementById('vkAuthBtn');
   var logoutBtn = document.getElementById('chatLogoutBtn');
 
+  var lotCard = document.getElementById('lotCard');
+  var lotPhoto = document.getElementById('lotPhoto');
+  var lotCode = document.getElementById('lotCode');
+  var lotTitle = document.getElementById('lotTitle');
+  var lotPrice = document.getElementById('lotPrice');
+  var lotPriceOld = document.getElementById('lotPriceOld');
+  var lotMeta = document.getElementById('lotMeta');
+  var lotHint = document.getElementById('lotHint');
+
   var auth = null;
   var lastSeq = null;
   var polling = false;
+  var lotRev = null;
 
   // Возврат из VK: callback чат-сервиса редиректит на
   // /efir/#chatAuth=<base64url(json)> (инлайн-мостик запрещён CSP).
@@ -222,11 +232,63 @@
     while (log.children.length > 300) log.removeChild(log.firstChild);
   }
 
+  function formatPrice(value) {
+    // 2290 → «2 290 ₽»; Intl есть во всех целевых браузерах, но узкий
+    // неразрывный пробел местами рисуется квадратом — ставим обычный NBSP.
+    return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽';
+  }
+
+  // Карточка лота приезжает в ответе /chat/messages (см. chat-service):
+  // оператор назвал артикул — здесь она и появляется.
+  function renderLot(lot) {
+    if (!lot) {
+      lotCard.hidden = true;
+      lotRev = null;
+      return;
+    }
+    if (lot.rev === lotRev) return;
+    lotRev = lot.rev;
+
+    var closed = lot.status === 'closed';
+    lotCard.className = 'lot' + (closed ? ' lot--closed' : '');
+    lotCode.textContent = (closed ? 'Лот закрыт · ' : 'Лот ') + lot.code;
+    lotTitle.textContent = lot.name || '';
+
+    if (lot.price > 0) {
+      lotPrice.textContent = formatPrice(lot.price);
+      var showOld = lot.discount > 0 && lot.basePrice > lot.price;
+      lotPriceOld.hidden = !showOld;
+      if (showOld) lotPriceOld.textContent = formatPrice(lot.basePrice);
+    } else {
+      // Цена в МойСкладе бывает нулевой — оператор называет её голосом, и
+      // карточка обновится следующим тиком. Пустое поле честнее, чем «0 ₽».
+      lotPrice.textContent = 'Цена — в эфире';
+      lotPriceOld.hidden = true;
+    }
+
+    var meta = [];
+    if (typeof lot.availableStock === 'number') meta.push('В наличии: ' + lot.availableStock + ' шт');
+    if (lot.category) meta.push(lot.category);
+    lotMeta.textContent = meta.join(' · ');
+
+    lotHint.textContent = closed ? '' : 'Бронь: напишите в чат «бронь ' + lot.code + '»';
+
+    if (lot.photoUrl) {
+      lotPhoto.src = lot.photoUrl;
+      lotPhoto.hidden = false;
+    } else {
+      lotPhoto.removeAttribute('src');
+      lotPhoto.hidden = true;
+    }
+    lotCard.hidden = false;
+  }
+
   function poll() {
     if (polling) return;
     polling = true;
     var url = API + '/messages' + (lastSeq === null ? '' : '?after=' + lastSeq);
     fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+      renderLot(data.lot || null);
       var items = data.messages || [];
       // appendMessages двигает lastSeq по каждому реально полученному
       // сообщению. На latestSeq (глобальный максимум) не прыгаем: выдача

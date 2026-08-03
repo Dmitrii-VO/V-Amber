@@ -16,6 +16,7 @@ import { parseQuantityCommand } from "./quantity-command-parser.js";
 import { matchNameAgainst } from "./name-matcher.js";
 import { createAuth } from "./auth.js";
 import { createChatClient } from "./chat-client.js";
+import { createViewerLotPublisher } from "./viewer-lot.js";
 import { resolveKnownCode } from "./product-code-resolver.js";
 import { createCommentFloodGuard } from "./comment-flood-guard.js";
 import {
@@ -175,6 +176,13 @@ export function attachWsServer(httpServer, config, services = {}) {
     websocket.connectionId = connectionId;
     websocket.on("pong", () => { websocket.isAlive = true; });
     const sessionLog = createSessionLogImpl();
+    // Карточка активного лота на странице зрителя /efir/ (аналог карточки в
+    // VK-комментариях). Синхронизируется из emitState(), дедупит сама.
+    const viewerLot = services.viewerLotPublisher || createViewerLotPublisher({
+      chatClient,
+      logger,
+      connectionId,
+    });
     let session = null;
     let activeLot = null;
     const openLotsBySessionId = new Map();
@@ -341,6 +349,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           connectionId,
         });
       }
+      // Зрители на своей площадке видят лот здесь же: одна точка входа на все
+      // изменения лота (открытие, цена голосом, скидка, закрытие), поэтому
+      // отдельных вызовов рядом с каждым vk.publish* не нужно.
+      viewerLot.sync(activeLot);
       emitStateSnapshot();
     }
 
@@ -386,6 +398,10 @@ export function attachWsServer(httpServer, config, services = {}) {
       // перезапуска поллер перечитает комментарии и выдаст новые.
       pendingAttentionReservations.clear();
       attentionReservationsInFlight.clear();
+      // Эфир остановлен/сокет закрыт — карточка лота у зрителей не должна
+      // висеть до следующего эфира (сюда попадает и close, где emitState()
+      // уже некому вызвать).
+      viewerLot.clear();
       voicePipeline.resetTriggerWindow("detection_state_reset");
     }
 

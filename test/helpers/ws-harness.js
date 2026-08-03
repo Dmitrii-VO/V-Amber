@@ -122,6 +122,7 @@ export function createChatClientMock() {
   const queue = [];
   const serviceMessages = [];
   const feedCalls = [];
+  const lotPublications = [];
   let latestSeq = 0;
   return {
     enabled: true,
@@ -135,6 +136,21 @@ export function createChatClientMock() {
     async postServiceMessage(text) {
       serviceMessages.push(text);
       return { ok: true };
+    },
+    // Карточка лота на /efir/ (см. server/viewer-lot.js).
+    async publishLot(payload) {
+      lotPublications.push(payload);
+      return { ok: true };
+    },
+    lotPublications,
+    async waitForLot(predicate, { timeoutMs = 2000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const found = lotPublications.find((p) => predicate(p));
+        if (found) return found;
+        if (Date.now() > deadline) throw new Error("waitForLot timed out");
+        await new Promise((r) => setTimeout(r, 5));
+      }
     },
     serviceMessages,
     pushMessage({ viewerId, name, phone = "", text }) {
