@@ -93,6 +93,30 @@ export function createChatClient(chatConfig = {}) {
       }
     },
 
+    // Карточка текущего лота для страницы /efir/ — то, что в VK делает
+    // publishLotCard. { lot: null } убирает карточку. Фото шлём байтами:
+    // картинка МойСклада доступна только под авторизацией, публичной ссылки
+    // на неё нет. Best-effort, как и остальной канал чата.
+    async publishLot(payload) {
+      try {
+        const response = await fetchWithTimeout(`${apiUrl}/lot`, {
+          method: "POST",
+          token,
+          body: payload,
+          timeoutMs,
+        });
+        if (!response.ok) {
+          return { ok: false, error: `chat lot status ${response.status}` };
+        }
+        return { ok: true };
+      } catch (error) {
+        const message = error?.name === "AbortError"
+          ? `chat lot timed out after ${timeoutMs}ms`
+          : error?.message || String(error);
+        return { ok: false, error: message };
+      }
+    },
+
     // Оператор выбрал «Новая сессия» при старте своего эфира — помечает
     // границу в chat-service; /chat/messages перестаёт отдавать что-либо
     // раньше неё (см. knowledge/wiki/stream-integration.md).

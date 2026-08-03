@@ -105,6 +105,59 @@
   }
   .unmute.show { display: block; }
 
+  /* ── Правая колонка: карточка лота + чат ── */
+  .side {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+  }
+  .lot {
+    display: flex;
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--amber);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .lot[hidden] { display: none; }
+  .lot--closed { border-left-color: var(--border); opacity: .65; }
+  .lot-photo {
+    width: 84px;
+    height: 84px;
+    flex: none;
+    border-radius: 8px;
+    background: var(--panel-2);
+    object-fit: cover;
+  }
+  .lot-photo[hidden] { display: none; }
+  .lot-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .lot-code {
+    font-size: 12px;
+    letter-spacing: .04em;
+    color: var(--amber);
+    font-weight: 700;
+  }
+  .lot--closed .lot-code { color: var(--muted); }
+  .lot-title {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.25;
+    word-break: break-word;
+  }
+  .lot-price { font-size: 18px; font-weight: 700; }
+  .lot-price-old {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--muted);
+    text-decoration: line-through;
+    margin-left: 8px;
+  }
+  .lot-price-old[hidden] { display: none; }
+  .lot-meta { font-size: 12px; color: var(--muted); }
+  .lot-hint { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
   /* ── Чат ── */
   .chat {
     position: relative;
@@ -262,6 +315,21 @@
     <button id="unmute" class="unmute">🔊 Включить звук</button>
   </div>
 
+  <aside class="side">
+  <section id="lotCard" class="lot" hidden>
+    <img id="lotPhoto" class="lot-photo" alt="" hidden>
+    <div class="lot-body">
+      <div id="lotCode" class="lot-code"></div>
+      <div id="lotTitle" class="lot-title"></div>
+      <div class="lot-price">
+        <span id="lotPrice"></span>
+        <span id="lotPriceOld" class="lot-price-old" hidden></span>
+      </div>
+      <div id="lotMeta" class="lot-meta"></div>
+      <div id="lotHint" class="lot-hint"></div>
+    </div>
+  </section>
+
   <section class="chat">
     <div class="chat-head">
       <span>Чат эфира</span>
@@ -290,6 +358,7 @@
       <div id="joinError" class="chat-error"></div>
     </div>
   </section>
+  </aside>
 </main>
 <footer>Если видео не запускается — обновите страницу</footer>
 

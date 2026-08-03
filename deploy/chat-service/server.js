@@ -19,7 +19,7 @@
 
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const PORT = Number(process.env.PORT) || 8890;
@@ -39,6 +39,13 @@ const MESSAGE_RATE_MS = 1500; // мин. интервал между сообщ�
 const JOIN_RATE_PER_MIN = 5;  // максимум join'ов с одного IP в минуту
 const PUBLIC_PAGE_SIZE = 100;
 const SERVICE_NAME = "Янтарь";
+// Карточка лота: фото приходит от V-Amber байтами (МойСклад отдаёт картинку
+// только под авторизацией, публичной ссылки на неё не существует), поэтому
+// тело POST /chat/lot заметно больше остальных.
+const LOT_BODY_LIMIT = 3_000_000;
+const MAX_LOT_PHOTO_BYTES = 1_500_000;
+const MAX_LOT_TEXT_LENGTH = 120;
+const LOT_STATUSES = new Set(["open", "closed"]);
 
 if (!OPERATOR_TOKEN) {
   console.error("OPERATOR_TOKEN is required (X-Chat-Token secret for the operator feed)");
@@ -48,6 +55,8 @@ if (!OPERATOR_TOKEN) {
 mkdirSync(DATA_DIR, { recursive: true });
 const viewersPath = join(DATA_DIR, "viewers.jsonl");
 const messagesPath = join(DATA_DIR, "messages.jsonl");
+const lotPath = join(DATA_DIR, "lot.jsonl");
+const lotPhotoPath = join(DATA_DIR, "lot-photo.bin");
 
 // ── Состояние (грузится из JSONL при старте; каждый чат-эфир — сотни строк,
 // целиком в памяти это копейки) ─────────────────────────────────────────────
@@ -88,6 +97,29 @@ loadJsonl(messagesPath, (record) => {
   messages.push(record);
   lastSeq = Math.max(lastSeq, record.seq);
   if (record.kind === "session") sessionStartSeq = Math.max(sessionStartSeq, record.seq);
+});
+
+// ── Текущий лот ─────────────────────────────────────────────────────────────
+// Оператор называет артикул в эфире → V-Amber шлёт сюда карточку, страница
+// /efir/ показывает её закреплённой над чатом. Хранится ОДНА текущая карточка
+// (это состояние, а не лента): lot.jsonl — журнал для восстановления после
+// рестарта контейнера, актуальна последняя строка. Фото лежит отдельным
+// файлом, а не в json: base64 картинки раздул бы журнал в разы.
+let currentLot = null;   // публичная карточка (то, что отдаём зрителям)
+let lotPhoto = null;     // {buffer, contentType} последнего фото
+let lotRev = 0;          // растёт на каждое обновление — им же бьётся кэш фото
+
+loadJsonl(lotPath, (record) => {
+  if (!Number.isFinite(record?.rev)) return;
+  lotRev = Math.max(lotRev, record.rev);
+  currentLot = record.lot || null;
+  if (record.lot && record.photoContentType && existsSync(lotPhotoPath)) {
+    try {
+      lotPhoto = { buffer: readFileSync(lotPhotoPath), contentType: record.photoContentType };
+    } catch { lotPhoto = null; }
+  } else if (!record.lot) {
+    lotPhoto = null;
+  }
 });
 
 // ── Рейт-лимиты (в памяти; сброс при рестарте допустим) ────────────────────
@@ -171,13 +203,13 @@ function sendJson(response, status, payload) {
   response.end(body);
 }
 
-function readJsonBody(request) {
+function readJsonBody(request, maxBytes = 4096) {
   return new Promise((resolve) => {
     let size = 0;
     const chunks = [];
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > 4096) {
+      if (size > maxBytes) {
         resolve(null);
         request.destroy();
         return;
@@ -216,6 +248,75 @@ function publicMessage(record) {
   return { seq: record.seq, ts: record.ts, name: record.name, text: record.text, kind: record.kind };
 }
 
+// ── Карточка лота ──────────────────────────────────────────────────────────
+function lotText(raw) {
+  return String(raw || "").replace(/\s+/g, " ").trim().slice(0, MAX_LOT_TEXT_LENGTH);
+}
+
+function lotNumber(raw) {
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+// Всё, что приходит от V-Amber, попадает на публичную страницу, поэтому
+// нормализуем строго по белому списку полей: страница рисует их textContent'ом,
+// но лишние/огромные поля тут не нужны в любом случае.
+function normalizeLot(raw) {
+  const code = lotText(raw?.code);
+  if (!code) return null;
+  return {
+    code,
+    name: lotText(raw?.name),
+    category: lotText(raw?.category),
+    price: lotNumber(raw?.price),
+    basePrice: lotNumber(raw?.basePrice),
+    discount: lotNumber(raw?.discount),
+    availableStock: lotNumber(raw?.availableStock),
+    status: LOT_STATUSES.has(raw?.status) ? raw.status : "open",
+  };
+}
+
+function decodeLotPhoto(raw) {
+  const base64 = String(raw?.base64 || "");
+  if (!base64) return null;
+  const buffer = Buffer.from(base64, "base64");
+  if (buffer.length === 0 || buffer.length > MAX_LOT_PHOTO_BYTES) return null;
+  const contentType = String(raw?.contentType || "");
+  return {
+    buffer,
+    contentType: /^image\/[a-z0-9.+-]+$/i.test(contentType) ? contentType : "image/jpeg",
+  };
+}
+
+// photo === undefined — фото не трогаем (обновление цены/статуса того же лота
+// приходит без картинки); photo === null — снимаем.
+function setCurrentLot(lot, photo) {
+  lotRev += 1;
+  if (photo !== undefined) {
+    lotPhoto = photo;
+    if (photo) {
+      writeFileSync(lotPhotoPath, photo.buffer);
+    }
+  }
+  if (!lot) {
+    lotPhoto = null;
+  }
+  currentLot = lot
+    ? { ...lot, rev: lotRev, ts: Date.now(), photoUrl: lotPhoto ? `/chat/lot/photo?rev=${lotRev}` : "" }
+    : null;
+  appendFileSync(
+    lotPath,
+    JSON.stringify({
+      rev: lotRev,
+      ts: Date.now(),
+      lot: currentLot,
+      photoContentType: lotPhoto?.contentType || "",
+    }) + "\n",
+    "utf8",
+  );
+  return currentLot;
+}
+
 // ── Роутинг ────────────────────────────────────────────────────────────────
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
@@ -224,7 +325,11 @@ const server = createServer(async (request, response) => {
   try {
     if (route === "GET /chat/health") {
       return sendJson(response, 200, {
-        ok: true, messages: messages.length, viewers: viewersById.size, sessionStartSeq,
+        ok: true,
+        messages: messages.length,
+        viewers: viewersById.size,
+        sessionStartSeq,
+        lot: currentLot ? { code: currentLot.code, status: currentLot.status, rev: currentLot.rev } : null,
       });
     }
 
@@ -387,7 +492,42 @@ const server = createServer(async (request, response) => {
       const slice = afterParam !== null && Number.isFinite(after)
         ? inSession.filter((m) => m.seq > after).slice(0, PUBLIC_PAGE_SIZE)
         : inSession.slice(-50);
-      return sendJson(response, 200, { latestSeq: lastSeq, messages: slice.map(publicMessage) });
+      // Карточку лота отдаём вместе с сообщениями: страница /efir/ и так
+      // опрашивает этот эндпоинт раз в 3 секунды, второй поллер ради лота был
+      // бы лишним трафиком на том же интервале.
+      return sendJson(response, 200, {
+        latestSeq: lastSeq,
+        messages: slice.map(publicMessage),
+        lot: currentLot,
+      });
+    }
+
+    if (route === "GET /chat/lot") {
+      return sendJson(response, 200, { lot: currentLot });
+    }
+
+    if (route === "GET /chat/lot/photo") {
+      if (!lotPhoto) return sendJson(response, 404, { error: "no photo" });
+      response.writeHead(200, {
+        "Content-Type": lotPhoto.contentType,
+        "Content-Length": lotPhoto.buffer.length,
+        // Каждая карточка приезжает со своим rev в URL, поэтому саму картинку
+        // можно кэшировать надолго — новый лот придёт по новому адресу.
+        "Cache-Control": "public, max-age=86400",
+      });
+      return response.end(lotPhoto.buffer);
+    }
+
+    // V-Amber: оператор назвал артикул / изменил цену / закрыл лот.
+    // { lot: {...} } — показать карточку, { lot: null } — убрать.
+    if (route === "POST /chat/lot") {
+      if (!isOperator(request)) return sendJson(response, 401, { error: "unauthorized" });
+      const body = await readJsonBody(request, LOT_BODY_LIMIT);
+      if (body === null) return sendJson(response, 400, { error: "bad body" });
+      const lot = body.lot === null ? null : normalizeLot(body.lot);
+      if (body.lot !== null && !lot) return sendJson(response, 400, { error: "bad lot" });
+      const photo = body.photo === undefined ? undefined : decodeLotPhoto(body.photo);
+      return sendJson(response, 200, { lot: setCurrentLot(lot, photo) });
     }
 
     if (route === "GET /chat/feed") {
@@ -428,6 +568,8 @@ const server = createServer(async (request, response) => {
       if (!isOperator(request)) return sendJson(response, 401, { error: "unauthorized" });
       const record = appendMessage({ viewerId: null, name: SERVICE_NAME, text: "Новая сессия", kind: "session" });
       sessionStartSeq = record.seq;
+      // Карточка прошлого эфира не должна висеть над чистым чатом.
+      setCurrentLot(null, null);
       return sendJson(response, 200, { seq: record.seq });
     }
 
