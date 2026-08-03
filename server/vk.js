@@ -746,6 +746,35 @@ export function createVkPublisher(config) {
       );
     },
 
+    // Подсказка зрителям ВК про запасной экран на своей площадке. Отдельный
+    // метод, а не publishViewerInstruction: у него своё расписание, свой гейт
+    // (публикуем, только когда своя площадка реально в эфире) и свой kind в
+    // логах — иначе разбор эфира не отличит одно от другого.
+    async publishCrossPromo(message) {
+      if (!isEnabled || !message) {
+        logger.info("vk", "publish_skipped_not_configured", {
+          kind: "cross_promo",
+          hasUserToken: Boolean(userToken),
+          ownerId: liveOwnerId || null,
+          videoId: liveVideoId || null,
+        });
+        return { ok: false, skipped: true };
+      }
+
+      return sendWithRetry(
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+          message,
+        }), videoToken),
+        {
+          kind: "cross_promo",
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+        },
+      );
+    },
+
     async publishPriceUpdate(activeLot) {
       if (!isEnabled || !activeLot?.lotSessionId) {
         logger.info("vk", "publish_skipped_not_configured", {

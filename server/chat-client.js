@@ -117,6 +117,29 @@ export function createChatClient(chatConfig = {}) {
       }
     },
 
+    // Состояние эфира для страницы зрителя: сейчас это ссылка на зеркало в ВК
+    // для плашки под плеером. Пустая строка убирает плашку. На той стороне у
+    // состояния есть TTL — если V-Amber замолчал, плашка гаснет сама.
+    async publishBroadcastState(state) {
+      try {
+        const response = await fetchWithTimeout(`${apiUrl}/state`, {
+          method: "POST",
+          token,
+          body: state,
+          timeoutMs,
+        });
+        if (!response.ok) {
+          return { ok: false, error: `chat state status ${response.status}` };
+        }
+        return { ok: true };
+      } catch (error) {
+        const message = error?.name === "AbortError"
+          ? `chat state timed out after ${timeoutMs}ms`
+          : error?.message || String(error);
+        return { ok: false, error: message };
+      }
+    },
+
     // Оператор выбрал «Новая сессия» при старте своего эфира — помечает
     // границу в chat-service; /chat/messages перестаёт отдавать что-либо
     // раньше неё (см. knowledge/wiki/stream-integration.md).
