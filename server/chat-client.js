@@ -117,6 +117,30 @@ export function createChatClient(chatConfig = {}) {
       }
     },
 
+    // «Карточка всё ещё актуальна»: у карточки на той стороне есть TTL, и без
+    // этого пинга она погаснет у зрителей, даже пока лот висит в эфире без
+    // изменений. Тело без лота и фото — rev карточки не меняется, значит и
+    // картинку зрителям не перекачивать.
+    async confirmLot() {
+      try {
+        const response = await fetchWithTimeout(`${apiUrl}/lot`, {
+          method: "POST",
+          token,
+          body: { keepalive: true },
+          timeoutMs,
+        });
+        if (!response.ok) {
+          return { ok: false, error: `chat lot keepalive status ${response.status}` };
+        }
+        return { ok: true };
+      } catch (error) {
+        const message = error?.name === "AbortError"
+          ? `chat lot keepalive timed out after ${timeoutMs}ms`
+          : error?.message || String(error);
+        return { ok: false, error: message };
+      }
+    },
+
     // Состояние эфира для страницы зрителя: сейчас это ссылка на зеркало в ВК
     // для плашки под плеером. Пустая строка убирает плашку. На той стороне у
     // состояния есть TTL — если V-Amber замолчал, плашка гаснет сама.

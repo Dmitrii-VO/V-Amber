@@ -22,6 +22,14 @@ import { getLotEffectivePrice } from "./ws-helpers.js";
 // ловим 400 на той стороне.
 export const MAX_LOT_PHOTO_BYTES = 1_500_000;
 
+// Как часто подтверждаем карточку, пока она висит без изменений. Карточка на
+// той стороне персистится, но показывается зрителям только пока подтверждается
+// (LOT_TTL_MS в deploy/chat-service/server.js, 20 минут — четыре такта): если
+// V-Amber упал или ноутбук закрыли, не остановив эфир, зритель не должен до
+// следующего эфира смотреть на лот со старой ценой. Дедуп по сигнатуре тут не
+// поможет — он как раз про «ничего не изменилось».
+export const LOT_HEARTBEAT_MS = 5 * 60_000;
+
 function positiveNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : 0;
@@ -75,13 +83,56 @@ function buildPhotoPayload(lot) {
   };
 }
 
-export function createViewerLotPublisher({ chatClient, logger, connectionId = null } = {}) {
+export function createViewerLotPublisher({
+  chatClient,
+  logger,
+  connectionId = null,
+  heartbeatMs = LOT_HEARTBEAT_MS,
+} = {}) {
   const enabled = Boolean(chatClient?.enabled && chatClient.publishLot);
   let lastSignature = null;
   let publishedPhotoCode = null;
   let lastOpenLot = null;
   let inFlight = false;
   let pendingLot;
+  let heartbeatTimer = null;
+  let heartbeatOn = false;
+
+  function stopHeartbeat() {
+    heartbeatOn = false;
+    if (heartbeatTimer) {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  }
+
+  // setTimeout цепочкой, а не setInterval: такт делает сетевой запрос, и пауза
+  // должна отсчитываться от его конца — тот же приём, что в cross-promo.js.
+  function scheduleHeartbeat() {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(async () => {
+      heartbeatTimer = null;
+      if (!heartbeatOn) return;
+      const result = await chatClient.confirmLot()
+        .catch((error) => ({ ok: false, error: error?.message || String(error) }));
+      if (!result?.ok) {
+        logger?.warn?.("chat", "lot_card_keepalive_failed", {
+          connectionId,
+          error: result?.error || "unknown",
+        });
+      }
+      // Промах такта цикл не рвёт: TTL на той стороне с запасом в несколько
+      // тактов, и одна сетевая ошибка не должна гасить карточку в эфире.
+      if (heartbeatOn) scheduleHeartbeat();
+    }, heartbeatMs);
+    heartbeatTimer.unref?.();
+  }
+
+  function startHeartbeat() {
+    if (typeof chatClient?.confirmLot !== "function") return;
+    heartbeatOn = true;
+    scheduleHeartbeat();
+  }
 
   async function send(lot) {
     // Лот закрылся, а следующий ещё не назван: показываем ту же карточку со
@@ -133,6 +184,11 @@ export function createViewerLotPublisher({ chatClient, logger, connectionId = nu
       withPhoto: Boolean(payload.photo),
       cleared: snapshot === null,
     });
+    // Пока карточка висит (в том числе закрытая), её надо подтверждать; после
+    // снятия подтверждать нечего. Отсчёт идёт от последней публикации —
+    // она сама по себе и есть подтверждение.
+    if (snapshot) startHeartbeat();
+    else stopHeartbeat();
   }
 
   async function drain() {
@@ -169,6 +225,7 @@ export function createViewerLotPublisher({ chatClient, logger, connectionId = nu
     // Эфир закончился/перезапущен — снять карточку и забыть память дедупа.
     clear() {
       if (!enabled) return;
+      stopHeartbeat();
       lastSignature = null;
       lastOpenLot = null;
       pendingLot = null;
