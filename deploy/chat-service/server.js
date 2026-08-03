@@ -51,6 +51,12 @@ const LOT_STATUSES = new Set(["open", "closed"]);
 // подтверждает его каждые ~5 минут, и если он замолчал (упал, закрыли ноутбук,
 // кончился эфир), плашка со ссылкой на давно погасший ВК-эфир гаснет сама.
 const BROADCAST_STATE_TTL_MS = Number(process.env.BROADCAST_STATE_TTL_MS) || 12 * 60_000;
+// Карточка лота персистится и живёт долго (один лот держится в эфире минутами),
+// поэтому «протухание по возрасту карточки» тут не годится. Считаем не возраст
+// карточки, а возраст последнего подтверждения от V-Amber: он шлёт keepalive
+// каждые ~5 минут, пока карточка висит. TTL взят с большим запасом (4 такта) —
+// пара потерянных keepalive'ов из-за сети не должна гасить карточку в эфире.
+const LOT_TTL_MS = Number(process.env.LOT_TTL_MS) || 20 * 60_000;
 
 if (!OPERATOR_TOKEN) {
   console.error("OPERATOR_TOKEN is required (X-Chat-Token secret for the operator feed)");
@@ -110,14 +116,22 @@ loadJsonl(messagesPath, (record) => {
 // (это состояние, а не лента): lot.jsonl — журнал для восстановления после
 // рестарта контейнера, актуальна последняя строка. Фото лежит отдельным
 // файлом, а не в json: base64 картинки раздул бы журнал в разы.
+// Персистентность не означает «навсегда»: карточка видна зрителям, только пока
+// V-Amber подтверждает её (POST /chat/lot, в т.ч. keepalive) — см. LOT_TTL_MS.
 let currentLot = null;   // публичная карточка (то, что отдаём зрителям)
 let lotPhoto = null;     // {buffer, contentType} последнего фото
 let lotRev = 0;          // растёт на каждое обновление — им же бьётся кэш фото
+let lotConfirmedAt = 0;  // когда V-Amber в последний раз подтвердил карточку
 
 loadJsonl(lotPath, (record) => {
   if (!Number.isFinite(record?.rev)) return;
   lotRev = Math.max(lotRev, record.rev);
   currentLot = record.lot || null;
+  // Восстановленной из журнала карточке возраст НЕ обнуляем: рестарт
+  // контейнера — не подтверждение от V-Amber. Если эфир идёт, keepalive
+  // придёт в ближайшие минуты; если нет — карточка прошлого эфира не
+  // всплывёт вместе с контейнером.
+  lotConfirmedAt = Number.isFinite(record.ts) ? record.ts : 0;
   if (record.lot && record.photoContentType && existsSync(lotPhotoPath)) {
     try {
       lotPhoto = { buffer: readFileSync(lotPhotoPath), contentType: record.photoContentType };
@@ -325,6 +339,7 @@ function decodeLotPhoto(raw) {
 // приходит без картинки); photo === null — снимаем.
 function setCurrentLot(lot, photo) {
   lotRev += 1;
+  lotConfirmedAt = Date.now();
   if (photo !== undefined) {
     lotPhoto = photo;
     if (photo) {
@@ -350,6 +365,16 @@ function setCurrentLot(lot, photo) {
   return currentLot;
 }
 
+// Карточка, как её видит зритель: пока V-Amber подтверждает её keepalive'ами —
+// это `currentLot`, а если он замолчал (упал, закрыли ноутбук, эфир кончился
+// без остановки) — ничего. Проверка read-only: ни `currentLot`, ни фото не
+// стираем, поэтому вернувшийся V-Amber поднимает ту же карточку одним
+// keepalive, а не полной пересылкой лота с фотографией.
+function currentLotCard() {
+  if (!currentLot) return null;
+  return Date.now() - lotConfirmedAt > LOT_TTL_MS ? null : currentLot;
+}
+
 // ── Роутинг ────────────────────────────────────────────────────────────────
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
@@ -362,7 +387,9 @@ const server = createServer(async (request, response) => {
         messages: messages.length,
         viewers: viewersById.size,
         sessionStartSeq,
-        lot: currentLot ? { code: currentLot.code, status: currentLot.status, rev: currentLot.rev } : null,
+        lot: currentLotCard()
+          ? { code: currentLot.code, status: currentLot.status, rev: currentLot.rev }
+          : null,
         vkMirror: Boolean(currentBroadcastState().vkMirrorUrl),
       });
     }
@@ -532,7 +559,7 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, {
         latestSeq: lastSeq,
         messages: slice.map(publicMessage),
-        lot: currentLot,
+        lot: currentLotCard(),
         broadcast: currentBroadcastState(),
       });
     }
@@ -552,7 +579,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (route === "GET /chat/lot") {
-      return sendJson(response, 200, { lot: currentLot });
+      return sendJson(response, 200, { lot: currentLotCard() });
     }
 
     if (route === "GET /chat/lot/photo") {
@@ -568,11 +595,18 @@ const server = createServer(async (request, response) => {
     }
 
     // V-Amber: оператор назвал артикул / изменил цену / закрыл лот.
-    // { lot: {...} } — показать карточку, { lot: null } — убрать.
+    // { lot: {...} } — показать карточку, { lot: null } — убрать,
+    // { keepalive: true } — «карточка всё ещё актуальна» (см. LOT_TTL_MS).
     if (route === "POST /chat/lot") {
       if (!isOperator(request)) return sendJson(response, 401, { error: "unauthorized" });
       const body = await readJsonBody(request, LOT_BODY_LIMIT);
       if (body === null) return sendJson(response, 400, { error: "bad body" });
+      if (body.keepalive === true) {
+        // Ни rev, ни журнал не трогаем: rev сидит в URL фото, и его рост на
+        // каждом такте гонял бы зрителям картинку заново раз в 5 минут.
+        if (currentLot) lotConfirmedAt = Date.now();
+        return sendJson(response, 200, { lot: currentLotCard() });
+      }
       const lot = body.lot === null ? null : normalizeLot(body.lot);
       if (body.lot !== null && !lot) return sendJson(response, 400, { error: "bad lot" });
       const photo = body.photo === undefined ? undefined : decodeLotPhoto(body.photo);

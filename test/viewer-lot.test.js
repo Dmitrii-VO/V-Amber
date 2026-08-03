@@ -30,11 +30,17 @@ function makeLot(overrides = {}) {
 
 function makeChatClient() {
   const calls = [];
+  const keepalives = [];
   return {
     enabled: true,
     calls,
+    keepalives,
     async publishLot(payload) {
       calls.push(payload);
+      return { ok: true };
+    },
+    async confirmLot() {
+      keepalives.push(Date.now());
       return { ok: true };
     },
   };
@@ -192,6 +198,74 @@ test("publisher: ошибка чата не бросает и не блокир�
   publisher.sync(lot);
   await flush();
   assert.equal(calls.length, 2);
+});
+
+test("publisher: карточка подтверждается keepalive'ами, пока лот висит без изменений", async () => {
+  const chatClient = makeChatClient();
+  const publisher = createViewerLotPublisher({ chatClient, logger: silentLog, heartbeatMs: 20 });
+
+  publisher.sync(makeLot());
+  await flush();
+  await delay(70);
+
+  // Ни одной новой публикации лота — только подтверждения (rev карточки не
+  // меняется, зрителям не перекачивать фото).
+  assert.equal(chatClient.calls.length, 1);
+  assert.ok(chatClient.keepalives.length >= 2, `keepalives: ${chatClient.keepalives.length}`);
+  publisher.clear();
+  await flush();
+});
+
+test("publisher: закрытая карточка тоже подтверждается, снятая — нет", async () => {
+  const chatClient = makeChatClient();
+  const publisher = createViewerLotPublisher({ chatClient, logger: silentLog, heartbeatMs: 20 });
+
+  publisher.sync(makeLot());
+  await flush();
+  publisher.sync(null); // лот закрыт — карточка остаётся со статусом closed
+  await flush();
+  await delay(50);
+  assert.ok(chatClient.keepalives.length >= 1);
+
+  publisher.clear();
+  await flush();
+  const afterClear = chatClient.keepalives.length;
+  await delay(60);
+  assert.equal(chatClient.keepalives.length, afterClear);
+});
+
+test("publisher: сбой keepalive не рвёт цикл подтверждений", async () => {
+  const chatClient = makeChatClient();
+  let fail = true;
+  chatClient.confirmLot = async () => {
+    chatClient.keepalives.push(Date.now());
+    if (fail) return { ok: false, error: "chat lot keepalive status 502" };
+    return { ok: true };
+  };
+  const publisher = createViewerLotPublisher({ chatClient, logger: silentLog, heartbeatMs: 20 });
+
+  publisher.sync(makeLot());
+  await flush();
+  await delay(30);
+  assert.equal(chatClient.keepalives.length >= 1, true);
+  fail = false;
+  await delay(50);
+  assert.ok(chatClient.keepalives.length >= 2);
+  publisher.clear();
+  await flush();
+});
+
+test("publisher: клиент без confirmLot работает как раньше, без подтверждений", async () => {
+  const chatClient = makeChatClient();
+  delete chatClient.confirmLot;
+  const publisher = createViewerLotPublisher({ chatClient, logger: silentLog, heartbeatMs: 20 });
+
+  publisher.sync(makeLot());
+  await flush();
+  await delay(50);
+  assert.equal(chatClient.calls.length, 1);
+  publisher.clear();
+  await flush();
 });
 
 test("publisher: без настроенного чата ничего не делает", async () => {
