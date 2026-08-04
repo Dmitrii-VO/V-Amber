@@ -608,10 +608,27 @@ export function attachWsServer(httpServer, config, services = {}) {
       return state.seenCommentIds.has(commentId);
     }
 
+    // Раньше здесь стояло state.events.slice(-20). Обрезка выглядела защитой
+    // памяти, но events — не лог, а РАБОЧЕЕ состояние лота, и вытесненные
+    // события ломали расчёты на популярных лотах (>20 броней):
+    //
+    // - backfillLotPositionPricing переставал пересчитывать ранние позиции —
+    //   покупатель платил цену без объявленной скидки;
+    // - продвижение очереди: waitlist_pending — короткое состояние, пока
+    //   предыдущая бронь пишется в МойСклад, а следующий ждёт своей очереди
+    //   (state.events.find по этому же массиву). Вытесненного обрезкой
+    //   покупателя никто уже не продвинет — его бронь молча зависает;
+    // - flushOrphanWaitlist не переносил их в лист ожидания при закрытии лота;
+    // - extractOrphans в state-store.js не видел их при восстановлении
+    //   после падения.
+    //
+    // committedReservationCount выше — след прошлой попытки закрыть один из
+    // этих симптомов (счётчик для stock guard), а не причину.
+    //
+    // Роста памяти тут нет: массив живёт на ОДИН лот, а не на весь эфир.
     function addReservationEvent(lot, event) {
       const state = ensureReservationState(lot);
       state.events.push(event);
-      state.events = state.events.slice(-20);
     }
 
     // Поиск открытого лота по произнесённому коду для voice cancel/quantity.
