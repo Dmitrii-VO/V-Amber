@@ -48,6 +48,15 @@
     padding: 3px 8px;
   }
   .badge.on { display: inline-flex; }
+  /* «Сейчас смотрят»: спокойная серая строка рядом с заголовком — зритель
+     видит, что в зале есть люди, но внимание это не оттягивает. */
+  .viewers {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    color: var(--muted);
+  }
   .badge .dot {
     width: 7px; height: 7px; border-radius: 50%;
     background: #fff;
@@ -334,6 +343,7 @@
 <header>
   <h1>Прямой эфир</h1>
   <span id="liveBadge" class="badge"><span class="dot"></span>В ЭФИРЕ</span>
+  <span id="viewerCount" class="viewers" hidden></span>
 </header>
 <main>
   <div class="stage">

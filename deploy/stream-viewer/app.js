@@ -157,6 +157,7 @@
   var API = '/chat';
   var POLL_MS = 3000;
   var STORAGE_KEY = 'efirChat';
+  var CLIENT_KEY = 'efirClientId';
 
   var log = document.getElementById('chatLog');
   var form = document.getElementById('chatForm');
@@ -179,6 +180,8 @@
   var lotPriceOld = document.getElementById('lotPriceOld');
   var lotMeta = document.getElementById('lotMeta');
   var lotHint = document.getElementById('lotHint');
+
+  var viewerCount = document.getElementById('viewerCount');
 
   var mirrorBar = document.getElementById('mirrorBar');
   var mirrorLink = document.getElementById('mirrorLink');
@@ -212,6 +215,18 @@
   }
 
   try { auth = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) { auth = null; }
+
+  // Случайный идентификатор вкладки-браузера для счётчика «сейчас смотрят».
+  // Не привязан к человеку и не уходит никуда, кроме заголовка X-Efir-Client
+  // на опросе чата: сервису он нужен только чтобы перезагрузка страницы и
+  // вторая вкладка не считались двумя зрителями. Приватный режим/запрет
+  // localStorage — id живёт в памяти вкладки, счётчик всё равно работает.
+  var clientId = '';
+  try { clientId = localStorage.getItem(CLIENT_KEY) || ''; } catch (e) { clientId = ''; }
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) {
+    clientId = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+    try { localStorage.setItem(CLIENT_KEY, clientId); } catch (e) { /* приватный режим */ }
+  }
 
   // Кнопка «Войти через VK» — только если у сервиса настроен VK ID.
   // Вход по телефону временно скрыт (joinPhoneBlock hidden в index.html) —
@@ -301,6 +316,31 @@
     renderMirror();
   };
 
+  // «1 зритель / 2 зрителя / 5 зрителей». Счётчик считает открытые страницы
+  // /efir/ (опрос чата с TTL на стороне сервиса), а не читателей HLS: зритель,
+  // ушедший смотреть в ВК по плашке-зеркалу, страницу обычно не закрывает.
+  function formatViewers(count) {
+    var mod100 = count % 100;
+    var mod10 = count % 10;
+    var word = 'зрителей';
+    if (mod100 < 11 || mod100 > 14) {
+      if (mod10 === 1) word = 'зритель';
+      else if (mod10 >= 2 && mod10 <= 4) word = 'зрителя';
+    }
+    return count + ' ' + word;
+  }
+
+  function renderViewers(count) {
+    // 0 не показываем: сам зритель уже как минимум один, ноль означает лишь
+    // что сервис ещё не успел его засчитать (или отдал старый формат ответа).
+    if (!(count > 0)) {
+      viewerCount.hidden = true;
+      return;
+    }
+    viewerCount.textContent = '👁 ' + formatViewers(count);
+    viewerCount.hidden = false;
+  }
+
   function formatPrice(value) {
     // 2290 → «2 290 ₽»; Intl есть во всех целевых браузерах, но узкий
     // неразрывный пробел местами рисуется квадратом — ставим обычный NBSP.
@@ -356,8 +396,10 @@
     if (polling) return;
     polling = true;
     var url = API + '/messages' + (lastSeq === null ? '' : '?after=' + lastSeq);
-    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+    fetch(url, { headers: { 'X-Efir-Client': clientId } })
+      .then(function (r) { return r.json(); }).then(function (data) {
       renderLot(data.lot || null);
+      renderViewers(typeof data.online === 'number' ? data.online : 0);
       var nextMirror = (data.broadcast && data.broadcast.vkMirrorUrl) || '';
       if (nextMirror !== mirrorUrl) {
         mirrorUrl = nextMirror;
