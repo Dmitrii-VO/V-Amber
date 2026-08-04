@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startHarness, createMoyskladMock } from "./helpers/ws-harness.js";
+import { startHarness, createMoyskladMock, createChatClientMock } from "./helpers/ws-harness.js";
 import { setSafeMode } from "../server/safe-mode.js";
 
 // Отмена брони комментарием покупателя, включая закрытый лот и предыдущий день
@@ -27,6 +27,11 @@ async function openUnrelatedLot(harness, client) {
   client.send({ type: "manualCode", code: "03999" });
   await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03999");
 }
+
+// Тексты ответов покупателю (server/ws-helpers.js getCancelReplyMessage).
+const replyTexts = (harness) => harness.vk
+  .callsTo("publishReservationReply")
+  .map((c) => c.args[0].message);
 
 const liveEvents = (m) => (m.activeLot?.reservations?.events || [])
   .filter((e) => e.status === "reserved" || e.status === "reserved_appended");
@@ -58,6 +63,13 @@ test("«отмена <код>» по открытому лоту снимает 
     const removed = harness.moysklad.callsTo("removePositionFromOrder");
     assert.equal(removed.length, 1);
     assert.deepEqual(removed[0].args[0], { orderId: "co-test-1", positionId: "pos-created-1" });
+
+    // Покупатель тоже должен узнать, что бронь снята: до 2026-08-04 отмена
+    // отвечала только оператору, и зритель не видел ни успеха, ни отказа.
+    assert.ok(
+      replyTexts(harness).some((t) => /бронь снята \(код 03770\)/.test(t)),
+      `ожидали ответ покупателю об отмене, получили: ${JSON.stringify(replyTexts(harness))}`,
+    );
   } finally {
     await client.close();
     await harness.close();
@@ -87,6 +99,10 @@ test("отмена по закрытому лоту снимает позици�
     assert.equal(removed.length, 1);
     assert.equal(removed[0].args[0].orderId, "co-campaign");
     assert.equal(removed[0].args[0].positionId, "pos-campaign-7");
+    assert.ok(
+      replyTexts(harness).some((t) => /бронь снята \(код 03770\)/.test(t)),
+      `ожидали ответ покупателю об отмене, получили: ${JSON.stringify(replyTexts(harness))}`,
+    );
   } finally {
     await client.close();
     await harness.close();
@@ -115,6 +131,15 @@ test("покупатель не может снять чужую бронь — 
     assert.equal(seenCounterpartyRequests[0].viewerId, 9999);
     assert.equal(seenCounterpartyRequests[0].createIfMissing, false, "контрагента ради отмены создавать нельзя");
     assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
+
+    // Ответ покупателю честный: бронь НЕ снята. «Не нашли» вместо «снято» —
+    // иначе чужой/ошибочный код читался бы как успешная отмена.
+    const texts = replyTexts(harness);
+    assert.ok(
+      texts.some((t) => /брони \(код 03770\) за вами не нашли/.test(t)),
+      `ожидали «не нашли», получили: ${JSON.stringify(texts)}`,
+    );
+    assert.ok(!texts.some((t) => /снята/.test(t)), "нельзя писать «снята», когда позиция на месте");
   } finally {
     await client.close();
     await harness.close();
@@ -138,6 +163,15 @@ test("проведённый заказ не трогаем: нет открыт
     const warning = await client.waitFor((m) => m.type === "warning" && /уже проведён/.test(m.message || ""), { timeoutMs: 6000 });
     assert.match(warning.message, /03770/);
     assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
+
+    // Проведённый заказ трогать нельзя, но покупатель должен понимать, что
+    // бронь на месте и ей займётся оператор.
+    const texts = replyTexts(harness);
+    assert.ok(
+      texts.some((t) => /не получилось снять бронь \(код 03770\) автоматически/.test(t)),
+      `ожидали «оператор проверит», получили: ${JSON.stringify(texts)}`,
+    );
+    assert.ok(!texts.some((t) => /снята/.test(t)), "нельзя писать «снята», когда позиция на месте");
   } finally {
     await client.close();
     await harness.close();
@@ -153,6 +187,12 @@ test("«отмена» без артикула ничего не снимает,
     harness.vk.pushComment({ id: 501, fromId: 5001, text: "отмена", firstName: "Марина" });
     await client.waitFor((m) => m.type === "warning" && /не назвал артикул/.test(m.message || ""), { timeoutMs: 6000 });
     assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
+
+    // Покупателю — тот же формат, что обещает инструкция зрителям.
+    assert.ok(
+      replyTexts(harness).some((t) => /напишите артикул вместе с отменой — например «отмена 03204»/.test(t)),
+      `ожидали подсказку формата, получили: ${JSON.stringify(replyTexts(harness))}`,
+    );
   } finally {
     await client.close();
     await harness.close();
@@ -204,8 +244,48 @@ test("safe mode: комментарий-отмена ничего не удал�
     harness.vk.pushComment({ id: 701, fromId: 5001, text: "отмена 03770", firstName: "Марина" });
     await client.waitFor((m) => m.type === "warning" && /safe-mode/.test(m.message || ""), { timeoutMs: 6000 });
     assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
+    // В safe-mode позиция осталась — покупателю «снята» писать нельзя.
+    assert.ok(!replyTexts(harness).some((t) => /снята/.test(t)));
   } finally {
     setSafeMode(false);
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("отмена из чата /efir/ отвечает в чат, а не в VK", async () => {
+  const chatClient = createChatClientMock();
+  const harness = await startHarness({
+    cardsByCode: { "03770": CARD },
+    knownCodes: ["03770"],
+    chatClient,
+    config: { chat: { pollMs: 50 } },
+  });
+  const client = await harness.connect();
+  const chatViewerId = 9_000_000_042;
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+    client.send({ type: "manualCode", code: "03770" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot);
+    await chatClient.waitForFeedInit();
+
+    chatClient.pushMessage({ viewerId: chatViewerId, name: "Оля Чатовая", text: "03770" });
+    await client.waitFor((m) => m.type === "state" && liveEvents(m).length > 0, { timeoutMs: 6000 });
+
+    chatClient.pushMessage({ viewerId: chatViewerId, name: "Оля Чатовая", text: "отмена 03770" });
+    await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.reservations?.events?.some((e) => e.status === "cancelled"),
+      { timeoutMs: 6000 },
+    );
+
+    assert.ok(
+      chatClient.serviceMessages.some((t) => /Оля Чатовая, бронь снята \(код 03770\)/.test(t)),
+      `ожидали ответ в чат, получили: ${JSON.stringify(chatClient.serviceMessages)}`,
+    );
+    // Зритель чата не читает VK — туда об этой отмене не пишем.
+    assert.ok(!replyTexts(harness).some((t) => /снята/.test(t)));
+  } finally {
     await client.close();
     await harness.close();
   }

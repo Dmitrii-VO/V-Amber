@@ -31,6 +31,7 @@ import {
   hasUsableSalePrice,
   getLotEffectivePrice,
   getReservationReplyMessage,
+  getCancelReplyMessage,
   getCommittedReservationCount,
   isFatalCommentReadError,
   RESERVATION_HISTORY_LIMIT,
@@ -1729,6 +1730,58 @@ export function attachWsServer(httpServer, config, services = {}) {
       const viewerName = comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "";
       const notifyOperator = (type, message) => sendJson(websocket, { type, message });
 
+      // Ответ самому покупателю. Отвечаем в тот канал, откуда пришёл
+      // комментарий — тем же способом, что и подтверждение брони
+      // (notifyReservationStatus). VK-ответ идёт комментарием к ЖИВОМУ видео
+      // (video.createComment с replyToComment), а не под карточку лота,
+      // поэтому закрытый/чужой лот в коде отмены на адресата не влияет.
+      // Poison-гейт всё равно спрашиваем: если у видео выключены комментарии
+      // (ошибка 801), писать туда нельзя — очередной 801 отравил бы и текущий
+      // лот. Лот для гейта: тот, по которому нашли бронь, иначе активный.
+      const replyToBuyer = (outcome, { code = null, lot = null } = {}) => {
+        const message = getCancelReplyMessage(outcome, { code, viewerName });
+        if (!message) return;
+
+        if (comment.source === "chat") {
+          if (!chatClient?.postServiceMessage) return;
+          void chatClient.postServiceMessage(message).then((result) => {
+            if (!result?.ok) {
+              logger.warn("chat", "cancel_reply_failed", {
+                connectionId,
+                commentId: comment.id,
+                viewerId: comment.viewerId,
+                code,
+                outcome,
+                error: result?.error,
+              });
+            }
+          });
+          return;
+        }
+
+        const gateLot = lot || activeLot;
+        if (isLotPoisoned(gateLot?.lotSessionId)) return;
+
+        void vk.publishReservationReply({
+          commentId: comment.id,
+          message,
+          lotSessionId: gateLot?.lotSessionId || null,
+          code,
+          viewerId: comment.viewerId,
+          status: `cancel_${outcome}`,
+        }).catch((error) => {
+          handleVkPublishError(gateLot, error);
+          logger.warn("vk", "cancel_reply_failed", {
+            connectionId,
+            commentId: comment.id,
+            viewerId: comment.viewerId,
+            code,
+            outcome,
+            error,
+          });
+        });
+      };
+
       // Дедуп раньше любой реакции: повторная доставка комментария не должна
       // ни удалять позицию второй раз, ни дёргать оператора тем же вопросом.
       if (processedCancelCommentIds.has(comment.id)) return;
@@ -1745,6 +1798,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
         });
         notifyOperator("warning", `${viewerName || "Покупатель"} просит отмену, но не назвал артикул — уточните`);
+        replyToBuyer("no_code");
         return;
       }
       const knownCodes = productCodeCache?.getCodes?.() || null;
@@ -1778,6 +1832,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               ? `${viewerName || "Покупатель"} отменил бронь ${code} — позиция снята`
               : `${viewerName || "Покупатель"} просит отмену ${code}, снять не удалось (${status}) — проверьте МойСклад`,
           );
+          replyToBuyer(status === "cancelled" ? "cancelled" : "failed", { code, lot });
           return;
         }
       }
@@ -1789,8 +1844,20 @@ export function attachWsServer(httpServer, config, services = {}) {
           connectionId, commentId: comment.id, viewerId: comment.viewerId, code,
         });
         notifyOperator("warning", `Отмена ${code} от ${viewerName || "покупателя"} не выполнена: safe-mode`);
+        replyToBuyer("failed", { code });
         return;
       }
+
+      // Что писать покупателю на каждый отказ. «Не нашли» — когда снимать
+      // нечего (чужой/ошибочный код, позиция уже снята); «оператор проверит» —
+      // когда бронь может существовать, но тронуть её мы не вправе
+      // (проведённый заказ, сбой МойСклада).
+      const FAIL_OUTCOMES = {
+        product_not_found: "not_found",
+        no_counterparty: "not_found",
+        no_position: "not_found",
+        no_order: "failed",
+      };
 
       const fail = (reason, message) => {
         logger.warn(logSource, "cancel_comment_not_executed", {
@@ -1802,6 +1869,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           reason,
         });
         notifyOperator("warning", message);
+        replyToBuyer(FAIL_OUTCOMES[reason] || "failed", { code });
       };
 
       try {
@@ -1844,6 +1912,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
         if (result?.skipped === true && result?.safeMode === true) {
           notifyOperator("warning", `Отмена ${code} не выполнена: safe-mode`);
+          replyToBuyer("failed", { code });
           return;
         }
 
@@ -1870,6 +1939,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         // мы только что удалили позицию.
         deleteCustomerOrderCacheForViewer(comment.viewerId);
         notifyOperator("info", `${viewerName || "Покупатель"} отменил бронь ${code} по закрытому лоту — позиция снята из ${order.name || "заказа"}`);
+        replyToBuyer("cancelled", { code });
       } catch (error) {
         logger.error("moysklad", "cancel_comment_failed", {
           connectionId,
@@ -1879,6 +1949,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           error,
         });
         notifyOperator("warning", `Отмена ${code} от ${viewerName || "покупателя"} не прошла — снимите позицию вручную`);
+        replyToBuyer("failed", { code });
       }
     }
 

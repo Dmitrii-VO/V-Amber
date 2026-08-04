@@ -267,3 +267,32 @@ test("parseCancelComment: код активного лота выигрывае�
     { hasCancelKeyword: true, code: "12" },
   );
 });
+
+test("голый код с количеством — тот же формат, что обещает инструкция зрителям", () => {
+  // VIEWER_INSTRUCTIONS_VARIANTS зовёт «Нужно несколько — “03204 2 шт”», а
+  // правило «голый код = ни одной буквы» отбрасывало такой комментарий целиком:
+  // бронь пропадала молча (не «1 шт вместо 2», а ноль). Ревизия 2026-08-04.
+  assert.deepEqual(parseReservationComment("03204 2 шт"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("03204 2шт"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("2 шт 03204"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("03204 х2"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("03204 x2"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("03204 *2"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("03204 две штуки"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  assert.deepEqual(parseReservationComment("03204 три пары"), { hasReservationKeyword: true, code: "03204", quantity: 6 });
+  // Единица без числа: «шт» — это одна штука, «пара» — две.
+  assert.deepEqual(parseReservationComment("03204 шт"), { hasReservationKeyword: true, code: "03204", quantity: 1 });
+  assert.deepEqual(parseReservationComment("03204 пара"), { hasReservationKeyword: true, code: "03204", quantity: 2 });
+  // Кап 10 никуда не делся.
+  assert.equal(parseReservationComment("03204 100 шт").quantity, 10);
+});
+
+test("голый код с количеством не открывает дверь любым буквам", () => {
+  // Послабление касается ТОЛЬКО маркеров количества: вопрос про товар брони
+  // по-прежнему не создаёт — иначе «03204 сколько штук?» уехало бы в заказ.
+  for (const text of ["03204 сколько штук?", "стоит 03204 рублей?", "нет 03204", "а 03204 ещё есть?"]) {
+    assert.equal(parseReservationComment(text).hasReservationKeyword, false, text);
+  }
+  // Размер рядом с кодом (реальный формат из логов «00577 17») — бронь на 1.
+  assert.deepEqual(parseReservationComment("00577 17"), { hasReservationKeyword: true, code: "00577", quantity: 1 });
+});

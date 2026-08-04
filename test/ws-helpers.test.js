@@ -10,6 +10,7 @@ import {
   hasUsableSalePrice,
   getLotEffectivePrice,
   getReservationReplyMessage,
+  getCancelReplyMessage,
   getCommittedReservationCount,
   isFatalCommentReadError,
   RESERVATION_HISTORY_LIMIT,
@@ -217,4 +218,25 @@ test("isFatalCommentReadError matches 'video not found' in message", () => {
 
 test("isFatalCommentReadError returns false for plain network errors", () => {
   assert.equal(isFatalCommentReadError(new Error("ECONNRESET")), false);
+});
+
+test("getCancelReplyMessage: успех называет код, отказ его не обещает", () => {
+  assert.equal(
+    getCancelReplyMessage("cancelled", { code: "03770", viewerName: "Марина" }),
+    "Марина, бронь снята (код 03770).",
+  );
+  // Имени может не быть (кеш имён пуст) — сообщение всё равно осмысленное.
+  assert.equal(getCancelReplyMessage("cancelled", { code: "03770" }), "бронь снята (код 03770).");
+
+  // Ключевое: ни один отказ не должен читаться как «снято».
+  for (const outcome of ["not_found", "failed", "no_code"]) {
+    const message = getCancelReplyMessage(outcome, { code: "03770", viewerName: "Марина" });
+    assert.ok(message, outcome);
+    assert.ok(!/снята/.test(message), `«${message}» читается как успешная отмена`);
+  }
+});
+
+test("getCancelReplyMessage: неизвестный исход молчит", () => {
+  assert.equal(getCancelReplyMessage("whatever", { code: "03770" }), "");
+  assert.equal(getCancelReplyMessage(undefined), "");
 });

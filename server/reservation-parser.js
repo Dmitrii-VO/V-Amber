@@ -79,10 +79,19 @@ function hasReservationKeyword(normalized) {
   return false;
 }
 
-// Голый код («03204») трактуется как бронь: в комментарии нет ничего, кроме
-// цифр и пунктуации. Этого требовали клиенты — формат «бронь <код>» им был
-// тяжёл. Любые буквы → нужен явный ключевой токен из RESERVATION_TOKEN_PATTERNS.
-const BARE_CODE_ONLY = new RegExp(`^[^${CYR}a-z]*\\d{2,6}[^${CYR}a-z]*$`);
+// Голый код («03204») трактуется как бронь: кроме кода в комментарии нет ничего,
+// кроме цифр, пунктуации и маркеров количества. Этого требовали клиенты —
+// формат «бронь <код>» им был тяжёл. Любые ДРУГИЕ буквы → нужен явный ключевой
+// токен из RESERVATION_TOKEN_PATTERNS.
+//
+// Маркеры количества сюда попали не сразу: инструкция зрителям
+// (VIEWER_INSTRUCTIONS_VARIANTS) обещает «Нужно несколько — “03204 2 шт”», а
+// правило «голый код = ни одной буквы» резало этот формат целиком — «шт» буквы,
+// ключевого слова нет. Результат был не «взяли 1 штуку вместо 2», а молча
+// потерянная бронь на самом денежном комментарии. Поэтому перед проверкой
+// вынимаем код и маркеры количества: если букв не осталось — это тот же голый
+// код, просто с количеством.
+const NO_LETTERS_LEFT = new RegExp(`^[^${CYR}a-z]*$`);
 
 // Кап на quantity. Защита от опечаток («беру 100 03204») и от того, чтобы
 // случайный шум вроде «250» не выкупил весь склад. Дашборд-настройки нет —
@@ -145,6 +154,29 @@ function isCloseToCode(normalized, match, code) {
   return tokensBetween.length <= MAX_QTY_TOKEN_DISTANCE;
 }
 
+// Одиночная единица измерения без числа («03204 шт», «03204 пара»). Нужна
+// только для проверки «остались ли буквы»: количество из неё считает
+// extractQuantity (пара → 2, шт → 1).
+const STANDALONE_UNIT_RE = new RegExp(
+  `${NOT_LETTER_BEHIND}(?:шт(?:ук[аеиуов]?|уки)?|пар[ыуов]?|пара)${NOT_LETTER_AHEAD}`,
+  "g",
+);
+const WORD_QUANTITY_RE_GLOBAL = new RegExp(WORD_QUANTITY_RE.source, "g");
+const QUANTITY_PATTERNS_GLOBAL = QUANTITY_PATTERNS.map((p) => new RegExp(p.source, "g"));
+
+// Убираем код и все маркеры количества. Порядок важен: сначала код (иначе
+// «03204 шт» прочиталось бы как количество 03204 штук), затем словесное
+// количество («две штуки»), затем цифровое («2 шт», «х2», «*2»), и только потом
+// осиротевшие единицы измерения.
+function stripCodeAndQuantity(normalized, code) {
+  let rest = code ? normalized.replace(code, " ") : normalized;
+  rest = rest.replace(WORD_QUANTITY_RE_GLOBAL, " ");
+  for (const pattern of QUANTITY_PATTERNS_GLOBAL) {
+    rest = rest.replace(pattern, " ");
+  }
+  return rest.replace(STANDALONE_UNIT_RE, " ");
+}
+
 function extractQuantity(normalized, code) {
   if (!normalized) return 1;
   // Словесное количество с единицей измерения: «две штуки», «три пары»,
@@ -191,10 +223,13 @@ export function parseReservationComment(text, options = {}) {
   if (WISHLIST_INTENT.test(normalized) || normalized === "список") {
     return { hasReservationKeyword: false, code: null, quantity: 1 };
   }
-  if (BARE_CODE_ONLY.test(normalized)) {
-    const code = pickBestCode(normalized, preferredCode);
-    // Голый код — букв нет, маркеров шт/x/пара тоже не будет; quantity=1.
-    return { hasReservationKeyword: true, code, quantity: 1 };
+  const bareCode = pickBestCode(normalized, preferredCode);
+  if (bareCode && NO_LETTERS_LEFT.test(stripCodeAndQuantity(normalized, bareCode))) {
+    return {
+      hasReservationKeyword: true,
+      code: bareCode,
+      quantity: extractQuantity(normalized, bareCode),
+    };
   }
   if (!hasReservationKeyword(normalized)) {
     return { hasReservationKeyword: false, code: null, quantity: 1 };

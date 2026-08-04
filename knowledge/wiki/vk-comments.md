@@ -40,6 +40,12 @@ lot cards, price updates, reservation replies, and wishlist activity.
   service reply confirms. The code is passed in from the call site
   (`notifyReservationStatus`) via `getReservationReplyMessage(event,
   { code })`.
+- **Отмена комментарием тоже отвечает покупателю** (2026-08-04), текстом из
+  `getCancelReplyMessage`: «Марина, бронь снята (код 03770).» на успех и
+  отдельные, не похожие на успех формулировки на «не нашли» / «оператор
+  проверит». До этого весь путь отмены писал только оператору в дашборд, и
+  зритель, написавший «отмена 03770», не получал ничего — ни при удачной
+  отмене, ни при отказе. Детали и правила — в [[reservation-flow]].
 - **Lot card never dies on a broken photo (since 2026-06-06).**
   `publishLotCard` uploads the photo **separately** from posting the comment.
   If the upload fails, or VK rejects the attachment with `error_code 100`
@@ -116,6 +122,14 @@ the app repeats a short instruction on a timer.
   first half hour see it at all), `variants`.
 - **Variants rotate.** VK filters repeated identical comments under one video,
   and the same text every 30 minutes reads as spam to a human too.
+- **Every format the instruction names must actually work — check the parser
+  before editing a variant.** The default texts promise four: bare code
+  (`03204`), quantity (`03204 2 шт`), cancel (`отмена 03204`) and wishlist
+  (`список 03204`). The quantity one was a lie from the start —
+  `reservation-parser.js` dropped any bare code carrying letters, so the most
+  valuable comment in the room («I want two») silently produced nothing; fixed
+  2026-08-04 (see [[reservation-flow]]). Wrong instructions are worse than no
+  instruction: it teaches the whole room a format that loses their брони.
 - Posted to **both** channels at once — `video.createComment` for VK and a chat
   service message for `/efir/`. They are different audiences.
 - Scheduled with `setTimeout`, re-armed after the previous publication finishes,
