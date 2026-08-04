@@ -4143,6 +4143,91 @@ export function attachWsServer(httpServer, config, services = {}) {
 
           attentionReservationsInFlight.add(payload.actionId);
           try {
+            // Лот под этот код мог ОТКРЫТЬСЯ, пока строка ждала в баннере (TTL
+            // 30 минут): оператор обычно ровно за этим карточку и открывает —
+            // чтобы продать товар из строки. Тогда бронь обязана идти ЧЕРЕЗ
+            // лот. Безлотовый путь ниже не знает ни про стоковый гейт лота, ни
+            // про committedReservationCount: позиция уходила в МойСклад мимо
+            // учёта лота, счётчик оставался нулевым, и СЛЕДУЮЩИЙ комментарий
+            // бронировал ту же единицу второй раз. Свежий остаток из карточки
+            // от этого не спасал: floor=1 в getRemainingAvailableStock всегда
+            // пропускает первую бронь лота. Эфир 04.08.2026, лот 03824 —
+            // оператор забронировал вручную, после чего тот же товар
+            // забронировал другой покупатель.
+            const { lot: openLot } = findOpenLotBySpokenCode(pending.code);
+            if (openLot) {
+              const lotState = ensureReservationState(openLot);
+              if (lotState.acceptedUserIds.has(pending.viewerId)) {
+                pendingAttentionReservations.delete(payload.actionId);
+                sendJson(websocket, {
+                  type: "attentionReservationResult",
+                  actionId: payload.actionId,
+                  ok: true,
+                  status: "already_reserved",
+                  message: `${pending.code}: бронь для ${pending.viewerName || `id${pending.viewerId}`} уже есть в списке лота`,
+                });
+                return;
+              }
+
+              addBoundedId(lotState.acceptedUserIds, pending.viewerId);
+              const lotEvent = {
+                commentId: pending.commentId,
+                viewerId: pending.viewerId,
+                viewerName: pending.viewerName,
+                text: "",
+                createdAt: new Date().toISOString(),
+                status: "pending_reservation",
+                lotCode: openLot.code,
+                quantity: pending.quantity,
+                source: pending.source,
+                phone: null,
+              };
+              addReservationEvent(openLot, lotEvent);
+              logger.info("ws", "attention_reservation_routed_to_open_lot", {
+                connectionId,
+                code: pending.code,
+                lotCode: openLot.code,
+                lotSessionId: openLot.lotSessionId,
+                viewerId: pending.viewerId,
+                viewerName: pending.viewerName,
+                commentId: pending.commentId,
+                quantity: pending.quantity,
+              });
+              emitState();
+              // Дальше — обычный денежный путь: стоковый гейт, очередь,
+              // committedReservationCount, запись в МойСклад, строка с кнопкой
+              // «× отменить» в дашборде и публичный ответ покупателю.
+              await processReservationEvent(openLot, lotEvent);
+
+              const settled = {
+                reserved: `${pending.code} забронирован для ${pending.viewerName || `id${pending.viewerId}`} — строка в списке лота`,
+                reserved_appended: `${pending.code} добавлен в заказ ${pending.viewerName || `id${pending.viewerId}`} — строка в списке лота`,
+                waitlist_pending: `${pending.code}: ${pending.viewerName || `id${pending.viewerId}`} в очереди на лот — подтвердится после текущей брони`,
+                out_of_stock: `${pending.code}: остатка на лоте нет — покупатель в списке ожидания`,
+              };
+              if (settled[lotEvent.status]) {
+                pendingAttentionReservations.delete(payload.actionId);
+                sendJson(websocket, {
+                  type: "attentionReservationResult",
+                  actionId: payload.actionId,
+                  ok: true,
+                  status: lotEvent.status === "out_of_stock" ? "wishlist" : lotEvent.status,
+                  message: settled[lotEvent.status],
+                });
+                return;
+              }
+
+              // Не удалось — токен НЕ тратим, оператор повторит кликом
+              // (processReservationEvent уже откатил счётчик и acceptedUserIds).
+              ackFail(
+                lotEvent.status === "safe_mode_logged"
+                  ? "Бронь недоступна в safe-mode"
+                  : `${pending.code}: бронь не создалась (${lotEvent.status}) — проверьте МойСклад`,
+                lotEvent.status === "safe_mode_logged" ? "safe_mode" : "failed",
+              );
+              return;
+            }
+
             const productCard = await moysklad.getProductCardByCode(pending.code);
             if (!productCard?.id) {
               logger.warn("ws", "attention_reservation_product_not_found", {

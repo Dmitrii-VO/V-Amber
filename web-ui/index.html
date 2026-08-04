@@ -244,7 +244,10 @@
                 <span>Картинка эфира</span>
                 <span id="previewLiveBadge" class="preview-badge">не в эфире</span>
               </div>
-              <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">свой поток</span>
+              <div style="display:flex; align-items:center; gap:var(--gap-2);">
+                <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">свой поток</span>
+                <button id="previewToggle" class="btn btn--ghost" type="button" title="Свернуть картинку — вся высота колонки уйдёт залу" style="padding:0 8px;">▾</button>
+              </div>
             </div>
             <div class="panel-body panel-body--flush">
               <div class="preview-video-wrap">
@@ -269,26 +272,12 @@
                 <button id="commentsClear" class="btn btn--ghost" type="button" title="Очистить ленту" style="padding:0 8px;">×</button>
               </div>
             </div>
-            <div class="panel-body panel-body--flush">
+            <div class="panel-body panel-body--flush chat-panel-body">
               <div id="commentsFeed" class="comments-feed"></div>
               <div id="commentsEmpty" class="res-empty">
                 Комментарии зрителей появятся здесь во время эфира
               </div>
-            </div>
-          </section>
-
-          <section id="chatPanel" class="panel" hidden>
-            <div class="panel-head">
-              <div class="panel-title">
-                <span>Чат зрителей</span>
-                <span id="chatMsgCount" class="count">· 0</span>
-              </div>
-              <span class="dim" style="font-size:var(--fs-xs); font-family:var(--font-mono);">/efir/</span>
-            </div>
-            <div class="panel-body panel-body--flush chat-panel-body">
-              <div id="chatLog" class="chat-log"></div>
-              <div id="chatLogEmpty" class="res-empty">Сообщения зрителей появятся здесь</div>
-              <form id="chatOperatorForm" class="chat-operator-form">
+              <form id="chatOperatorForm" class="chat-operator-form" hidden>
                 <input id="chatOperatorInput" class="input" type="text" maxlength="300" placeholder="Ответ в чат…" autocomplete="off" />
                 <button id="chatOperatorSend" class="btn btn--primary" type="submit">→</button>
               </form>

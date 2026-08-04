@@ -109,9 +109,11 @@ Editing that nginx config follows the local convention: back up to
 `#efirModeToggle` in the topbar (`web-ui/index.html`, next to `#sessionPill`)
 lets the operator switch between "ВК эфир" and "Свой эфир" so only the
 controls for the broadcast method actually in use are shown: VK mode shows
-`#vkLiveUrlWrap`; own-server mode shows `#streamPanel` and `#chatPanel`
-(each still gated on being configured via `state.streamConfigured` /
-`state.chatConfigured`). The choice is persisted in
+`#vkLiveUrlWrap`; own-server mode shows `#streamPanel` and the chat reply box
+`#chatOperatorForm` (each still gated on being configured via
+`state.streamConfigured` / `state.chatConfigured`; since 2026-08-04 the chat
+lives inside `#commentsPanel`, there is no separate `#chatPanel` — see
+[[web-dashboard#One hall feed instead of two panels (2026-08-04)]]). The choice is persisted in
 `localStorage["efirMode"]` (`web-ui/app.js`, `applyEfirMode()`).
 
 **This is UI-only.** VK-comment polling (`server/vk.js`) and the viewer-chat

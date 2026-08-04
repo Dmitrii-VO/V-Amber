@@ -127,11 +127,23 @@ The attention row now carries a **«✓ забронировать»** action:
   `attentionReservationResult { ok, status, message }`: `reserved`, `wishlist`,
   `wishlist_failed`, `already_reserved`, `expired`, `in_flight`, `safe_mode`,
   `no_price`, `no_counterparty`, `product_not_found`, `failed`.
-- **This reservation has no dashboard row and no cancel button** — there is no
-  lot to hang it on, so the addressable-cancel path (#16) cannot reach it. The
-  success message therefore names the order, which is the only way back if the
-  operator misclicks. Closing that properly belongs with closed-lot
-  cancellation, still open.
+- **If a lot for that code is open at click time, the whole thing goes through
+  the lot instead** (2026-08-04). The row lives 30 minutes and the operator
+  typically opens the card precisely to sell what the row is asking for, so by
+  the time it is clicked the lot usually exists. The lot-less path below knows
+  nothing about `committedReservationCount`: it wrote the position straight to
+  MoySklad, the lot's counter stayed at zero, and the **next buyer comment sold
+  the same unit again** — эфир 2026-08-04, лот 03824, exactly that. A fresh
+  stock read does not save it either: `floor=1` in `getRemainingAvailableStock`
+  always lets a lot's first бронь through. Routing through
+  `processReservationEvent` restores the stock gate, the counter, the waitlist,
+  the dashboard row with «× отменить», and the public reply. Repeat clicks are
+  caught by the lot's `acceptedUserIds`.
+- **Without an open lot the reservation has no dashboard row and no cancel
+  button** — there is no lot to hang it on, so the addressable-cancel path (#16)
+  cannot reach it. The success message therefore names the order, which is the
+  only way back if the operator misclicks. Closing that properly belongs with
+  closed-lot cancellation, still open.
 - The buyer gets **no** public VK reply on this path (there is no lot card to
   reply under, and error 801 on a stale card would poison an unrelated lot).
   Logged as `attention_reservation_created` / `_out_of_stock` / `_failed`, plus a
