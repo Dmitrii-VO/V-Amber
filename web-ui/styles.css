@@ -222,7 +222,7 @@ a { color: inherit; }
 
 /* Всегда 3 явных трека (совпадает с 3 .col в разметке: left/chat/right).
    Средний трек нулевой по умолчанию и раскрывается до 340px только когда
-   #chatPanel видима (STREAM_CHAT_URL настроен) — так порядок .col в DOM не
+   #commentsPanel видима — так порядок .col в DOM не
    зависит от auto-placement (с 2 явными треками при 3 grid-item'ах третий
    ушёл бы в непредсказуемую implicit-колонку). Пустая 0-width .col--chat
    визуально не заметна (только 1px background-gap, сливается с соседними). */
@@ -231,24 +231,21 @@ a { color: inherit; }
   gap: 1px; background: var(--border);
   overflow: hidden; min-height: 0; flex: 1;
 }
-/* Центральная колонка теперь всегда несёт ленту «Комментарии зала»
-   (#commentsPanel всегда видима), поэтому раскрываем её независимо от того,
-   настроен ли свой чат. Раньше ширина зависела только от #chatPanel. */
+/* Центральная колонка всегда несёт ленту «Комментарии зала» (#commentsPanel
+   всегда видима), поэтому раскрываем её независимо от того, настроен ли свой
+   чат. */
 .main:has(#commentsPanel:not([hidden])) { grid-template-columns: 1fr 360px 380px; }
 .col { display: grid; gap: 1px; background: var(--border); min-height: 0; min-width: 0; }
 .col--left { grid-template-rows: minmax(0, max-content) 1fr; }
 .col--left > .panel:first-child { max-height: 38vh; }
-/* Собственная колонка «Чат зрителей» — единственная панель на всю высоту
-   (не 380px-колонка справа, где она раньше боролась за место со «Стрим»/
-   «Брони»/«События»). Ширина колонки схлопывается до 0 в .main, когда чат
-   не настроен — см. правило .main:has(#chatPanel:not([hidden])) выше. */
-/* Центральная колонка стекает до трёх панелей: «Картинка эфира» (свой эфир),
-   «Комментарии зала» (всегда), «Чат зрителей» (свой эфир + настроен чат).
-   Превью — auto (по высоте видео, но с потолком ниже), остальные делят 1fr. */
+/* Центральная колонка — максимум две панели: «Картинка эфира» (только свой
+   эфир) и единая лента «Комментарии зала» (VK + свой чат + поле ответа).
+   Раньше лента и чат были ДВУМЯ панелями на 1fr 1fr под превью: на 13"
+   ноутбуке оператора чат схлопывался до нулевой высоты — оставалось только
+   поле ввода, самих сообщений видно не было. Превью — auto (по высоте видео,
+   с потолком ниже), лента забирает весь остаток. */
 .col--chat { grid-template-rows: 1fr; }
 .col--chat:has(#previewPanel:not([hidden])) { grid-template-rows: auto 1fr; }
-.col--chat:has(#chatPanel:not([hidden])) { grid-template-rows: 1fr 1fr; }
-.col--chat:has(#previewPanel:not([hidden])):has(#chatPanel:not([hidden])) { grid-template-rows: auto 1fr 1fr; }
 .col--right { grid-template-rows: 1fr 1fr; }
 /* #streamPanel is hidden (display:none) unless configured — it drops out of
    grid flow entirely, so the extra `auto` track only applies while actually
@@ -334,12 +331,8 @@ a { color: inherit; }
   margin: 2px 0 6px 18px; color: var(--text-dim); white-space: pre-wrap;
 }
 
-/* ===== Chat panel (Чат зрителей) ===== */
+/* ===== Свой чат внутри ленты зала ===== */
 .chat-panel-body { display: flex; flex-direction: column; min-height: 0; }
-.chat-log {
-  flex: 1; min-height: 0; overflow-y: auto;
-  padding: var(--gap-3) var(--gap-5); display: flex; flex-direction: column; gap: var(--gap-2);
-}
 .chat-msg { font-size: var(--fs-sm); line-height: 1.35; word-break: break-word; }
 .chat-msg .author { color: var(--amber); font-weight: 600; margin-right: 6px; }
 .chat-msg--service {
@@ -573,14 +566,13 @@ a { color: inherit; }
 }
 @media (max-width: 1100px) {
   .main { grid-template-columns: 1fr 0px 320px; }
-  .main:has(#chatPanel:not([hidden])) { grid-template-columns: 1fr 300px 320px; }
+  .main:has(#commentsPanel:not([hidden])) { grid-template-columns: 1fr 300px 320px; }
 }
 @media (max-width: 900px) {
   .main { grid-template-columns: 1fr; }
-  /* Одна колонка — все .col стекаются вертикально; чат-панель без своего
-     fr-ряда соседей вырастала бы на весь экран, поэтому даём ей тот же кап
-     высоты, что и раньше на широком экране. */
-  .col--chat #chatPanel { max-height: 42vh; }
+  /* Одна колонка — все .col стекаются вертикально; лента зала без соседнего
+     fr-ряда выросла бы на весь экран, поэтому даём ей кап высоты. */
+  .col--chat #commentsPanel { max-height: 60vh; }
   .col--right { grid-template-rows: auto auto; }
   .col--right:has(#streamPanel:not([hidden])) { grid-template-rows: auto auto auto; }
   .lot { grid-template-columns: 160px 1fr; }
@@ -993,7 +985,13 @@ a { color: inherit; }
 }
 
 /* ===== Превью эфира (свой поток) ===== */
-#previewPanel { max-height: 42vh; }
+/* Потолок ниже прежних 42vh: картинку оператор контролирует и по телефону-
+   камере, а высота центральной колонки нужнее ленте зала. Кнопка «свернуть»
+   (#previewToggle) убирает картинку совсем — плеер при этом продолжает
+   играть, чтобы не терять звук эфира. */
+#previewPanel { max-height: 34vh; }
+#previewPanel.collapsed { max-height: none; }
+#previewPanel.collapsed .panel-body { display: none; }
 .preview-badge {
   font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 500;
   letter-spacing: 0; text-transform: none;
@@ -1023,8 +1021,10 @@ a { color: inherit; }
 .preview-unmute.show { display: inline-block; }
 
 /* ===== Лента «Комментарии зала» ===== */
+/* flex:1, а не height:100% — под лентой в той же панели живёт форма ответа
+   в чат, и лента должна отдавать ей место, а не переполнять панель. */
 .comments-feed {
-  height: 100%; overflow-y: auto;
+  flex: 1; min-height: 0; overflow-y: auto;
   padding: var(--gap-3) var(--gap-5);
   display: flex; flex-direction: column; gap: var(--gap-2);
 }
