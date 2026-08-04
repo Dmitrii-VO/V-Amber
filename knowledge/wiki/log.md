@@ -1137,3 +1137,40 @@ design does not depend on `syncId` at all. If `syncId` is later confirmed, it is
 an optimization, not a redesign.
 
 `npm test`: 465/465.
+
+## 2026-08-05 — MoySklad write retry + reconciliation (idempotency, step 2)
+
+Second half of the work started in the entry above. The journal made repeat
+writes safe; this turns retry back on without risking duplicate orders.
+
+**Retry.** `wrapWithWriteJournal` now retries, bounded by
+`MOYSKLAD_WRITE_RETRY_ATTEMPTS` (default 2) and
+`MOYSKLAD_WRITE_RETRY_BASE_DELAY_MS` (default 400). Kept low on purpose: retry
+runs on the reservation hot path while a buyer waits, and each attempt costs up
+to `MOYSKLAD_REQUEST_TIMEOUT_MS`. Retry fires only for `not_applied`.
+
+**Reconciliation.** `server/write-reconciler.js` resolves the `unknown` outcome
+by asking MoySklad. Create path: search the counterparty's orders for the
+`commentId=` marker `createCustomerOrderReservation` already writes into
+`description`. Append path: compare real position count for the product against
+`journal.countApplied({orderId, productId})` — exactly one more means the lost
+write landed.
+
+Deliberately **not** done: stamping extra markers into order descriptions to
+make the append path directly identifiable. Operators read those descriptions;
+polluting them with technical tags is a product regression. The counting
+approach needs nothing written.
+
+**Where it stays honest.** `inconclusive` is a first-class answer — returned
+when the counterparty was not pre-resolved (resolving it means
+`ensureCounterparty`, which is a *write*), when reconciliation itself fails, or
+when position counts differ by anything other than one. It never retries and
+never claims success. Known narrow risk, accepted and documented: if the
+operator manually adds the same product to the same order inside the seconds
+between a lost write and its reconciliation, the count check could read as
+"applied". The ±1 bound keeps this to a single-position coincidence.
+
+Two new read-only MoySklad methods: `countPositionsForProduct` and
+`findCustomerOrderByCommentMarker`.
+
+`npm test`: 475/475 (10 new in `test/write-retry.test.js`).

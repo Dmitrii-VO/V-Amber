@@ -1071,6 +1071,62 @@ export function createMoySkladClient(config, options = {}) {
       }
       return { present: false };
     },
+    // Сверка (read-only) для журнала записей: сколько позиций этого товара
+    // РЕАЛЬНО лежит в заказе. Журнал знает, сколько записей он подтвердил;
+    // расхождение разрешает исход оборвавшейся записи без маркеров в МойСкладе.
+    // Позиции одного товара лежат отдельными строками (кейс reserved_appended),
+    // поэтому счёт строк — корректная мера.
+    async countPositionsForProduct(orderId, productId, { source } = {}) {
+      if (!isEnabled || !orderId || !productId) {
+        return 0;
+      }
+      const positionsPayload = await requestJson(
+        `entity/customerorder/${orderId}/positions`,
+        { limit: 1000 },
+        { source },
+      );
+      const rows = Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [];
+      let count = 0;
+      for (const row of rows) {
+        const rowProductId = row?.assortment?.id
+          || extractEntityIdFromHref(row?.assortment?.meta?.href, "product");
+        if (rowProductId === productId) {
+          count += 1;
+        }
+      }
+      return count;
+    },
+    // Сверка (read-only) для create-пути: заказ этой брони уже существует?
+    // Опознаём по маркеру, который createCustomerOrderReservation И ТАК пишет
+    // в description — специально ничего в МойСклад не добавляем, описание
+    // заказа операторы читают, засорять его техническими метками нельзя.
+    // Состояние заказа НЕ фильтруем: запись могла доехать, а оператор уже
+    // успеть закрыть заказ — для сверки это всё равно «применилось».
+    async findCustomerOrderByCommentMarker({ counterpartyId, commentId, lotSessionId, source } = {}) {
+      if (!isEnabled || !counterpartyId || !commentId) {
+        return null;
+      }
+      const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${counterpartyId}`;
+      // Точка с запятой обязательна: без неё commentId=7 совпал бы с
+      // commentId=71.
+      const commentMarker = `commentId=${commentId};`;
+      const lotMarker = lotSessionId ? `lotSessionId=${lotSessionId};` : null;
+
+      const payload = await requestJson("entity/customerorder", {
+        filter: `agent=${agentHref}`,
+        order: "moment,desc",
+        limit: 100,
+      }, { source });
+
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      const row = rows.find((item) => {
+        const description = String(item?.description || "");
+        if (!description.includes(commentMarker)) return false;
+        return lotMarker ? description.includes(lotMarker) : true;
+      });
+
+      return row ? { id: row.id, name: row.name, counterpartyId } : null;
+    },
     async checkOpenOrderPositionsForEntries(entries, { source } = {}) {
       const result = {};
       const rows = Array.isArray(entries) ? entries : [];

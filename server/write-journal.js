@@ -11,6 +11,10 @@ const defaultFilePath = join(__dirname, "..", "logs", "moysklad-writes.jsonl");
 
 const SCHEMA_VERSION = 1;
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Журнал внешних записей в МойСклад.
 //
 // Зачем: раньше POST entity/customerorder был «выстрелил и забыл». Если связь
@@ -87,6 +91,7 @@ export function createWriteJournal({ filePath = defaultFilePath } = {}) {
           ...previous,
           status: "pending",
           method: record.method,
+          meta: record.meta ?? previous.meta ?? null,
           attempts: (previous.attempts || 0) + 1,
           ts: record.ts,
         });
@@ -97,7 +102,8 @@ export function createWriteJournal({ filePath = defaultFilePath } = {}) {
           status: "done",
           method: record.method,
           result: record.result ?? null,
-          outcome: "applied",
+          meta: record.meta ?? previous.meta ?? null,
+          outcome: record.outcome || "applied",
           ts: record.ts,
         });
         break;
@@ -154,13 +160,28 @@ export function createWriteJournal({ filePath = defaultFilePath } = {}) {
     lookup(key) {
       return key ? entries.get(key) || null : null;
     },
-    async begin(key, method) {
-      await append({ kind: "begin", key, method });
-      applyRecord({ kind: "begin", key, method, ts: new Date().toISOString() });
+    async begin(key, method, meta = null) {
+      await append({ kind: "begin", key, method, meta });
+      applyRecord({ kind: "begin", key, method, meta, ts: new Date().toISOString() });
     },
-    async complete(key, method, result) {
-      await append({ kind: "done", key, method, result });
-      applyRecord({ kind: "done", key, method, result, ts: new Date().toISOString() });
+    async complete(key, method, result, meta = null, outcome = "applied") {
+      await append({ kind: "done", key, method, result, meta, outcome });
+      applyRecord({ kind: "done", key, method, result, meta, outcome, ts: new Date().toISOString() });
+    },
+    // Сколько записей журнал ПОДТВЕРДИЛ по этой паре заказ+товар. Основа
+    // сверки append-пути: расхождение с фактом в МойСкладе разрешает исход
+    // оборвавшейся записи. Учитываются оба пути — create тоже кладёт в заказ
+    // одну позицию этого товара.
+    countApplied({ orderId, productId } = {}) {
+      if (!orderId || !productId) return 0;
+      let count = 0;
+      for (const entry of entries.values()) {
+        if (entry.status !== "done") continue;
+        if (entry.meta?.orderId === orderId && entry.meta?.productId === productId) {
+          count += 1;
+        }
+      }
+      return count;
     },
     async fail(key, method, error) {
       const outcome = classifyWriteOutcome(error);
@@ -183,7 +204,17 @@ export function createWriteJournal({ filePath = defaultFilePath } = {}) {
 // wrapWithSafeMode из safe-mode.js. Порядок обёрток задаётся в index.js:
 // safe-mode должен быть СНАРУЖИ, чтобы заблокированная запись не оставляла
 // следа в журнале.
-export function wrapWithWriteJournal(client, journal, keyBuilders, domain = "moysklad") {
+export function wrapWithWriteJournal(client, journal, keyBuilders, options = {}) {
+  const {
+    domain = "moysklad",
+    metaBuilders = {},
+    reconciler = null,
+    retryAttempts = 2,
+    retryBaseDelayMs = 400,
+  } = options;
+
+  const maxAttempts = Math.max(1, Number(retryAttempts) || 1);
+  const baseDelayMs = Math.max(0, Number(retryBaseDelayMs) || 0);
   const wrapped = { ...client };
 
   for (const [method, buildKey] of Object.entries(keyBuilders)) {
@@ -193,6 +224,7 @@ export function wrapWithWriteJournal(client, journal, keyBuilders, domain = "moy
     // bind сохраняет this: методы клиента зовут this.ensureCounterparty и
     // this.resolveFirstOrderPositionId.
     const bound = original.bind(client);
+    const buildMeta = metaBuilders[method] || null;
 
     wrapped[method] = async (...args) => {
       const key = buildKey(...args);
@@ -210,28 +242,66 @@ export function wrapWithWriteJournal(client, journal, keyBuilders, domain = "moy
         return known.result;
       }
 
-      // Прошлая попытка оборвалась, и мы не знаем её исход. Сверку с МойСкладом
-      // делает следующий шаг работы; пока — громкий след в логе и в диагностике,
-      // чтобы этот случай был виден при разборе эфира, а не терялся молча.
-      if (known?.status === "pending" || known?.status === "unknown") {
-        logger.warn(domain, "write_outcome_unknown", {
-          method,
-          key,
-          previousStatus: known.status,
-          attempts: known.attempts || 0,
-        });
+      const beginMeta = buildMeta ? buildMeta(...args) : null;
+      await journal.begin(key, method, beginMeta);
+
+      // orderId create-пути известен только ПОСЛЕ успеха — достаём из ответа,
+      // иначе countApplied не увидит позицию, созданную вместе с заказом.
+      const completeMeta = (result) => ({
+        ...(beginMeta || {}),
+        orderId: beginMeta?.orderId || result?.id || result?.orderId || null,
+      });
+
+      let lastError = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const result = await bound(...args);
+          await journal.complete(key, method, result ?? null, completeMeta(result));
+          return result;
+        } catch (error) {
+          lastError = error;
+          let outcome = classifyWriteOutcome(error);
+
+          // Исход неизвестен: запрос мог быть применён до потери ответа.
+          // Повторять вслепую нельзя — сначала спрашиваем МойСклад.
+          if (outcome === "unknown" && reconciler) {
+            // Методы записи принимают один объект-аргумент — сверке нужен он,
+            // а не массив аргументов обёртки.
+            const verdict = await reconciler.resolve({ method, args: args[0], key });
+            logger.warn(domain, "write_reconciled", {
+              method,
+              key,
+              attempt,
+              verdict: verdict.status,
+              reason: verdict.reason || null,
+            });
+
+            if (verdict.status === "applied") {
+              await journal.complete(key, method, verdict.result ?? null, completeMeta(verdict.result), "applied_reconciled");
+              return verdict.result;
+            }
+            if (verdict.status === "not_applied") {
+              outcome = "not_applied";
+            }
+          }
+
+          // Повторяем только когда точно знаем, что записи не появилось.
+          if (outcome === "not_applied" && attempt < maxAttempts) {
+            logger.warn(domain, "write_retry_scheduled", { method, key, attempt, nextAttempt: attempt + 1 });
+            if (baseDelayMs > 0) {
+              await delay(baseDelayMs * 2 ** (attempt - 1));
+            }
+            continue;
+          }
+
+          await journal.fail(key, method, error);
+          logger.error(domain, "write_failed", { method, key, attempt, outcome, error });
+          throw error;
+        }
       }
 
-      await journal.begin(key, method);
-      try {
-        const result = await bound(...args);
-        await journal.complete(key, method, result ?? null);
-        return result;
-      } catch (error) {
-        const outcome = await journal.fail(key, method, error);
-        logger.error(domain, "write_failed", { method, key, outcome, error });
-        throw error;
-      }
+      throw lastError;
     };
   }
 

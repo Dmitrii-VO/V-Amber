@@ -19,6 +19,7 @@ import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
 import { createWriteJournal, wrapWithWriteJournal, buildReservationWriteKey } from "./write-journal.js";
+import { createReservationReconciler } from "./write-reconciler.js";
 import { getStreamStatus } from "./stream-status.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -190,10 +191,35 @@ async function main() {
   await writeJournal.load();
   logger.info("write-journal", "ready", writeJournal.stats());
 
-  const journaledMoysklad = wrapWithWriteJournal(rawMoysklad, writeJournal, {
-    createCustomerOrderReservation: (args) => buildReservationWriteKey(args || {}),
-    appendPositionToCustomerOrder: (args) => buildReservationWriteKey(args || {}),
+  // Сверка использует ТОЛЬКО read-методы клиента, поэтому берёт rawMoysklad
+  // напрямую — оборачивать её safe-mode'ом нечем и незачем.
+  const writeReconciler = createReservationReconciler({
+    moysklad: rawMoysklad,
+    journal: writeJournal,
   });
+
+  const buildReservationMeta = (args) => ({
+    productId: args?.activeLot?.product?.id || null,
+    orderId: args?.orderId || null,
+  });
+
+  const journaledMoysklad = wrapWithWriteJournal(
+    rawMoysklad,
+    writeJournal,
+    {
+      createCustomerOrderReservation: (args) => buildReservationWriteKey(args || {}),
+      appendPositionToCustomerOrder: (args) => buildReservationWriteKey(args || {}),
+    },
+    {
+      metaBuilders: {
+        createCustomerOrderReservation: (args) => buildReservationMeta(args || {}),
+        appendPositionToCustomerOrder: (args) => buildReservationMeta(args || {}),
+      },
+      reconciler: writeReconciler,
+      retryAttempts: config.moysklad?.writeRetryAttempts,
+      retryBaseDelayMs: config.moysklad?.writeRetryBaseDelayMs,
+    },
+  );
 
   const moysklad = wrapWithSafeMode(
     journaledMoysklad,
