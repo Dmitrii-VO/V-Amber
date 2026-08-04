@@ -39,7 +39,9 @@ export function classifyWriteOutcome(error) {
   const code = error.code || error.cause?.code || null;
 
   // Соединение не установилось — запрос гарантированно не обработан.
-  if (["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET"].includes(code)) {
+  // ECONNRESET сюда не входит: peer может оборвать соединение уже после того,
+  // как применил POST, но до доставки ответа клиенту.
+  if (["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(code)) {
     return "not_applied";
   }
 
@@ -127,12 +129,17 @@ export function createWriteJournal({ filePath = defaultFilePath } = {}) {
     writeChain = writeChain.then(async () => {
       await mkdir(dirname(filePath), { recursive: true });
       await appendFile(filePath, line + "\n", "utf8");
-    }).catch((error) => {
-      // Журнал не должен ронять бронь: потеря строки хуже, чем потеря заказа,
-      // но не настолько, чтобы отменять уже идущую запись в МойСклад.
-      logger.error("write-journal", "append_failed", { error, key: record.key });
     });
-    return writeChain;
+    try {
+      await writeChain;
+    } catch (error) {
+      logger.error("write-journal", "append_failed", { error, key: record.key });
+      // Следующая запись должна иметь шанс после устранения краткого сбоя, но
+      // текущую операцию продолжать нельзя: без durable begin внешний POST
+      // снова становится неидемпотентным после рестарта.
+      writeChain = Promise.resolve();
+      throw error;
+    }
   }
 
   async function load() {
@@ -168,21 +175,6 @@ export function createWriteJournal({ filePath = defaultFilePath } = {}) {
       await append({ kind: "done", key, method, result, meta, outcome });
       applyRecord({ kind: "done", key, method, result, meta, outcome, ts: new Date().toISOString() });
     },
-    // Сколько записей журнал ПОДТВЕРДИЛ по этой паре заказ+товар. Основа
-    // сверки append-пути: расхождение с фактом в МойСкладе разрешает исход
-    // оборвавшейся записи. Учитываются оба пути — create тоже кладёт в заказ
-    // одну позицию этого товара.
-    countApplied({ orderId, productId } = {}) {
-      if (!orderId || !productId) return 0;
-      let count = 0;
-      for (const entry of entries.values()) {
-        if (entry.status !== "done") continue;
-        if (entry.meta?.orderId === orderId && entry.meta?.productId === productId) {
-          count += 1;
-        }
-      }
-      return count;
-    },
     async fail(key, method, error) {
       const outcome = classifyWriteOutcome(error);
       const message = error instanceof Error ? error.message : String(error);
@@ -216,6 +208,7 @@ export function wrapWithWriteJournal(client, journal, keyBuilders, options = {})
   const maxAttempts = Math.max(1, Number(retryAttempts) || 1);
   const baseDelayMs = Math.max(0, Number(retryBaseDelayMs) || 0);
   const wrapped = { ...client };
+  const inFlightByKey = new Map();
 
   for (const [method, buildKey] of Object.entries(keyBuilders)) {
     const original = client[method];
@@ -226,48 +219,80 @@ export function wrapWithWriteJournal(client, journal, keyBuilders, options = {})
     const bound = original.bind(client);
     const buildMeta = metaBuilders[method] || null;
 
-    wrapped[method] = async (...args) => {
-      const key = buildKey(...args);
-      if (!key) {
-        return bound(...args);
-      }
-
+    const execute = async (key, args) => {
       const known = journal.lookup(key);
+      const normalizeResult = (result) => {
+        if (!result || typeof result !== "object") return result;
+        if (method === "createCustomerOrderReservation" && !result.id && result.orderId) {
+          return { ...result, id: result.orderId };
+        }
+        if (method === "appendPositionToCustomerOrder" && !result.orderId && result.id) {
+          return { ...result, orderId: result.id };
+        }
+        return result;
+      };
 
-      // Главная защита: та же бронь уже успешно уехала. Повтор (реконнект,
-      // дубль комментария, ретрай оператора) возвращает прежний результат
-      // вместо второго заказа в МойСкладе.
       if (known?.status === "done") {
         logger.warn(domain, "write_deduplicated", { method, key, result: known.result });
-        return known.result;
+        return normalizeResult(known.result);
       }
 
-      const beginMeta = buildMeta ? buildMeta(...args) : null;
-      await journal.begin(key, method, beginMeta);
-
-      // orderId create-пути известен только ПОСЛЕ успеха — достаём из ответа,
-      // иначе countApplied не увидит позицию, созданную вместе с заказом.
-      const completeMeta = (result) => ({
-        ...(beginMeta || {}),
-        orderId: beginMeta?.orderId || result?.id || result?.orderId || null,
+      const builtMeta = buildMeta ? buildMeta(...args) : null;
+      const completeMeta = (result, baseMeta = builtMeta) => ({
+        ...(baseMeta || {}),
+        orderId: baseMeta?.orderId || result?.id || result?.orderId || null,
       });
 
-      let lastError = null;
+      // После рестарта pending/unknown может означать «POST применился, done не
+      // успел записаться». Новый POST запрещён до сверки прежней попытки.
+      if (known?.status === "pending" || known?.status === "unknown") {
+        const previousMethod = known.method || method;
+        const verdict = reconciler
+          ? await reconciler.resolve({ method: previousMethod, args: args[0], key, entry: known })
+          : { status: "inconclusive", reason: "reconciler_missing" };
+        logger.warn(domain, "previous_write_reconciled", {
+          method: previousMethod,
+          currentMethod: method,
+          key,
+          previousStatus: known.status,
+          verdict: verdict.status,
+          reason: verdict.reason || null,
+        });
+        if (verdict.status === "applied") {
+          await journal.complete(
+            key,
+            previousMethod,
+            verdict.result ?? null,
+            completeMeta(verdict.result, known.meta),
+            "applied_reconciled",
+          );
+          return normalizeResult(verdict.result);
+        }
+        if (verdict.status !== "not_applied") {
+          const error = new Error(`Previous MoySklad write outcome is unknown (${verdict.reason || "inconclusive"})`);
+          error.code = "MOYSKLAD_WRITE_OUTCOME_UNKNOWN";
+          throw error;
+        }
+      }
 
+      // Append-сверке нужен снимок ДО записи. Считать только journal entries
+      // нельзя: заказ может содержать старые или ручные позиции.
+      const beginMeta = reconciler?.prepare
+        ? await reconciler.prepare({ method, args: args[0], key, meta: builtMeta })
+        : builtMeta;
+      await journal.begin(key, method, beginMeta);
+
+      let lastError = null;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
           const result = await bound(...args);
-          await journal.complete(key, method, result ?? null, completeMeta(result));
+          await journal.complete(key, method, result ?? null, completeMeta(result, beginMeta));
           return result;
         } catch (error) {
           lastError = error;
           let outcome = classifyWriteOutcome(error);
 
-          // Исход неизвестен: запрос мог быть применён до потери ответа.
-          // Повторять вслепую нельзя — сначала спрашиваем МойСклад.
           if (outcome === "unknown" && reconciler) {
-            // Методы записи принимают один объект-аргумент — сверке нужен он,
-            // а не массив аргументов обёртки.
             const verdict = await reconciler.resolve({ method, args: args[0], key });
             logger.warn(domain, "write_reconciled", {
               method,
@@ -278,20 +303,21 @@ export function wrapWithWriteJournal(client, journal, keyBuilders, options = {})
             });
 
             if (verdict.status === "applied") {
-              await journal.complete(key, method, verdict.result ?? null, completeMeta(verdict.result), "applied_reconciled");
+              await journal.complete(
+                key,
+                method,
+                verdict.result ?? null,
+                completeMeta(verdict.result, beginMeta),
+                "applied_reconciled",
+              );
               return verdict.result;
             }
-            if (verdict.status === "not_applied") {
-              outcome = "not_applied";
-            }
+            if (verdict.status === "not_applied") outcome = "not_applied";
           }
 
-          // Повторяем только когда точно знаем, что записи не появилось.
           if (outcome === "not_applied" && attempt < maxAttempts) {
             logger.warn(domain, "write_retry_scheduled", { method, key, attempt, nextAttempt: attempt + 1 });
-            if (baseDelayMs > 0) {
-              await delay(baseDelayMs * 2 ** (attempt - 1));
-            }
+            if (baseDelayMs > 0) await delay(baseDelayMs * 2 ** (attempt - 1));
             continue;
           }
 
@@ -300,8 +326,23 @@ export function wrapWithWriteJournal(client, journal, keyBuilders, options = {})
           throw error;
         }
       }
-
       throw lastError;
+    };
+
+    wrapped[method] = async (...args) => {
+      const key = buildKey(...args);
+      if (!key) return bound(...args);
+
+      const active = inFlightByKey.get(key);
+      if (active) return active;
+
+      const promise = execute(key, args);
+      inFlightByKey.set(key, promise);
+      try {
+        return await promise;
+      } finally {
+        if (inFlightByKey.get(key) === promise) inFlightByKey.delete(key);
+      }
     };
   }
 

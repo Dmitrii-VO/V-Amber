@@ -201,6 +201,9 @@ async function main() {
   const buildReservationMeta = (args) => ({
     productId: args?.activeLot?.product?.id || null,
     orderId: args?.orderId || null,
+    counterpartyId: args?.counterparty?.id || null,
+    commentId: args?.reservation?.commentId || null,
+    lotSessionId: args?.activeLot?.lotSessionId || null,
   });
 
   const journaledMoysklad = wrapWithWriteJournal(

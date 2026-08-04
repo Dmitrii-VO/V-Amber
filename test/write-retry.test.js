@@ -26,8 +26,19 @@ const keyBuilders = {
 };
 
 const metaBuilders = {
-  createCustomerOrderReservation: (args) => ({ productId: args?.activeLot?.product?.id || null, orderId: null }),
-  appendPositionToCustomerOrder: (args) => ({ productId: args?.activeLot?.product?.id || null, orderId: args?.orderId || null }),
+  createCustomerOrderReservation: (args) => ({
+    productId: args?.activeLot?.product?.id || null,
+    orderId: null,
+    counterpartyId: args?.counterparty?.id || null,
+    commentId: args?.reservation?.commentId || null,
+    lotSessionId: args?.activeLot?.lotSessionId || null,
+  }),
+  appendPositionToCustomerOrder: (args) => ({
+    productId: args?.activeLot?.product?.id || null,
+    orderId: args?.orderId || null,
+    commentId: args?.reservation?.commentId || null,
+    lotSessionId: args?.activeLot?.lotSessionId || null,
+  }),
 };
 
 function timeoutError() {
@@ -36,6 +47,10 @@ function timeoutError() {
 
 function connectionError() {
   return Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+}
+
+function connectionResetError() {
+  return Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
 }
 
 // Клиент-дублёр: считает попытки и играет заданный сценарий ошибок.
@@ -64,12 +79,15 @@ const ARGS = {
   counterparty: COUNTERPARTY,
 };
 
-async function buildWrapped(filePath, client, { reconciler = null, retryAttempts = 2 } = {}) {
+async function buildWrapped(filePath, client, { reconciler = null, moysklad = null, retryAttempts = 2 } = {}) {
   const journal = createWriteJournal({ filePath });
   await journal.load();
+  const activeReconciler = reconciler || (moysklad
+    ? createReservationReconciler({ moysklad, journal })
+    : null);
   const wrapped = wrapWithWriteJournal(client, journal, keyBuilders, {
     metaBuilders,
-    reconciler,
+    reconciler: activeReconciler,
     retryAttempts,
     retryBaseDelayMs: 0,
   });
@@ -85,6 +103,22 @@ test("обрыв соединения — запись заведомо не д�
 
     assert.equal(client.createCalls, 2, "после ECONNREFUSED должна быть вторая попытка");
     assert.equal(result.id, "order-2");
+  });
+});
+
+test("ECONNRESET сверяется, а не повторяется вслепую", async () => {
+  await withTempJournal(async (filePath) => {
+    const client = makeClient([connectionResetError()]);
+    const moysklad = {
+      async findCustomerOrderByCommentMarker() { return { id: "order-applied", name: "00042" }; },
+      async resolveFirstOrderPositionId() { return "pos-applied"; },
+    };
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
+
+    const result = await wrapped.createCustomerOrderReservation(ARGS);
+
+    assert.equal(client.createCalls, 1, "reset после POST мог произойти уже после применения записи");
+    assert.equal(result.id, "order-applied");
   });
 });
 
@@ -107,9 +141,7 @@ test("сверка нашла заказ — второй записи не бу
       },
       async resolveFirstOrderPositionId() { return "pos-lost"; },
     };
-    const { journal, wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 0 } }),
-    });
+    const { journal, wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     const result = await wrapped.createCustomerOrderReservation(ARGS);
 
@@ -127,9 +159,7 @@ test("сверка не нашла заказ — запись повторяе�
       async findCustomerOrderByCommentMarker() { return null; },
       async resolveFirstOrderPositionId() { return null; },
     };
-    const { wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 0 } }),
-    });
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     const result = await wrapped.createCustomerOrderReservation(ARGS);
 
@@ -145,9 +175,7 @@ test("сверка не смогла ответить — не угадывае�
       async findCustomerOrderByCommentMarker() { throw new Error("МойСклад недоступен"); },
       async resolveFirstOrderPositionId() { return null; },
     };
-    const { journal, wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 0 } }),
-    });
+    const { journal, wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     await assert.rejects(() => wrapped.createCustomerOrderReservation(ARGS), /timed out/);
     assert.equal(client.createCalls, 1, "при неразрешимом исходе повтор запрещён");
@@ -163,9 +191,7 @@ test("без готового контрагента сверка честно �
       async findCustomerOrderByCommentMarker() { searched = true; return null; },
       async resolveFirstOrderPositionId() { return null; },
     };
-    const { wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 0 } }),
-    });
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     // counterparty отсутствует — разрешать его через ensureCounterparty нельзя,
     // это запись.
@@ -177,15 +203,134 @@ test("без готового контрагента сверка честно �
   });
 });
 
-test("append: позиций на одну больше, чем подтвердил журнал — потерянная запись доехала", async () => {
+test("pending после рестарта сверяется до нового POST", async () => {
+  await withTempJournal(async (filePath) => {
+    const key = "lot-1::42::7";
+    const firstJournal = createWriteJournal({ filePath });
+    await firstJournal.load();
+    await firstJournal.begin(key, "createCustomerOrderReservation", { productId: "prod-1", orderId: null });
+
+    const client = makeClient([]);
+    const moysklad = {
+      async findCustomerOrderByCommentMarker() { return { id: "order-before-crash", name: "00042" }; },
+      async resolveFirstOrderPositionId() { return "pos-before-crash"; },
+    };
+    const { journal, wrapped } = await buildWrapped(filePath, client, { moysklad });
+
+    const result = await wrapped.createCustomerOrderReservation(ARGS);
+
+    assert.equal(client.createCalls, 0, "незавершённый journal entry нельзя повторять до сверки");
+    assert.equal(result.id, "order-before-crash");
+    assert.equal(journal.lookup(key).status, "done");
+  });
+});
+
+test("pending без убедительной сверки блокирует новый POST", async () => {
+  await withTempJournal(async (filePath) => {
+    const key = "lot-1::42::7";
+    const firstJournal = createWriteJournal({ filePath });
+    await firstJournal.load();
+    await firstJournal.begin(key, "createCustomerOrderReservation");
+
+    const client = makeClient([]);
+    const { wrapped } = await buildWrapped(filePath, client);
+
+    await assert.rejects(
+      () => wrapped.createCustomerOrderReservation(ARGS),
+      /Previous MoySklad write outcome is unknown/,
+    );
+    assert.equal(client.createCalls, 0);
+  });
+});
+
+test("pending сверяется по сохранённому методу, если маршрут после рестарта изменился", async () => {
+  await withTempJournal(async (filePath) => {
+    const key = "lot-1::42::7";
+    const firstJournal = createWriteJournal({ filePath });
+    await firstJournal.load();
+    await firstJournal.begin(key, "appendPositionToCustomerOrder", {
+      productId: "prod-1",
+      orderId: "order-before-crash",
+      positionCountBefore: 1,
+      commentId: 7,
+      lotSessionId: "lot-1",
+    });
+
+    const client = makeClient([]);
+    const moysklad = {
+      async countPositionsForProduct(orderId) {
+        assert.equal(orderId, "order-before-crash");
+        return 2;
+      },
+    };
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
+
+    // Текущий роут выбрал create, но журнал знает, что до падения шёл append.
+    const result = await wrapped.createCustomerOrderReservation(ARGS);
+
+    assert.equal(client.createCalls, 0);
+    assert.equal(result.id, "order-before-crash");
+  });
+});
+
+test("done append нормализуется для create-маршрута после рестарта", async () => {
+  await withTempJournal(async (filePath) => {
+    const key = "lot-1::42::7";
+    const firstJournal = createWriteJournal({ filePath });
+    await firstJournal.load();
+    await firstJournal.begin(key, "appendPositionToCustomerOrder", { orderId: "order-existing" });
+    await firstJournal.complete(
+      key,
+      "appendPositionToCustomerOrder",
+      { orderId: "order-existing", positionId: "pos-existing", positionsAdded: 1 },
+      { orderId: "order-existing" },
+    );
+
+    const client = makeClient([]);
+    const { wrapped } = await buildWrapped(filePath, client);
+    const result = await wrapped.createCustomerOrderReservation(ARGS);
+
+    assert.equal(client.createCalls, 0);
+    assert.equal(result.id, "order-existing");
+    assert.equal(result.positionId, "pos-existing");
+  });
+});
+
+test("pending create возвращает фактический заказ новому append-маршруту", async () => {
+  await withTempJournal(async (filePath) => {
+    const key = "lot-1::42::7";
+    const firstJournal = createWriteJournal({ filePath });
+    await firstJournal.load();
+    await firstJournal.begin(key, "createCustomerOrderReservation", {
+      productId: "prod-1",
+      counterpartyId: "cp-1",
+      commentId: 7,
+      lotSessionId: "lot-1",
+    });
+
+    const client = makeClient([]);
+    const moysklad = {
+      async findCustomerOrderByCommentMarker() { return { id: "order-before-crash", name: "00042" }; },
+      async resolveFirstOrderPositionId() { return "pos-before-crash"; },
+      async countPositionsForProduct() { throw new Error("current append must not prepare"); },
+    };
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
+    const result = await wrapped.appendPositionToCustomerOrder({ ...ARGS, orderId: "order-current-cache" });
+
+    assert.equal(client.appendCalls, 0);
+    assert.equal(result.id, "order-before-crash");
+    assert.equal(result.orderId, "order-before-crash");
+  });
+});
+
+test("append: позиция появилась относительно pre-write baseline — потерянная запись доехала", async () => {
   await withTempJournal(async (filePath) => {
     const client = makeClient([timeoutError()]);
+    const counts = [1, 2];
     const moysklad = {
-      async countPositionsForProduct() { return 2; },
+      async countPositionsForProduct() { return counts.shift(); },
     };
-    const { wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 1 } }),
-    });
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     const result = await wrapped.appendPositionToCustomerOrder({ ...ARGS, orderId: "order-9" });
 
@@ -194,15 +339,14 @@ test("append: позиций на одну больше, чем подтверд
   });
 });
 
-test("append: позиций столько же, сколько подтвердил журнал — запись не дошла, повторяем", async () => {
+test("append: число позиций не изменилось относительно baseline — повторяем", async () => {
   await withTempJournal(async (filePath) => {
     const client = makeClient([timeoutError()]);
+    const counts = [1, 1];
     const moysklad = {
-      async countPositionsForProduct() { return 1; },
+      async countPositionsForProduct() { return counts.shift(); },
     };
-    const { wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 1 } }),
-    });
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     const result = await wrapped.appendPositionToCustomerOrder({ ...ARGS, orderId: "order-9" });
 
@@ -215,12 +359,11 @@ test("append: расхождение больше чем на одну пози�
   await withTempJournal(async (filePath) => {
     const client = makeClient([timeoutError()]);
     // В заказ писал кто-то ещё (оператор руками) — вывод был бы догадкой.
+    const counts = [1, 5];
     const moysklad = {
-      async countPositionsForProduct() { return 5; },
+      async countPositionsForProduct() { return counts.shift(); },
     };
-    const { wrapped } = await buildWrapped(filePath, client, {
-      reconciler: createReservationReconciler({ moysklad, journal: { countApplied: () => 1 } }),
-    });
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
 
     await assert.rejects(
       () => wrapped.appendPositionToCustomerOrder({ ...ARGS, orderId: "order-9" }),
@@ -230,24 +373,38 @@ test("append: расхождение больше чем на одну пози�
   });
 });
 
-test("countApplied считает и создание заказа, и дописанные позиции", async () => {
+test("append: без pre-write baseline внешний POST не запускается", async () => {
   await withTempJournal(async (filePath) => {
     const client = makeClient([]);
-    const { journal, wrapped } = await buildWrapped(filePath, client);
+    const moysklad = {
+      async countPositionsForProduct() { throw new Error("baseline unavailable"); },
+    };
+    const { wrapped } = await buildWrapped(filePath, client, { moysklad });
 
-    // create кладёт в заказ первую позицию товара; orderId известен из ответа.
-    await wrapped.createCustomerOrderReservation(ARGS);
-    const orderId = "order-1";
-    await wrapped.appendPositionToCustomerOrder({
-      ...ARGS,
-      orderId,
-      reservation: { viewerId: 42, commentId: 8 },
-    });
-
-    assert.equal(
-      journal.countApplied({ orderId, productId: "prod-1" }),
-      2,
-      "создание заказа тоже добавило позицию этого товара",
+    await assert.rejects(
+      () => wrapped.appendPositionToCustomerOrder({ ...ARGS, orderId: "order-9" }),
+      /Cannot persist a safe append baseline/,
     );
+    assert.equal(client.appendCalls, 0);
+  });
+});
+
+test("одинаковые ключи выполняются одним внешним вызовом", async () => {
+  await withTempJournal(async (filePath) => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const client = makeClient(async function waitForRelease() {
+      await gate;
+      return { id: "order-one", positionId: "pos-one" };
+    });
+    const { wrapped } = await buildWrapped(filePath, client);
+
+    const first = wrapped.createCustomerOrderReservation(ARGS);
+    const second = wrapped.createCustomerOrderReservation(ARGS);
+    release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    assert.equal(client.createCalls, 1);
+    assert.deepEqual(secondResult, firstResult);
   });
 });

@@ -1422,7 +1422,12 @@ export function attachWsServer(httpServer, config, services = {}) {
           // соседней позиции того же товара в этом же заказе.
           order = (appendResult && appendResult.skipped === true && appendResult.safeMode === true)
             ? appendResult
-            : { ...existingOrder, positionId: appendResult?.positionId || null };
+            : (appendResult?.id && appendResult.id !== existingOrder.id)
+              // Journal dedup may recover a create from before restart even if
+              // current routing selected append. Keep the order that actually
+              // received the position instead of attaching it to stale cache.
+              ? appendResult
+              : { ...existingOrder, positionId: appendResult?.positionId || null };
         } else {
           order = await moysklad.createCustomerOrderReservation({
             activeLot: lot,

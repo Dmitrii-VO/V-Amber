@@ -44,9 +44,10 @@ creating a second customer order.
 Writes without a `commentId` (manual reservation from the banner, voice paths)
 get no key and are not deduplicated — behavior is unchanged for them.
 
-Failure outcomes are classified conservatively: `not_applied` only for
-connection errors and 4xx other than 429; timeouts and 5xx stay `unknown`,
-because MoySklad may have applied the write before the response was lost. See
+Failure outcomes are classified conservatively: `not_applied` only when a
+connection could not be established and for 4xx responses other than 429.
+Timeouts, connection resets, and 5xx responses stay `unknown`, because
+MoySklad may have applied the write before the response was lost. See
 [[reservation-flow]] and [[order-recovery-from-logs]].
 
 ### Retry and reconciliation
@@ -64,14 +65,22 @@ A write is retried only when the outcome is known to be `not_applied`. For
   `commentId=` marker that `createCustomerOrderReservation` already writes.
   Nothing extra is stamped into MoySklad; operators read those descriptions.
   Order state is not filtered, since the operator may already have closed it.
-- **Append path** — compares how many positions of the product are really in
-  the order against how many writes the journal has confirmed
-  (`journal.countApplied`). Exactly one more means the lost write landed.
+- **Append path** — records the product position count before the write in the
+  durable `begin` entry, then compares it with the count after an unknown
+  outcome. Exactly one additional position means the lost write landed. This
+  baseline includes positions created before the journal existed and positions
+  that an operator added manually.
 
 Any other difference returns `inconclusive`, and so does a failed
 reconciliation or a missing counterparty. `inconclusive` never retries and
 never claims success — it surfaces the reservation to the operator instead of
 risking a duplicate order or a silently lost бронь.
+
+On startup, `pending` and `unknown` entries are reconciled before any new POST
+with the same key. Concurrent calls with the same key share one in-flight
+operation. If the journal cannot persist `begin`, the external write does not
+start. Append writes also stop when the pre-write position baseline cannot be
+read, because an unknown result would otherwise be impossible to reconcile.
 
 ## Reservation digest log
 

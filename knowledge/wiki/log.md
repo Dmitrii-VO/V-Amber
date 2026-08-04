@@ -1152,9 +1152,10 @@ to `MOYSKLAD_REQUEST_TIMEOUT_MS`. Retry fires only for `not_applied`.
 **Reconciliation.** `server/write-reconciler.js` resolves the `unknown` outcome
 by asking MoySklad. Create path: search the counterparty's orders for the
 `commentId=` marker `createCustomerOrderReservation` already writes into
-`description`. Append path: compare real position count for the product against
-`journal.countApplied({orderId, productId})` — exactly one more means the lost
-write landed.
+`description`. Append path: persist the real product-position count in `begin`
+before the POST, then compare it with the count after an unknown outcome.
+Exactly one additional position means the lost write landed. This avoids
+mistaking old or manually added positions for the current write.
 
 Deliberately **not** done: stamping extra markers into order descriptions to
 make the append path directly identifiable. Operators read those descriptions;
@@ -1169,6 +1170,11 @@ never claims success. Known narrow risk, accepted and documented: if the
 operator manually adds the same product to the same order inside the seconds
 between a lost write and its reconciliation, the count check could read as
 "applied". The ±1 bound keeps this to a single-position coincidence.
+
+Follow-up review also closed three retry gaps: `ECONNRESET` is now `unknown`,
+unfinished journal entries are reconciled before a new POST after restart, and
+a failed durable `begin` blocks the external write. Calls with the same key are
+serialized in-process.
 
 Two new read-only MoySklad methods: `countPositionsForProduct` and
 `findCustomerOrderByCommentMarker`.

@@ -8,17 +8,17 @@ import { logger } from "./logger.js";
 //
 // Ничего специально в МойСклад для этого не пишется. Create-путь опознаётся по
 // маркеру commentId, который createCustomerOrderReservation и так кладёт в
-// description. Append-путь — сравнением: сколько позиций товара реально в
-// заказе против того, сколько записей журнал подтвердил.
+// description. Append-путь — сравнением числа позиций до записи и после
+// неизвестного исхода.
 //
 // Ответ "inconclusive" — законный и намеренный: лучше оставить бронь оператору
 // с громкой записью в логе, чем угадать и создать дубль или потерять бронь.
 
 export function createReservationReconciler({ moysklad, journal } = {}) {
-  async function resolveCreate(args) {
-    const counterpartyId = args?.counterparty?.id || null;
-    const commentId = args?.reservation?.commentId || null;
-    const lotSessionId = args?.activeLot?.lotSessionId || null;
+  async function resolveCreate(args, entry) {
+    const counterpartyId = entry?.meta?.counterpartyId || args?.counterparty?.id || null;
+    const commentId = entry?.meta?.commentId || args?.reservation?.commentId || null;
+    const lotSessionId = entry?.meta?.lotSessionId || args?.activeLot?.lotSessionId || null;
 
     // Контрагента на этом пути разрешает сам createCustomerOrderReservation
     // через ensureCounterparty — а это запись (может создать контрагента).
@@ -59,42 +59,61 @@ export function createReservationReconciler({ moysklad, journal } = {}) {
     };
   }
 
-  async function resolveAppend(args) {
-    const orderId = args?.orderId || null;
-    const productId = args?.activeLot?.product?.id || null;
+  async function resolveAppend(args, key, entry) {
+    const journalEntry = entry || journal.lookup(key);
+    const orderId = journalEntry?.meta?.orderId || args?.orderId || null;
+    const productId = journalEntry?.meta?.productId || args?.activeLot?.product?.id || null;
     if (!orderId || !productId) {
       return { status: "inconclusive", reason: "order_or_product_missing" };
     }
 
-    const known = journal.countApplied({ orderId, productId });
+    const baseline = journalEntry?.meta?.positionCountBefore;
+    if (!Number.isInteger(baseline) || baseline < 0) {
+      return { status: "inconclusive", reason: "position_baseline_missing" };
+    }
     const actual = await moysklad.countPositionsForProduct(orderId, productId, {
       source: "write_reconcile",
     });
 
-    // Ровно на одну больше, чем журнал подтвердил — это наша потерянная
-    // запись, она доехала.
-    if (actual === known + 1) {
-      return { status: "applied", result: { orderId, positionId: null, positionsAdded: 1 } };
+    if (actual === baseline + 1) {
+      return { status: "applied", result: { id: orderId, orderId, positionId: null, positionsAdded: 1 } };
     }
 
-    if (actual === known) {
+    if (actual === baseline) {
       return { status: "not_applied" };
     }
 
-    // actual < known — позицию удалили (отмена брони оператором).
-    // actual > known + 1 — в заказ писал кто-то ещё, например оператор руками.
+    // actual < baseline — позицию удалили (отмена брони оператором).
+    // actual > baseline + 1 — в заказ писал кто-то ещё, например оператор.
     // В обоих случаях наш вывод был бы догадкой.
-    return { status: "inconclusive", reason: "position_count_mismatch", known, actual };
+    return { status: "inconclusive", reason: "position_count_mismatch", baseline, actual };
   }
 
   return {
-    async resolve({ method, args }) {
+    async prepare({ method, args, meta }) {
+      if (method !== "appendPositionToCustomerOrder") return meta;
+      const orderId = args?.orderId || null;
+      const productId = args?.activeLot?.product?.id || null;
+      if (!orderId || !productId) return meta;
+      try {
+        const positionCountBefore = await moysklad.countPositionsForProduct(orderId, productId, {
+          source: "write_reconcile_baseline",
+        });
+        return { ...(meta || {}), positionCountBefore };
+      } catch (error) {
+        logger.warn("write-reconciler", "baseline_failed", { method, orderId, productId, error });
+        const baselineError = new Error("Cannot persist a safe append baseline before MoySklad write", { cause: error });
+        baselineError.code = "MOYSKLAD_WRITE_BASELINE_FAILED";
+        throw baselineError;
+      }
+    },
+    async resolve({ method, args, key, entry = null }) {
       try {
         if (method === "createCustomerOrderReservation") {
-          return await resolveCreate(args);
+          return await resolveCreate(args, entry);
         }
         if (method === "appendPositionToCustomerOrder") {
-          return await resolveAppend(args);
+          return await resolveAppend(args, key, entry);
         }
         return { status: "inconclusive", reason: "unsupported_method" };
       } catch (error) {
