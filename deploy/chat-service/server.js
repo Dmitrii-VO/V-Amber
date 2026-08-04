@@ -57,6 +57,14 @@ const BROADCAST_STATE_TTL_MS = Number(process.env.BROADCAST_STATE_TTL_MS) || 12 
 // каждые ~5 минут, пока карточка висит. TTL взят с большим запасом (4 такта) —
 // пара потерянных keepalive'ов из-за сети не должна гасить карточку в эфире.
 const LOT_TTL_MS = Number(process.env.LOT_TTL_MS) || 20 * 60_000;
+// «Сейчас смотрят N» — присутствие считается по опросу GET /chat/messages,
+// который страница /efir/ и так делает раз в 3 секунды: отдельного heartbeat
+// не заводим. TTL с запасом в несколько тактов, чтобы счётчик не мигал из-за
+// одного потерянного запроса; ушедшая вкладка пропадает из счётчика за ~15с.
+const ONLINE_TTL_MS = Number(process.env.ONLINE_TTL_MS) || 15_000;
+// Потолок на случай мусорных/подделанных clientId: записи и так живут 15
+// секунд, но пусть даже всплеск не растит Map неограниченно.
+const ONLINE_MAX_ENTRIES = 10_000;
 
 if (!OPERATOR_TOKEN) {
   console.error("OPERATOR_TOKEN is required (X-Chat-Token secret for the operator feed)");
@@ -247,6 +255,41 @@ function isOperator(request) {
   return request.headers["x-chat-token"] === OPERATOR_TOKEN;
 }
 
+// ── Присутствие зрителей ────────────────────────────────────────────────────
+// Ключ — случайный clientId, который страница /efir/ хранит у себя и шлёт
+// заголовком: перезагрузка вкладки и вторая вкладка того же зрителя считаются
+// одним человеком. Старые кэшированные страницы заголовка не шлют — для них
+// падаем на хэш IP+User-Agent (не сам IP: в память кладём только хэш).
+// Опросы V-Amber (X-Chat-Token) в счётчик не идут — оператор не зритель.
+const onlineByClient = new Map(); // clientKey → ts последнего запроса
+
+function onlineKey(request) {
+  const raw = String(request.headers["x-efir-client"] || "").slice(0, 64);
+  const clientId = raw.replace(/[^A-Za-z0-9_-]/g, "");
+  if (clientId.length >= 8) return `c:${clientId}`;
+  const fingerprint = `${clientIp(request)}|${request.headers["user-agent"] || ""}`;
+  return `h:${createHash("sha256").update(fingerprint).digest("hex").slice(0, 16)}`;
+}
+
+function touchOnline(request) {
+  if (isOperator(request)) return;
+  if (onlineByClient.size >= ONLINE_MAX_ENTRIES) pruneOnline();
+  if (onlineByClient.size >= ONLINE_MAX_ENTRIES) return;
+  onlineByClient.set(onlineKey(request), Date.now());
+}
+
+function pruneOnline() {
+  const deadline = Date.now() - ONLINE_TTL_MS;
+  for (const [key, ts] of onlineByClient) {
+    if (ts < deadline) onlineByClient.delete(key);
+  }
+}
+
+function countOnline() {
+  pruneOnline();
+  return onlineByClient.size;
+}
+
 function clientIp(request) {
   // За nginx реальный адрес в X-Real-IP / первый X-Forwarded-For.
   return String(request.headers["x-real-ip"]
@@ -386,6 +429,7 @@ const server = createServer(async (request, response) => {
         ok: true,
         messages: messages.length,
         viewers: viewersById.size,
+        online: countOnline(),
         sessionStartSeq,
         lot: currentLotCard()
           ? { code: currentLot.code, status: currentLot.status, rev: currentLot.rev }
@@ -540,6 +584,8 @@ const server = createServer(async (request, response) => {
     }
 
     if (route === "GET /chat/messages") {
+      // Опрос страницы = признак живого зрителя (см. touchOnline выше).
+      touchOnline(request);
       // Проверяем именно afterParam, а не Number(after): get() при отсутствии
       // параметра возвращает null, а Number(null) === 0 (не NaN) — из-за чего
       // ветка «последние 50» была недостижима и стартовая выдача отдавала
@@ -553,14 +599,15 @@ const server = createServer(async (request, response) => {
       const slice = afterParam !== null && Number.isFinite(after)
         ? inSession.filter((m) => m.seq > after).slice(0, PUBLIC_PAGE_SIZE)
         : inSession.slice(-50);
-      // Карточку лота отдаём вместе с сообщениями: страница /efir/ и так
-      // опрашивает этот эндпоинт раз в 3 секунды, второй поллер ради лота был
-      // бы лишним трафиком на том же интервале.
+      // Карточку лота и счётчик зрителей отдаём вместе с сообщениями: страница
+      // /efir/ и так опрашивает этот эндпоинт раз в 3 секунды, второй поллер
+      // ради них был бы лишним трафиком на том же интервале.
       return sendJson(response, 200, {
         latestSeq: lastSeq,
         messages: slice.map(publicMessage),
         lot: currentLotCard(),
         broadcast: currentBroadcastState(),
+        online: countOnline(),
       });
     }
 
