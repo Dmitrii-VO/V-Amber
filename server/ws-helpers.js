@@ -122,6 +122,44 @@ export function getReservationReplyMessage(event, options = {}) {
   return "";
 }
 
+// Ответ покупателю на его комментарий-отмену («отмена 03204»). Инструкция
+// зрителям сама зовёт этот формат, но до 2026-08-04 отмена отвечала ТОЛЬКО
+// оператору в дашборд: покупатель не видел ни успеха, ни отказа, и «заказ уже
+// проведён» выглядел для него ровно как успешно снятая бронь.
+//
+// Три исхода намеренно разведены по текстам — обещать «снято», когда позиция
+// осталась в заказе, хуже, чем молчать:
+// - cancelled  — позиция реально удалена;
+// - not_found  — брони за этим покупателем нет (чужой код, опечатка, уже сняли);
+// - failed     — снять не удалось (проведённый заказ, safe-mode, сбой МойСклада),
+//                разбирает оператор.
+export function getCancelReplyMessage(outcome, options = {}) {
+  const code = options?.code || null;
+  const codeSuffix = code ? ` (код ${code})` : "";
+  const viewerName = String(options?.viewerName || "").trim();
+  const namePrefix = viewerName ? `${viewerName}, ` : "";
+
+  if (outcome === "cancelled") {
+    return `${namePrefix}бронь снята${codeSuffix}.`;
+  }
+
+  if (outcome === "not_found") {
+    return `${namePrefix}брони${codeSuffix} за вами не нашли. Проверьте артикул.`;
+  }
+
+  if (outcome === "failed") {
+    return `${namePrefix}не получилось снять бронь${codeSuffix} автоматически — оператор проверит вручную.`;
+  }
+
+  // Отмена без артикула: у покупателя может быть несколько броней, и сервер
+  // не угадывает. Подсказываем ровно тот формат, что и в инструкции зрителям.
+  if (outcome === "no_code") {
+    return `${namePrefix}напишите артикул вместе с отменой — например «отмена 03204».`;
+  }
+
+  return "";
+}
+
 export function getCommittedReservationCount(state) {
   return Math.max(0, state?.committedReservationCount || 0);
 }

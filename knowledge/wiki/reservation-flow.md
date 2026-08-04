@@ -8,7 +8,15 @@ lot.
 `server/reservation-parser.js` owns the parser. The product code is always
 required. Accepted forms:
 
-- bare code only: `03204` (digits + punctuation, no letters)
+- bare code only: `03204` (digits + punctuation, no letters), optionally with a
+  quantity marker and nothing else: `03204 2 шт`, `03204 х2`, `03204 две штуки`,
+  `03204 пара`. The marker is the **only** letters allowed without a keyword —
+  `03204 сколько штук?` is still ignored. A short number **eaten by the marker
+  itself** is a count, not an article: `22 шт` / `10 пар` reserve nothing, unless
+  the number is the open lot's code or a keyword is present (`бронь 22 шт`).
+  Comments with no letters at all parse exactly as before this relaxation. This mirrors the viewer instruction
+  («Нужно несколько — “03204 2 шт”»), which until 2026-08-04 promised a format
+  the parser dropped **entirely** — not «1 instead of 2», a lost бронь.
 - short prefixes: `бр`, `брн`, `брнь` (e.g. `бр 03204`)
 - full keywords: `бронь`, `бронируй(те)`, `забронируй`, `беру`, `возьму`,
   `куплю`, `хочу`, `держи(те)`, `удержи(те)`, `заберу`, `отложи(те)`,
@@ -158,6 +166,22 @@ across the эфиры of 24–26 July alone. A buyer comment now does it:
   `warning` on anything else — no counterparty, no order, no position, safe mode,
   MoySklad failure. Logged as `reservation_cancelled_by_comment` (with `path`) or
   `cancel_comment_not_executed` (with `reason`).
+- **Every outcome also reaches the buyer** (2026-08-04). Until then the cancel
+  answered the operator only: the buyer saw nothing, and «заказ уже проведён»
+  was indistinguishable from a successful отмена. `getCancelReplyMessage`
+  (`ws-helpers.js`) has three outcomes, deliberately worded apart —
+  `cancelled` («бронь снята»), `not_found` (nothing of theirs to cancel: wrong
+  code, already removed), `failed` (бронь may exist but we may not touch it:
+  проведённый заказ, safe mode, MoySklad error → the operator handles it). A
+  cancel with no code answers with the instruction's own format
+  («отмена 03204») instead of only nagging the operator. **No outcome except
+  `cancelled` may contain the word «снята».**
+- Reply routing mirrors `notifyReservationStatus`: chat comment → chat service
+  message, VK comment → `publishReservationReply`. That call is
+  `video.createComment` on the **live video**, not on the lot's card, so a
+  cancel naming a closed lot still replies under a live post. The poison gate is
+  still asked (the lot that owned the бронь, else `activeLot`): with comments
+  disabled (error 801) one more write would poison the current lot.
 - Repeat delivery of the same comment is a no-op (`processedCancelCommentIds`),
   otherwise the second pass would report a false "бронь не найдена".
 - **The comment poller only runs while some lot is open** (plus a 30 s grace), so
@@ -360,8 +384,11 @@ entries, and sets `event.status = "cancelled"`. The freed slot is available to
 the next buyer immediately. Safe mode blocks the delete: the handler
 re-checks `isSafeMode()` and replies with a warning without touching
 state, and `removePositionFromOrder` is also in the `wrapWithSafeMode`
-list. The cancel is silent to buyers (no public VK reply) to avoid the
-error-801 → `markLotPoisoned` risk. Empty orders are left in MoySklad —
+list. **This operator-initiated cancel stays silent to buyers** — the buyer
+never asked for it, so an unsolicited public comment would only confuse the
+chat, and each extra VK write carries the error-801 → `markLotPoisoned` risk.
+A cancel the buyer *did* ask for does get a reply — see "Cancelling by buyer
+comment" above. Empty orders are left in MoySklad —
 the code never deletes whole customer orders. See
 [[deferred-operator-features]] #16.
 
