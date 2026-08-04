@@ -1137,3 +1137,38 @@ design does not depend on `syncId` at all. If `syncId` is later confirmed, it is
 an optimization, not a redesign.
 
 `npm test`: 465/465.
+
+## 2026-08-05 — reservation events are no longer capped at 20
+
+Third and last piece of the idempotency work. Turned out not to be a storage
+change at all — `lot.reservations.events` is *working state*, not a log, and
+`state.events.slice(-20)` in `ws-server.js` silently broke calculations on any
+lot with more than 20 reservations:
+
+- `backfillLotPositionPricing` stopped repricing evicted positions, so a buyer
+  who reserved early paid the price **without the announced discount**;
+- waitlist promotion (`state.events.find` for `waitlist_pending`) could never
+  reach an evicted buyer, leaving their reservation hanging;
+- `flushOrphanWaitlist` did not migrate evicted entries to the wishlist at lot
+  close;
+- `extractOrphans` in `state-store.js` could not see them during crash recovery.
+
+`committedReservationCount` (added earlier, with a comment about lots over 20
+under-reporting and the stock guard letting extra orders through) was a patch on
+one symptom of this same cap.
+
+Fix is one line — drop the trim. No memory concern: the array is per lot, not
+per эфир.
+
+**Tests are the real deliverable**: `test/ws-server.reservation-events-uncapped.js`
+drives 22 and 25 reservations through the real WS harness. Verified they fail
+with the cap restored and pass without it — a retention test that passes either
+way would be worthless.
+
+**Not covered by a test**: the waitlist-promotion and orphan-flush consequences.
+`waitlist_pending` is a short-lived in-flight state (set only while a previous
+reservation is being written to MoySklad, `ws-server.js`), not a standing queue,
+so it cannot be driven deterministically. A flaky concurrency test would be
+worse than none; the retention fix is the same for all four consumers.
+
+`npm test`: 467/467.
