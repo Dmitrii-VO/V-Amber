@@ -308,3 +308,119 @@ test("проверка дубля смотрит в заказ кампании,
     await harness.close();
   }
 });
+
+// Эфир 04.08.2026, лот 03824. Оператор нажал «✓ забронировать» человеку из
+// баннера, увидел «в бронь» — а следом тот же товар забронировал другой
+// покупатель. Причина: строка внимания живёт 30 минут, и лот под её код к
+// моменту клика уже открыт (оператор его для того и открывает). Безлотовый
+// путь писал позицию в МойСклад мимо учёта лота: committedReservationCount
+// оставался нулевым, а floor=1 в стоковом гейте всегда пропускает ПЕРВУЮ бронь
+// лота — следующий комментарий продавал ту же единицу второй раз.
+const CARD_SINGLE = {
+  id: "p-03824", name: "Кулон", code: "03824",
+  pathName: "Украшения/Кулоны", salePrice: 3900, availableStock: 1,
+};
+
+async function attentionThenOpenLot(harness, client) {
+  client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+  await harness.waitForSession();
+  client.send({ type: "manualCode", code: "03204" });
+  await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03204");
+
+  // Покупатель написал код, лота под него ещё нет → строка внимания.
+  harness.vk.pushComment({ id: 901, fromId: 8101, text: "03824", firstName: "Марго", lastName: "Краснова" });
+  const attention = await client.waitFor((m) => m.type === "reservationAttention", { timeoutMs: 6000 });
+
+  // Оператор открывает лот, чтобы продать этот товар.
+  client.send({ type: "manualCode", code: "03824" });
+  await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03824");
+  return attention;
+}
+
+test("бронь из баннера при открытом лоте учитывается лотом, а не мимо него", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_LOT, "03824": CARD_SINGLE },
+    knownCodes: ["03204", "03824"],
+  });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionThenOpenLot(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    const result = await client.waitFor((m) => m.type === "attentionReservationResult", { timeoutMs: 6000 });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.status, "reserved");
+    // Главное: единственная единица теперь занята в учёте лота.
+    const state = client.lastState();
+    assert.equal(state.activeLot.code, "03824");
+    assert.equal(state.activeLot.reservations.committedReservationCount, 1);
+    // И у брони есть своя строка в списке лота — значит её можно снять кнопкой.
+    const event = state.activeLot.reservations.events.find((e) => e.viewerId === 8101);
+    assert.ok(event, "бронь должна появиться строкой в списке лота");
+    assert.equal(event.status, "reserved");
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("после ручной брони второй покупатель не получает ту же единицу", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_LOT, "03824": CARD_SINGLE },
+    knownCodes: ["03204", "03824"],
+  });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionThenOpenLot(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    // Ровно та ситуация из эфира: следом код пишет другой покупатель.
+    harness.vk.pushComment({ id: 902, fromId: 8102, text: "03824", firstName: "Другой" });
+    const state = await client.waitFor(
+      (m) => m.type === "state"
+        && (m.activeLot?.reservations?.events || []).some((e) => e.viewerId === 8102 && e.status !== "pending_reservation"),
+      { timeoutMs: 6000 },
+    );
+
+    const second = state.activeLot.reservations.events.find((e) => e.viewerId === 8102);
+    assert.equal(second.status, "out_of_stock", "остаток был 1 — вторая бронь не должна пройти");
+    // И в МойСклад ушла ровно одна позиция, а не две.
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(harness.moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("повторный клик по строке при открытом лоте не бронирует второй раз", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03204": CARD_LOT, "03824": { ...CARD_SINGLE, availableStock: 5 } },
+    knownCodes: ["03204", "03824"],
+  });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionThenOpenLot(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    const repeat = await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status !== "reserved",
+      { timeoutMs: 6000 },
+    );
+    assert.match(repeat.status, /already_reserved|expired/);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
