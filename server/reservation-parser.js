@@ -177,6 +177,40 @@ function stripCodeAndQuantity(normalized, code) {
   return rest.replace(STANDALONE_UNIT_RE, " ");
 }
 
+// «22 шт» — единственная цифровая группа здесь ЧИСЛО количества, а не артикул:
+// зритель спрашивает про 22 штуки, а не бронирует лот 22. Без этой проверки
+// послабление ниже открывало такому комментарию путь в бронь (а «22 шт?» — в
+// заказ), чего старое правило «голый код = ни одной буквы» не допускало.
+//
+// Два признака, что цифры всё-таки код: длина (артикулы в каталоге длиннее
+// счётчика) и совпадение с кодом открытого лота — тогда сомнений нет.
+// Число, за которым сразу стоит единица измерения («22 шт», «10 пар»). Шире,
+// чем QUANTITY_PATTERNS: там «пара» — самостоятельный маркер без числа.
+const NUMBER_WITH_UNIT_RE = new RegExp(
+  `(\\d+)\\s*(?:шт(?:ук[аеиуов]?|уки)?|пар[аыуов]?)${NOT_LETTER_AHEAD}`,
+);
+
+function looksLikeQuantityNotCode(normalized, code, preferredCode) {
+  if (preferredCode && String(preferredCode).trim() === code) return false;
+  if (code.length > 2) return false;
+  return [NUMBER_WITH_UNIT_RE, ...QUANTITY_PATTERNS].some((pattern) => {
+    const match = pattern.exec(normalized);
+    return Boolean(match) && match[1] === code;
+  });
+}
+
+// Голый код: кроме кода в комментарии только цифры, пунктуация и маркеры
+// количества. Тексты БЕЗ букв проходят как раньше, слово в слово, — послабление
+// (и проверка выше) касается только тех, где буквы есть, то есть тех, что
+// старое правило отбрасывало целиком.
+function isBareCodeComment(normalized, code, preferredCode) {
+  const hasLetters = !NO_LETTERS_LEFT.test(normalized);
+  if (hasLetters && looksLikeQuantityNotCode(normalized, code, preferredCode)) {
+    return false;
+  }
+  return NO_LETTERS_LEFT.test(stripCodeAndQuantity(normalized, code));
+}
+
 function extractQuantity(normalized, code) {
   if (!normalized) return 1;
   // Словесное количество с единицей измерения: «две штуки», «три пары»,
@@ -224,7 +258,7 @@ export function parseReservationComment(text, options = {}) {
     return { hasReservationKeyword: false, code: null, quantity: 1 };
   }
   const bareCode = pickBestCode(normalized, preferredCode);
-  if (bareCode && NO_LETTERS_LEFT.test(stripCodeAndQuantity(normalized, bareCode))) {
+  if (bareCode && isBareCodeComment(normalized, bareCode, preferredCode)) {
     return {
       hasReservationKeyword: true,
       code: bareCode,

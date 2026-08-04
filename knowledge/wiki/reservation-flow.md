@@ -11,7 +11,10 @@ required. Accepted forms:
 - bare code only: `03204` (digits + punctuation, no letters), optionally with a
   quantity marker and nothing else: `03204 2 шт`, `03204 х2`, `03204 две штуки`,
   `03204 пара`. The marker is the **only** letters allowed without a keyword —
-  `03204 сколько штук?` is still ignored. This mirrors the viewer instruction
+  `03204 сколько штук?` is still ignored. A short number **eaten by the marker
+  itself** is a count, not an article: `22 шт` / `10 пар` reserve nothing, unless
+  the number is the open lot's code or a keyword is present (`бронь 22 шт`).
+  Comments with no letters at all parse exactly as before this relaxation. This mirrors the viewer instruction
   («Нужно несколько — “03204 2 шт”»), which until 2026-08-04 promised a format
   the parser dropped **entirely** — not «1 instead of 2», a lost бронь.
 - short prefixes: `бр`, `брн`, `брнь` (e.g. `бр 03204`)

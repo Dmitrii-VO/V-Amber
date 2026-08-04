@@ -220,6 +220,8 @@ test("повторная доставка того же комментария �
     await new Promise((r) => setTimeout(r, 300));
 
     assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 1);
+    // И покупателю отвечаем один раз: дубль ответа читался бы как вторая отмена.
+    assert.equal(replyTexts(harness).filter((t) => /бронь снята/.test(t)).length, 1);
   } finally {
     await client.close();
     await harness.close();

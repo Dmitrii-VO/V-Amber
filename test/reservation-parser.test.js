@@ -296,3 +296,29 @@ test("голый код с количеством не открывает две
   // Размер рядом с кодом (реальный формат из логов «00577 17») — бронь на 1.
   assert.deepEqual(parseReservationComment("00577 17"), { hasReservationKeyword: true, code: "00577", quantity: 1 });
 });
+
+test("«22 шт» — это количество, а не артикул 22", () => {
+  // Ревью PR #34: послабление про «03204 2 шт» само по себе делало бронью и
+  // вопрос «22 шт?» — единственная цифровая группа там счётчик. Короткое число,
+  // съеденное маркером количества, кодом не считаем.
+  for (const text of ["22 шт", "22 штуки", "22 шт?", "10 пар"]) {
+    assert.equal(parseReservationComment(text).hasReservationKeyword, false, text);
+  }
+  // Код открытого лота снимает сомнение — это он и есть.
+  assert.deepEqual(
+    parseReservationComment("22 шт", { preferredCode: "22" }),
+    { hasReservationKeyword: true, code: "22", quantity: 1 },
+  );
+  // Ключевое слово тоже: «бронь 22 шт» — это лот 22.
+  assert.equal(parseReservationComment("бронь 22 шт").code, "22");
+  // Артикул длиннее счётчика — остаётся кодом.
+  assert.deepEqual(parseReservationComment("03204 шт"), { hasReservationKeyword: true, code: "03204", quantity: 1 });
+});
+
+test("комментарии без букв разбираются ровно как до послабления", () => {
+  // Гарантия отсутствия регресса: новая проверка не должна трогать ни один
+  // текст, который старое правило «ни одной буквы» уже принимало.
+  assert.deepEqual(parseReservationComment("*22"), { hasReservationKeyword: true, code: "22", quantity: 1 });
+  assert.deepEqual(parseReservationComment("*03204"), { hasReservationKeyword: true, code: "03204", quantity: 1 });
+  assert.deepEqual(parseReservationComment("03204!!!"), { hasReservationKeyword: true, code: "03204", quantity: 1 });
+});
