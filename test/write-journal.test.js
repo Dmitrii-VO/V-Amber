@@ -151,7 +151,24 @@ test("исход 401 классифицируется как не применё
 
   const timeout = Object.assign(new Error("timed out"), { code: "MOYSKLAD_TIMEOUT" });
   assert.equal(classifyWriteOutcome(timeout), "unknown", "после таймаута заказ мог создаться");
+  const reset = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+  assert.equal(classifyWriteOutcome(reset), "unknown", "reset мог произойти после применения POST");
   assert.equal(classifyWriteOutcome(new Error("MoySklad HTTP 503")), "unknown");
+});
+
+test("ошибка durable begin блокирует внешний POST", async () => {
+  const client = makeClient();
+  const journal = {
+    lookup() { return null; },
+    async begin() { throw new Error("journal disk full"); },
+  };
+  const wrapped = wrapWithWriteJournal(client, journal, keyBuilders);
+
+  await assert.rejects(
+    () => wrapped.createCustomerOrderReservation({ activeLot: LOT, reservation: { viewerId: 42, commentId: 7 } }),
+    /journal disk full/,
+  );
+  assert.equal(client.calls, 0, "без durable begin идемпотентный POST невозможен");
 });
 
 test("журнал хранит все записи, а не последние двадцать", async () => {
