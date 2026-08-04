@@ -32,6 +32,23 @@ consumption into purchase orders, and reconciliation from submission results.
 stores draft group results so purchase-order submission can be retried without
 duplicating already-created purchase orders.
 
+## MoySklad write journal
+
+`server/write-journal.js` writes append-only JSONL to
+`logs/moysklad-writes.jsonl`. Each reservation write to MoySklad is recorded as
+`begin` and then `done` or `failed`, keyed by
+`${lotSessionId}::${viewerId}::${commentId}`. On startup the file is replayed so
+a repeat of an already-applied write returns the stored result instead of
+creating a second customer order.
+
+Writes without a `commentId` (manual reservation from the banner, voice paths)
+get no key and are not deduplicated — behavior is unchanged for them.
+
+Failure outcomes are classified conservatively: `not_applied` only for
+connection errors and 4xx other than 429; timeouts and 5xx stay `unknown`,
+because MoySklad may have applied the write before the response was lost. See
+[[reservation-flow]] and [[order-recovery-from-logs]].
+
 ## Reservation digest log
 
 `server/reservation-digest-log.js` writes sent digest records and supports
