@@ -18,6 +18,7 @@ import { createBlockedViewersStore } from "./blocked-viewers-store.js";
 import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
+import { createWriteJournal, wrapWithWriteJournal, buildReservationWriteKey } from "./write-journal.js";
 import { getStreamStatus } from "./stream-status.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -183,8 +184,19 @@ async function main() {
   const rawMoysklad = createMoySkladClient(config.moysklad, {
     onCall: (event) => diagnosticRouter.emit(event),
   });
+  // Журнал внешних записей: ведётся ВНУТРИ safe-mode, чтобы заблокированная
+  // safe-mode'ом запись не оставляла в журнале следа о несуществующей брони.
+  const writeJournal = createWriteJournal();
+  await writeJournal.load();
+  logger.info("write-journal", "ready", writeJournal.stats());
+
+  const journaledMoysklad = wrapWithWriteJournal(rawMoysklad, writeJournal, {
+    createCustomerOrderReservation: (args) => buildReservationWriteKey(args || {}),
+    appendPositionToCustomerOrder: (args) => buildReservationWriteKey(args || {}),
+  });
+
   const moysklad = wrapWithSafeMode(
-    rawMoysklad,
+    journaledMoysklad,
     [
       "createCustomerOrderReservation",
       "appendPositionToCustomerOrder",

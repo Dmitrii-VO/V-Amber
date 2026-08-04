@@ -1057,3 +1057,43 @@ Five lower-severity findings (URL trailing-slash normalization, collapsed
 error states hurting live-incident triage, a poll race with no in-flight
 guard, an inconsistent error-response shape, a real prod IP pasted into the
 wiki) left open as a PR comment for a follow-up pass — not blocking the MVP.
+
+## 2026-08-05 — MoySklad write journal (idempotency, step 1)
+
+Came out of [[../raw/oss-reference-review-2026-08-04]]: a scan for comparable
+open-source projects found no direct analogue, but Medusa's append-only
+reservation model pointed at the real gap here.
+
+**The gap.** MoySklad retries were GET-only (`isRetryableGetError`,
+`moysklad.js`). Writes were never retried, and could not be: nothing made a
+repeat safe. That is the root cause behind [[order-recovery-from-logs]] existing
+— a mid-broadcast failure meant rebuilding orders by hand. Separately,
+reservation events lived in a 20-item in-memory ring (`state.events.slice(-20)`,
+`ws-server.js`), so an эфир longer than 20 events lost the earliest ones from
+live state.
+
+**What landed.** `server/write-journal.js` — append-only JSONL journal at
+`logs/moysklad-writes.jsonl`, replayed on boot, plus `wrapWithWriteJournal`, a
+decorator deliberately shaped like `wrapWithSafeMode`. Wired in `index.js`
+*inside* safe mode, so a safe-mode-blocked write leaves no journal trace.
+
+Key is `${lotSessionId}::${viewerId}::${commentId}`. Using `commentId` matters:
+it identifies the buyer's *intent*, so «ещё 2 шт» arriving as a separate comment
+gets its own key and is correctly not deduplicated. No `commentId` → no key →
+unchanged behavior.
+
+**Deliberately not done yet.** Write retry is still off. With a `pending` or
+`unknown` record we genuinely do not know whether MoySklad applied the write;
+resolving that needs a reconciliation query against MoySklad before retrying.
+That is the next step. For now such cases are logged loudly
+(`write_outcome_unknown`) instead of silently guessed.
+
+**Note on `syncId`.** The intended first step was checking whether MoySklad's
+`syncId` gives idempotent upsert, which would remove the need for a local
+journal. `dev.moysklad.ru` could not be fetched in this session, so it remains
+unverified. It turned out not to block anything: the write description already
+carries `commentId` and `lotSessionId` (`moysklad.js`), and the client-side
+design does not depend on `syncId` at all. If `syncId` is later confirmed, it is
+an optimization, not a redesign.
+
+`npm test`: 465/465.
