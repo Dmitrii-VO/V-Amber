@@ -126,11 +126,40 @@ on `#commentsPanel` rather than the old `#chatPanel`).
   comment deletion** (confirm dialog naming the community-wide consequence,
   `POST /api/viewers/ban`); on a chat row it soft-blocks only. See
   [[vk-comments#Real VK ban + comment deletion (2026-07-22)]]. This is distinct
-  from the reservation-focused panels (which only surface `бронь`) and from the
-  `#chatPanel` reply box.
+  from the reservation-focused panels, which only surface `бронь`.
 
 The `🚫 Блокировки` modal marks VK-banned entries with a «бан в ВК» badge
 (`blockedBy: "vk_ban"`) to distinguish a real community ban from a soft block.
+
+## One hall feed instead of two panels (2026-08-04)
+
+The center column used to stack three panels — «Картинка эфира», «Комментарии
+зала» and a separate `#chatPanel` «Чат зрителей» on `auto 1fr 1fr`. On Roman's
+13" laptop the preview ate ~245px and the two feeds split what was left, so the
+chat panel collapsed to its head + input: **the operator could not see viewer
+chat messages at all**, only the reply box. `#chatPanel` is gone; its content
+lives in `#commentsPanel`:
+
+- One `#commentsFeed` carries VK comments, own-chat viewer messages, `Янтарь`
+  service replies (`.chat-msg--service`) and «Новая сессия» dividers
+  (`.chat-msg--session`); `#chatOperatorForm` sits at the bottom of the same
+  panel and is hidden outside «Свой эфир» / unconfigured chat.
+- **Chat rows are rendered only by the HTTP poll** (`/api/chat/messages`, 3s),
+  because that works without a speech session; the WS `viewerComment` with
+  `source:"chat"` is used only to attach `viewerId` to an existing row so `🚫`
+  can soft-block. The two are stitched by `seq` — chat-service issues
+  `commentId = 9e9 + seq` (`CHAT_COMMENT_ID_BASE` in `web-ui/app.js`), and the
+  public feed has no `viewerId`. Either can arrive first, so `app.js` links in
+  both directions (`chatRowBySeq` / `chatViewerBySeq`). If the dashboard's chat
+  poll is not configured, WS chat rows are rendered directly as a fallback.
+- The panel counter counts viewer messages only (VK + chat), not service rows.
+- `#previewToggle` («▾»/«▸» in the preview head) collapses the picture and gives
+  its height to the feed; state persists in `localStorage["previewCollapsed"]`.
+  The player keeps running while collapsed, so эфир audio is not lost.
+  `#previewPanel` is also capped at `34vh` (was `42vh`).
+
+Measured at 1280×720 in «Свой эфир»: feed 176px expanded, 336px with the
+preview collapsed — previously the chat feed was 0px.
 
 ## Wishlist modal
 

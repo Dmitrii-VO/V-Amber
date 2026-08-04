@@ -142,15 +142,12 @@ const elements = {
   streamRelayLine: $("streamRelayLine"),
   streamRelayState: $("streamRelayState"),
 
-  chatPanel: $("chatPanel"),
-  chatMsgCount: $("chatMsgCount"),
-  chatLog: $("chatLog"),
-  chatLogEmpty: $("chatLogEmpty"),
   chatOperatorForm: $("chatOperatorForm"),
   chatOperatorInput: $("chatOperatorInput"),
   chatOperatorSend: $("chatOperatorSend"),
 
   previewPanel: $("previewPanel"),
+  previewToggle: $("previewToggle"),
   previewLiveBadge: $("previewLiveBadge"),
   streamPreview: $("streamPreview"),
   previewOverlay: $("previewOverlay"),
@@ -212,7 +209,6 @@ const state = {
   chatLastSeq: 0,
   chatPolling: false,
   chatPollTimer: null,
-  chatMsgCount: 0,
 };
 
 const digestState = {
@@ -1089,71 +1085,147 @@ function handleServerMessage(payload) {
   logEvent(`Неизвестное сообщение: ${JSON.stringify(payload)}`, "warn");
 }
 
-// --- Лента «Комментарии зала» ---
+// --- Единая лента «Комментарии зала» ---
+// Один поток на всю центральную колонку: комментарии VK (WS `viewerComment`),
+// сообщения зрителей своего чата и ответы оператора/бота (HTTP-опрос
+// /api/chat/messages), плюс поле ответа внизу. Раньше это были ДВЕ панели в
+// одной колонке под превью — на ноутбуке Романа «Чат зрителей» схлопывался до
+// нулевой высоты, и сообщений зрителей не было видно вообще.
+//
+// Сообщения чата рисует ТОЛЬКО опрос: он работает и без запущенной сессии
+// распознавания, тогда как WS-события приходят лишь во время эфира. Из WS для
+// чата берём только `viewerId` (в публичной ленте его нет) — чтобы повесить на
+// строку «🚫». Ключ сшивки — seq: chat-service выдаёт commentId = 9e9 + seq.
+const CHAT_COMMENT_ID_BASE = 9_000_000_000;
+const FEED_MAX_ROWS = 300;
+
 let viewerCommentCount = 0;
 const viewerCommentSeen = new Set();
+const chatRowBySeq = new Map();
+const chatViewerBySeq = new Map();
 
-function addViewerComment(payload) {
-  const key = `${payload.source || "vk"}:${payload.commentId}`;
-  if (viewerCommentSeen.has(key)) return;
-  viewerCommentSeen.add(key);
-
+function appendFeedRow(row) {
   const feed = elements.commentsFeed;
-  if (!feed) return;
+  if (!feed) return false;
   elements.commentsEmpty.hidden = true;
-
+  // Не дёргаем скролл, если оператор читает историю выше конца ленты.
   const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  feed.appendChild(row);
+  if (pinned) feed.scrollTop = feed.scrollHeight;
+  while (feed.children.length > FEED_MAX_ROWS) {
+    const dropped = feed.firstChild;
+    feed.removeChild(dropped);
+    const seq = Number(dropped?.dataset?.chatSeq);
+    if (Number.isFinite(seq)) {
+      chatRowBySeq.delete(seq);
+      chatViewerBySeq.delete(seq);
+    }
+  }
+  return true;
+}
 
+function bumpViewerCommentCount() {
+  viewerCommentCount += 1;
+  if (elements.commentsCount) elements.commentsCount.textContent = `· ${viewerCommentCount}`;
+}
+
+function buildCommentRow({ source, name, text }) {
   const row = document.createElement("div");
   row.className = "comment-row";
 
   const meta = document.createElement("div");
   meta.className = "comment-meta";
   const src = document.createElement("span");
-  src.className = `comment-src comment-src--${payload.source === "chat" ? "chat" : "vk"}`;
-  src.textContent = payload.source === "chat" ? "чат" : "VK";
+  src.className = `comment-src comment-src--${source === "chat" ? "chat" : "vk"}`;
+  src.textContent = source === "chat" ? "чат" : "VK";
   const author = document.createElement("span");
   author.className = "comment-author";
-  author.textContent = payload.viewerName || "Зритель";
+  author.textContent = name || "Зритель";
   meta.append(src, author);
 
   const body = document.createElement("div");
   body.className = "comment-text";
-  body.textContent = payload.text || "";
+  body.textContent = text || "";
 
-  // Действие по спаму прямо из ленты. VK-зритель → реальный бан сообщества +
-  // удаление комментария; зритель чата → мягкая блокировка (в ВК не банится).
+  row.append(meta, body);
+  return row;
+}
+
+// Действие по спаму прямо из ленты. VK-зритель → реальный бан сообщества +
+// удаление комментария; зритель чата → мягкая блокировка (в ВК не банится).
+function attachBanButton(row, { source, viewerId, viewerName, commentId }) {
+  const meta = row.querySelector(".comment-meta");
+  if (!meta || meta.querySelector(".comment-ban")) return;
   const ban = document.createElement("button");
   ban.type = "button";
   ban.className = "comment-ban";
   ban.textContent = "🚫";
-  if (payload.source === "chat") {
+  if (source === "chat") {
     ban.title = "Заблокировать зрителя чата (мягко, без ВК-бана)";
     ban.addEventListener("click", () => void blockViewer({
-      viewerId: payload.viewerId, viewerName: payload.viewerName, reason: "спам",
+      viewerId, viewerName, reason: "спам",
     }));
   } else {
     ban.title = "Забанить в сообществе ВК и удалить комментарий";
     ban.addEventListener("click", () => void banViewerVk({
-      viewerId: payload.viewerId, viewerName: payload.viewerName, commentId: payload.commentId,
+      viewerId, viewerName, commentId,
     }));
   }
   meta.append(ban);
+}
 
-  row.append(meta, body);
-  feed.appendChild(row);
+// «🚫» на строке чата появляется только когда WS донёс viewerId — порядок
+// произвольный (опрос дашборда и опрос ws-server независимы), поэтому связываем
+// в обе стороны: строка ждёт viewerId, viewerId ждёт строку.
+function applyChatViewerActions(seq) {
+  const row = chatRowBySeq.get(seq);
+  const viewer = chatViewerBySeq.get(seq);
+  if (!row || !viewer?.viewerId) return;
+  attachBanButton(row, {
+    source: "chat",
+    viewerId: viewer.viewerId,
+    viewerName: viewer.viewerName || row.querySelector(".comment-author")?.textContent || "",
+  });
+}
 
-  if (pinned) feed.scrollTop = feed.scrollHeight;
-  while (feed.children.length > 300) feed.removeChild(feed.firstChild);
+function addViewerComment(payload) {
+  if (payload.source === "chat" && state.chatConfigured) {
+    const seq = Number(payload.commentId) - CHAT_COMMENT_ID_BASE;
+    if (Number.isFinite(seq) && seq > 0) {
+      chatViewerBySeq.set(seq, {
+        viewerId: payload.viewerId,
+        viewerName: payload.viewerName,
+      });
+      applyChatViewerActions(seq);
+      return;
+    }
+  }
 
-  viewerCommentCount += 1;
-  if (elements.commentsCount) elements.commentsCount.textContent = `· ${viewerCommentCount}`;
+  const key = `${payload.source || "vk"}:${payload.commentId}`;
+  if (viewerCommentSeen.has(key)) return;
+  viewerCommentSeen.add(key);
+
+  const row = buildCommentRow({
+    source: payload.source,
+    name: payload.viewerName,
+    text: payload.text,
+  });
+  attachBanButton(row, {
+    source: payload.source,
+    viewerId: payload.viewerId,
+    viewerName: payload.viewerName,
+    commentId: payload.commentId,
+  });
+  if (!appendFeedRow(row)) return;
+  bumpViewerCommentCount();
 }
 
 function clearViewerComments() {
   if (!elements.commentsFeed) return;
   elements.commentsFeed.replaceChildren();
   viewerCommentSeen.clear();
+  chatRowBySeq.clear();
+  chatViewerBySeq.clear();
   viewerCommentCount = 0;
   if (elements.commentsCount) elements.commentsCount.textContent = "· 0";
   elements.commentsEmpty.hidden = false;
@@ -2010,6 +2082,27 @@ function stopStreamPreview() {
   previewShowOffline();
 }
 
+// Свернуть превью: картинка эфира съедает ~200px высоты центральной колонки,
+// а Роман смотрит её на телефоне-камере лишь изредка. Свёрнутое состояние
+// отдаёт всю колонку ленте зала и переживает перезагрузку дашборда.
+// Плеер продолжает играть (звук слышно) — прячем только картинку.
+function applyPreviewCollapsed(collapsed) {
+  elements.previewPanel?.classList.toggle("collapsed", collapsed);
+  if (elements.previewToggle) {
+    elements.previewToggle.textContent = collapsed ? "▸" : "▾";
+    elements.previewToggle.title = collapsed
+      ? "Показать картинку эфира"
+      : "Свернуть картинку — вся высота колонки уйдёт залу";
+  }
+  localStorage.setItem("previewCollapsed", collapsed ? "1" : "0");
+}
+
+elements.previewToggle?.addEventListener("click", () => {
+  applyPreviewCollapsed(!elements.previewPanel.classList.contains("collapsed"));
+});
+
+applyPreviewCollapsed(localStorage.getItem("previewCollapsed") === "1");
+
 elements.previewUnmute?.addEventListener("click", () => {
   if (elements.streamPreview) elements.streamPreview.muted = false;
   elements.previewUnmute.classList.remove("show");
@@ -2018,46 +2111,52 @@ elements.streamPreview?.addEventListener("playing", () => {
   if (elements.streamPreview.muted) elements.previewUnmute?.classList.add("show");
 });
 
-// --- Панель «Чат зрителей» (dashboard) ---
-// Независима от WS-сессии распознавания речи (та открывается только по
+// --- Свой чат (/efir/) в общей ленте зала ---
+// Независим от WS-сессии распознавания речи (та открывается только по
 // «Старт») — читает публичную ленту /efir/-чата тем же HTTP-опросом, что и
 // стрим-статус, поэтому работает сразу после открытия дашборда, даже если
-// оператор ещё не начал голосовую сессию.
+// оператор ещё не начал голосовую сессию. Сообщения кладутся в ту же ленту
+// «Комментарии зала», что и комментарии VK.
 
 const CHAT_POLL_MS = 3000;
 
-function renderChatMessage(msg) {
-  if (msg.kind === "session") {
-    const divider = document.createElement("div");
-    divider.className = "chat-msg chat-msg--session";
-    divider.textContent = `— ${msg.text} —`;
-    return divider;
-  }
-  const row = document.createElement("div");
-  row.className = `chat-msg${msg.kind === "service" ? " chat-msg--service" : ""}`;
-  const author = document.createElement("span");
-  author.className = "author";
-  author.textContent = msg.name;
-  const body = document.createElement("span");
-  body.textContent = msg.text;
-  row.append(author, body);
-  return row;
-}
-
 function appendChatMessages(items) {
   if (!items.length) return;
-  elements.chatLogEmpty.hidden = true;
-  // Не дёргаем скролл, если оператор читает историю выше конца ленты.
-  const pinned = elements.chatLog.scrollHeight - elements.chatLog.scrollTop - elements.chatLog.clientHeight < 60;
   for (const item of items) {
-    elements.chatLog.appendChild(renderChatMessage(item));
+    const seq = Number(item.seq);
+
+    if (item.kind === "session") {
+      const divider = document.createElement("div");
+      divider.className = "chat-msg chat-msg--session";
+      divider.textContent = `— ${item.text} —`;
+      appendFeedRow(divider);
+      continue;
+    }
+
+    if (item.kind === "service") {
+      // Ответ оператора/бота («Янтарь») — не комментарий зрителя, в счётчик
+      // зала не идёт.
+      const row = document.createElement("div");
+      row.className = "chat-msg chat-msg--service";
+      const author = document.createElement("span");
+      author.className = "author";
+      author.textContent = item.name;
+      const body = document.createElement("span");
+      body.textContent = item.text;
+      row.append(author, body);
+      appendFeedRow(row);
+      continue;
+    }
+
+    const row = buildCommentRow({ source: "chat", name: item.name, text: item.text });
+    if (Number.isFinite(seq)) {
+      row.dataset.chatSeq = String(seq);
+      chatRowBySeq.set(seq, row);
+    }
+    if (!appendFeedRow(row)) return;
+    if (Number.isFinite(seq)) applyChatViewerActions(seq);
+    bumpViewerCommentCount();
   }
-  if (pinned) elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
-  while (elements.chatLog.children.length > 300) {
-    elements.chatLog.removeChild(elements.chatLog.firstChild);
-  }
-  state.chatMsgCount += items.length;
-  elements.chatMsgCount.textContent = `· ${state.chatMsgCount}`;
 }
 
 // Курсор двигаем ТОЛЬКО по реально полученным сообщениям — тот же приём, что
@@ -2294,7 +2393,9 @@ function applyEfirMode(mode) {
   });
   vkLiveUrlWrap.hidden = mode !== "vk";
   elements.streamPanel.hidden = !(mode === "own" && state.streamConfigured);
-  elements.chatPanel.hidden = !(mode === "own" && state.chatConfigured);
+  // Поле ответа в чат — только в своём эфире: в режиме «ВК эфир» зрители сидят
+  // в комментариях VK, отвечать им через /efir/-чат некому.
+  elements.chatOperatorForm.hidden = !(mode === "own" && state.chatConfigured);
   // Превью своего потока имеет смысл только когда мы в него вещаем (свой эфир).
   const showPreview = mode === "own" && state.streamConfigured;
   elements.previewPanel.hidden = !showPreview;
