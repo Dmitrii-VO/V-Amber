@@ -80,6 +80,11 @@ export const config = {
     vkIdAttributeName: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_NAME?.trim() || "VK ID",
     imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
     requestTimeoutMs: parseIntEnv(process.env.MOYSKLAD_REQUEST_TIMEOUT_MS, 8000),
+    // Повтор ЗАПИСЕЙ брони (журнал write-journal.js). Держим низким намеренно:
+    // повтор идёт по горячему пути брони, покупатель ждёт ответа в эфире, а
+    // каждая попытка стоит до requestTimeoutMs. 2 = одна повторная попытка.
+    writeRetryAttempts: parseIntEnv(process.env.MOYSKLAD_WRITE_RETRY_ATTEMPTS, 2),
+    writeRetryBaseDelayMs: parseIntEnv(process.env.MOYSKLAD_WRITE_RETRY_BASE_DELAY_MS, 400),
     // Отдельный потолок для bulk-операций (загрузка каталога продуктов).
     // 60с обычно хватает на ~3-5 тысяч позиций; если каталог больше или
     // сеть медленная — поднимите вручную через MOYSKLAD_BULK_REQUEST_TIMEOUT_MS.

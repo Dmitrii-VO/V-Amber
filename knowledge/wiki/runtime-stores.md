@@ -49,6 +49,30 @@ connection errors and 4xx other than 429; timeouts and 5xx stay `unknown`,
 because MoySklad may have applied the write before the response was lost. See
 [[reservation-flow]] and [[order-recovery-from-logs]].
 
+### Retry and reconciliation
+
+Write retry is enabled and bounded by `MOYSKLAD_WRITE_RETRY_ATTEMPTS`
+(default 2, i.e. one retry) and `MOYSKLAD_WRITE_RETRY_BASE_DELAY_MS`
+(default 400). The default is deliberately low: retry runs on the reservation
+hot path while a buyer waits in the эфир, and each attempt costs up to
+`MOYSKLAD_REQUEST_TIMEOUT_MS`.
+
+A write is retried only when the outcome is known to be `not_applied`. For
+`unknown`, `server/write-reconciler.js` asks MoySklad what actually happened:
+
+- **Create path** — looks for a customer order whose description carries the
+  `commentId=` marker that `createCustomerOrderReservation` already writes.
+  Nothing extra is stamped into MoySklad; operators read those descriptions.
+  Order state is not filtered, since the operator may already have closed it.
+- **Append path** — compares how many positions of the product are really in
+  the order against how many writes the journal has confirmed
+  (`journal.countApplied`). Exactly one more means the lost write landed.
+
+Any other difference returns `inconclusive`, and so does a failed
+reconciliation or a missing counterparty. `inconclusive` never retries and
+never claims success — it surfaces the reservation to the operator instead of
+risking a duplicate order or a silently lost бронь.
+
 ## Reservation digest log
 
 `server/reservation-digest-log.js` writes sent digest records and supports

@@ -130,7 +130,9 @@ test("упавшая запись не считается выполненной
       }
       return { id: "order-recovered", positionId: "pos-recovered" };
     });
-    const wrapped = wrapWithWriteJournal(client, journal, keyBuilders);
+    // retryAttempts:1 — проверяем именно отсутствие дедупа упавшей записи,
+    // без вмешательства автоповтора (он проверяется отдельно ниже).
+    const wrapped = wrapWithWriteJournal(client, journal, keyBuilders, { retryAttempts: 1 });
     const args = { activeLot: LOT, reservation: { viewerId: 42, commentId: 7 } };
 
     await assert.rejects(() => wrapped.createCustomerOrderReservation(args), /401/);
