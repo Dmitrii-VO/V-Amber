@@ -55,6 +55,22 @@ export function extractEntityIdFromHref(href, entity) {
   return match?.[1] || null;
 }
 
+// Отпечаток состава закупочного заказа: товар + количество + цена, независимо
+// от порядка позиций. Нужен сверке — у закупочного заказа нет технической метки
+// в description, и опознать «тот самый заказ» можно только по содержимому.
+// Цена приводится к целым копейкам: МойСклад возвращает её именно так, а от
+// вызывающего она приходит уже в копейках.
+export function buildPurchaseOrderPositionsFingerprint(positions) {
+  return (Array.isArray(positions) ? positions : [])
+    .map((p) => [
+      p?.productId || "",
+      normalizeQuantity(p?.quantity),
+      Math.round(Number(p?.price) || 0),
+    ].join(":"))
+    .sort()
+    .join("|");
+}
+
 export function extractViewerIdFromText(text) {
   const match = /viewerId\s*=\s*(\d+)/i.exec(String(text || ""));
   return match?.[1] || null;

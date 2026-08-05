@@ -43,7 +43,11 @@ The dashboard can:
 
 Purchase-order submission is idempotent through `wishlist-submissions`: a
 completed draft replays cached purchase-order results instead of creating
-duplicates.
+duplicates. That cache is written *after* MoySklad answers, so it cannot cover
+a lost response — the `createPurchaseOrder` call is additionally journaled under
+`po::${draftId}::${groupHash}` in the MoySklad write journal, which is what
+stops a re-submitted group from producing a second purchase order. See
+[[runtime-stores]].
 
 ## Buyer command
 

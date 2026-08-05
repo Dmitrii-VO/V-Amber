@@ -22,6 +22,11 @@ function delay(ms) {
 // был запрещён — и бронь просто терялась, а заказы восстанавливались руками
 // из логов эфира (knowledge/wiki/order-recovery-from-logs.md).
 //
+// То же самое верно для POST entity/purchaseorder: там результат сохраняется
+// отдельным шагом уже ПОСЛЕ ответа МойСклада, поэтому потерянный ответ
+// записывался как ошибка, а повторная отправка группы создавала второй
+// закупочный заказ.
+//
 // Журнал — append-only JSONL рядом с logs/wishlist.jsonl, по тому же принципу
 // event-sourcing: пишем «начали», потом «получилось» или «не получилось», и на
 // старте проигрываем файл заново. Ключ детерминированный, поэтому повторная
@@ -75,6 +80,18 @@ export function buildReservationWriteKey({ activeLot, reservation } = {}) {
     return null;
   }
   return `${lotSessionId}::${viewerId}::${commentId}`;
+}
+
+// Ключ закупочного заказа. Обе части уже считаются на горячем пути отправки
+// списка желаний: draftId идентифицирует черновик отправки, groupHash —
+// детерминированный отпечаток группы внутри него (поставщик + склад + состав
+// позиций). Разные группы одной отправки получают разные ключи и законно
+// создают разные закупочные заказы; повтор той же группы узнаётся по ключу.
+export function buildPurchaseOrderWriteKey({ draftId, groupHash } = {}) {
+  if (!draftId || !groupHash) {
+    return null;
+  }
+  return `po::${draftId}::${groupHash}`;
 }
 
 export function createWriteJournal({ filePath = defaultFilePath } = {}) {

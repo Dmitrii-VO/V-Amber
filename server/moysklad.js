@@ -12,6 +12,7 @@ import {
   buildBroadcastMarker,
   buildEntityMeta,
   buildProductSnapshot,
+  buildPurchaseOrderPositionsFingerprint,
 } from "./moysklad-helpers.js";
 
 // Статусы заказа клиента, считающиеся «закрытыми» — после них новые брони
@@ -1126,6 +1127,63 @@ export function createMoySkladClient(config, options = {}) {
       });
 
       return row ? { id: row.id, name: row.name, counterpartyId } : null;
+    },
+    // Сверка (read-only) для закупочного заказа: он уже создан или нет?
+    // Маркера в description здесь нет и быть не должно — описание собирается по
+    // шаблону оператора и читается людьми. Поэтому опознаём по отпечатку самой
+    // группы: поставщик, склад, текст описания и точный состав позиций. Ровно
+    // эти же поля входят в groupHash, поэтому соседние группы той же отправки
+    // под отпечаток не попадают.
+    //
+    // Возвращаем сырые совпадения, а не вердикт: решение «применилось / нет /
+    // не знаю» принимает write-reconciler, здесь только факты.
+    async findPurchaseOrdersByFingerprint({
+      agentId, storeId, positions, description, source, candidateLimit = 5,
+    } = {}) {
+      if (!isEnabled || !agentId || !Array.isArray(positions) || positions.length === 0) {
+        return { matches: [], inconclusiveReason: "fingerprint_incomplete" };
+      }
+      const agentHref = `${config.baseUrl.replace(/\/$/, "")}/entity/counterparty/${agentId}`;
+      const payload = await requestJson("entity/purchaseorder", {
+        filter: `agent=${agentHref}`,
+        order: "moment,desc",
+        limit: 50,
+      }, { source });
+
+      const wantedDescription = description ? String(description).slice(0, 4000) : "";
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      const candidates = rows.filter((row) => {
+        if (String(row?.description || "") !== wantedDescription) return false;
+        if (!storeId) return true;
+        const rowStoreId = row?.store?.id || extractEntityIdFromHref(row?.store?.meta?.href, "store");
+        return rowStoreId === storeId;
+      });
+      // Столько одинаковых по описанию и складу заказов у одного поставщика
+      // подряд быть не должно. Если они есть — это не наш случай, и вычитывать
+      // позиции у каждого дороже, чем честно ответить «не знаю».
+      if (candidates.length > candidateLimit) {
+        return { matches: [], inconclusiveReason: "too_many_candidates" };
+      }
+
+      const wanted = buildPurchaseOrderPositionsFingerprint(positions);
+      const matches = [];
+      for (const candidate of candidates) {
+        const positionsPayload = await requestJson(
+          `entity/purchaseorder/${candidate.id}/positions`,
+          { limit: 1000 },
+          { source },
+        );
+        const positionRows = Array.isArray(positionsPayload?.rows) ? positionsPayload.rows : [];
+        const actual = buildPurchaseOrderPositionsFingerprint(positionRows.map((p) => ({
+          productId: p?.assortment?.id || extractEntityIdFromHref(p?.assortment?.meta?.href, "product"),
+          quantity: p?.quantity,
+          price: p?.price,
+        })));
+        if (actual === wanted) {
+          matches.push({ id: candidate.id, name: candidate.name });
+        }
+      }
+      return { matches, inconclusiveReason: null };
     },
     async checkOpenOrderPositionsForEntries(entries, { source } = {}) {
       const result = {};
