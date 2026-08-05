@@ -48,16 +48,42 @@ together**, not what reads tidily:
   `ingestViewerComment` and accepts exactly two control calls: `stopVk()` when
   VK poisons a lot (error 801, chat keeps running) and `reset()` when the эфир
   restarts.
+- `server/domain/reservation-attention.js` — the branch where a comment looks
+  like a бронь but no single open lot matches (none, or several). It reads the
+  open lots and the catalog and reports to the operator; it never touches lot
+  state. The flood guard for giveaway spam lives with it, since that is its
+  only caller.
 
-**Comment *handling* deliberately stayed put.** `ingestViewerComment` calls 19
-functions, most of them the reservation core (`ensureReservationState`,
-`addReservationEvent`, `runReservationProcessing`, `getOpenLots`). The waitlist
-fixes of 2026-08 prove the coupling: one bug took four commits, and
-`bda7cf8` alone edited 11 regions spanning lot closing, reservation processing,
-comment ingestion, the poller and detection. A module boundary there would cut
-straight through what changes together. The reservation/lot/waitlist cluster
-needs an explicit state machine and race tests first — moving code is not the
-hard part.
+**The reservation branch of `ingestViewerComment` deliberately stays put.** The
+function splits into four parts, and only the last is entangled:
+
+| Part | Lines | Outward calls |
+|---|---|---|
+| Blocked check + operator feed | 50 | 4 |
+| Cancel hand-off | 11 | 1 |
+| No-single-lot → attention | 95 | 5 — **extracted** |
+| Bookkeeping + wishlist + бронь | 178 | 10, nearly all the reservation core |
+
+The last part calls `ensureReservationState`, `addReservationEvent`,
+`runReservationProcessing`, `emitState`. The waitlist fixes of 2026-08 prove
+the coupling: one bug took four commits, and `bda7cf8` alone edited 11 regions
+spanning lot closing, reservation processing, comment ingestion, the poller and
+detection. A module boundary there would cut straight through what changes
+together. That cluster needs an explicit state machine and race tests first —
+moving code is not the hard part.
+
+**A generic command registry was considered and rejected.** It assumes
+`parse(text) → command`, and parsing here is not a function of the text alone:
+`parseReservationComment(text, { preferredCode })` takes the candidate lot's
+code, and `findCommentTarget` runs it against every open lot in two passes
+(exact, then zero-padded). The same text yields a different code depending on
+which lot it is tested against — that is what stops phone numbers and prices
+from being read as articles. Dispatch also happens in exactly one place: VK and
+chat already funnel into `ingestViewerComment`, and operator voice commands use
+a different vocabulary and a different safety model (speech never executes, it
+only highlights). Finally the order encodes safety invariants with incidents
+behind them — blocked first, cancel before бронь, ambiguous never auto-reserved
+— and in a table those become implicit properties of array order.
 
 MoySklad writes also stay in place: they are already wrapped at the `index.js`
 seam (safe mode outside, write journal inside), so relocating them buys
