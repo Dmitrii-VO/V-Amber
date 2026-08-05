@@ -19,7 +19,7 @@ import { createChatClient } from "./chat-client.js";
 import { createViewerLotPublisher } from "./viewer-lot.js";
 import { createCrossPromoPublisher } from "./cross-promo.js";
 import { resolveKnownCode } from "./product-code-resolver.js";
-import { createCommentFloodGuard } from "./comment-flood-guard.js";
+import { createReservationAttention } from "./domain/reservation-attention.js";
 import {
   sendJson,
   getVkPublicationCommentId,
@@ -1754,11 +1754,18 @@ export function attachWsServer(httpServer, config, services = {}) {
     // пересекаются с VK. Денежный путь (matching лотов, сток-гейт, МойСклад)
     // общий и от источника не зависит; source решает только компонент логов и
     // канал ответа покупателю (notifyReservationStatus).
-    // Розыгрыши в эфире («угадай число») дают сотни комментариев-кодов без
-    // открытого лота за считанные минуты; без ограничителя каждый такой
-    // комментарий порождает WARN и карточку reservationAttention, погребая
-    // под собой настоящие проблемы (см. comment-flood-guard.js).
-    const noOpenLotFloodGuard = createCommentFloodGuard();
+    // Комментарий похож на бронь, но однозначного открытого лота нет — случай
+    // уходит оператору на дашборд. Логика вместе с ограничителем флуда живёт в
+    // domain/reservation-attention.js: она читает открытые лоты и каталог, но
+    // состояние лотов не меняет.
+    const reservationAttention = createReservationAttention({
+      connectionId,
+      productCodeCache,
+      nameCacheStore,
+      getOpenLots: () => getOpenLots(),
+      registerPendingReservation: (payload) => registerPendingAttentionReservation(payload),
+      notify: (payload) => sendJson(websocket, payload),
+    });
 
     // Периодическая инструкция зрителям. Зрители подключаются к эфиру в разное
     // время, и формат брони («номер артикула отдельным комментарием») половина
@@ -2131,107 +2138,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       const target = findCommentTarget(comment.text);
       if (!target || !target.lot) {
-        // Коммент похож на бронь (keyword + код), но однозначного
-        // открытого лота нет: либо ни один не подошёл, либо подошло
-        // несколько (ambiguous). Бронировать наугад нельзя — выносим
-        // это ОПЕРАТОРУ на дашборд (а не в публичный VK-коммент) и
-        // логируем для diagnostics/bundle. Раньше такие пропадали молча
-        // (см. лог 2026-05-24 20:19:54 «…перестала бронировать, Ирина
-        // повторите»).
-        const probe = parseReservationComment(comment.text);
-        if (probe.hasReservationKeyword && probe.code) {
-          // «ambiguous» — код подошёл к НЕСКОЛЬКИМ открытым лотам: это живой
-          // покупатель у открытого товара, а не шум розыгрыша. Такие идут
-          // оператору всегда, мимо ограничителя — иначе во время флуда
-          // повторится «перестала бронировать» (инцидент 2026-05-24).
-          const isAmbiguous = target?.reason === "ambiguous";
-          if (!isAmbiguous) {
-            // Слепок события уходит в сводку flood_ended: по server.log
-            // восстанавливают пропущенные заказы, счётчика недостаточно.
-            const flood = noOpenLotFloodGuard.hit({
-              commentId: comment.id,
-              viewerId: comment.viewerId,
-              code: probe.code,
-              source: comment.source,
-            });
-            if (flood.floodEnded) {
-              logger.info(logSource, "reservation_no_open_lot_flood_ended", {
-                connectionId,
-                suppressed: flood.floodEnded.suppressed,
-                samples: flood.floodEnded.samples,
-              });
-            }
-            if (flood.suppress) {
-              if (flood.floodStarted) {
-                logger.warn(logSource, "reservation_no_open_lot_flood", {
-                  connectionId,
-                  hint: "всплеск кодов без открытого лота (похоже на розыгрыш) — отдельные события подавлены до конца всплеска",
-                });
-                sendJson(websocket, {
-                  type: "warning",
-                  message: "Много комментариев с кодами без открытого лота (розыгрыш?) — показываю не все, бронь по ним не создаётся",
-                });
-              }
-              return;
-            }
-          }
-          const reason = target?.reason || "no_open_lot";
-          const knownCodes = productCodeCache?.getCodes?.() || null;
-          const probeCodeResolution = knownCodes && knownCodes.size > 0
-            ? resolveKnownCode(probe.code, knownCodes)
-            : { status: "no_catalog", code: probe.code, candidates: [] };
-          const attentionCode = probeCodeResolution.status === "matched"
-            ? probeCodeResolution.code
-            : probe.code;
-          const openLotCodes = getOpenLots().map((lot) => lot.code);
-          const viewerNameForAttention = comment.viewerName
-            || nameCacheStore?.getName?.(comment.viewerId)
-            || "";
-          logger.warn(logSource, "reservation_no_open_lot", {
-            connectionId,
-            commentId: comment.id,
-            viewerId: comment.viewerId,
-            viewerName: viewerNameForAttention,
-            reason,
-            text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-            reservationCommentCode: probe.code,
-            catalogCode: attentionCode,
-            catalogMatchReason: probeCodeResolution.reason || null,
-            candidateCodes: target?.candidateCodes || [],
-            openLotCodes,
-          });
-          // Бронь прямо из строки внимания предлагаем только когда код
-          // однозначно резолвится в каталоге и лота под него просто нет
-          // (закрыт / другой день кампании). При reason "ambiguous" код подошёл
-          // НЕСКОЛЬКИМ открытым лотам — это разные товары, и выбирать за
-          // оператора в денежном пути нельзя.
-          const attentionActionId = reason === "no_open_lot" && probeCodeResolution.status === "matched"
-            ? registerPendingAttentionReservation({
-              code: attentionCode,
-              viewerId: comment.viewerId,
-              viewerName: viewerNameForAttention,
-              commentId: comment.id,
-              quantity: probe.quantity,
-              source: comment.source,
-            })
-            : null;
-
-          sendJson(websocket, {
-            type: "reservationAttention",
-            reason,
-            commentId: comment.id,
-            viewerId: comment.viewerId,
-            viewerName: viewerNameForAttention,
-            code: attentionCode,
-            originalCode: attentionCode !== probe.code ? probe.code : undefined,
-            text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
-            candidateCodes: target?.candidateCodes || probeCodeResolution.candidates || [],
-            openLotCodes,
-            source: comment.source,
-            actionId: attentionActionId || undefined,
-            quantity: probe.quantity || 1,
-          });
-        }
+        reservationAttention.handleNoOpenLot({ comment, target, logSource });
         return;
       }
       const { lot: currentLot, reservationComment, wishlistComment, matchedReservation, matchedWishlist } = target;
