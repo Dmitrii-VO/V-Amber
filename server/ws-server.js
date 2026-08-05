@@ -3709,8 +3709,14 @@ export function attachWsServer(httpServer, config, services = {}) {
                 let detection = null;
 
                 for (const input of detectionInputs) {
+                  // Границы длины артикула берём из самого каталога, а не из
+                  // .env: там 1..10, тогда как в каталоге 2407 товаров с
+                  // кодами от 2 до 6 знаков. Константы остаются фоллбэком на
+                  // случай, когда каталога нет ни в памяти, ни на диске.
+                  const codeBounds = productCodeCache?.getCodeLengthBounds?.() || null;
                   const candidateDetection = await detectArticle(input, {
                     ...detectionConfig,
+                    ...(codeBounds ? { minLength: codeBounds.min, maxLength: codeBounds.max } : {}),
                     knownCodes: productCodeCache?.getCodes?.() || null,
                   });
 

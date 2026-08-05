@@ -321,6 +321,10 @@ async function main() {
   );
 
   const productCodeCache = createProductCodeCache();
+  // Каталог с прошлого запуска — до первого обращения к МойСкладу. Если МС
+  // сейчас недоступен, эфир всё равно начнётся с рабочим каталожным гейтом,
+  // а не с пустым, который пропускает любой распознанный код.
+  await productCodeCache.loadFromDisk();
 
   // wishlist-store события → diagnostic router → активный session JSONL.
   // Mapping kind: kind записи (added/seen_again/edited/removed/consumed)
