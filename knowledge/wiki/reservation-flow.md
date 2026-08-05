@@ -218,6 +218,20 @@ bulk close happens on stream stop, stream error, stream end, or socket close.
 `logs/active-state.json` stores `openLots` so crash recovery can scan orphan
 reservation events across all open lots.
 
+On normal lot/session close, unfinished `waitlist_pending`,
+`pending_reservation`, and `order_failed` events are moved to wishlist before
+the close completes. The event becomes `out_of_stock`, receives a
+`wishlistEntryId`, and the buyer gets the final result through the originating
+channel (VK or `/efir/` chat). `stream_stop` and `socket_close` share one close
+promise, preventing duplicate migration and duplicate replies.
+
+After process crash, startup applies the same automatic wishlist migration to
+those three safe statuses across persisted open lots. `creating_order` is not
+automated: the MoySklad write may have completed before the crash, so it remains
+in the recovery report for manual reconciliation. Migration failures also stay
+in that report. Tests: `test/ws-server.waitlist-close.test.js`,
+`test/state-store.test.js`.
+
 ## Stock protection
 
 The flow checks the active lot's `product.availableStock` against already

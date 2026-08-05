@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { logger } from "./logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const filePath = join(__dirname, "..", "logs", "wishlist.jsonl");
+const DEFAULT_FILE = join(__dirname, "..", "logs", "wishlist.jsonl");
 
 const SCHEMA_VERSION = 1;
 
@@ -18,13 +18,13 @@ function dedupKey(viewerId, productCode) {
   return `${viewerId}::${productCode}`;
 }
 
-async function appendLines(lines) {
+async function appendLines(filePath, lines) {
   if (!lines.length) return;
   await mkdir(dirname(filePath), { recursive: true });
   await appendFile(filePath, lines.join("\n") + "\n", "utf8");
 }
 
-export function createWishlistStore({ onChange } = {}) {
+export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) {
   // Active entries: key (viewerId+code) -> entry object (current state).
   const active = new Map();
   // All entries by id, including archived (consumed/removed).
@@ -34,6 +34,7 @@ export function createWishlistStore({ onChange } = {}) {
   if (typeof onChange === "function") subscribers.add(onChange);
 
   let writeChain = Promise.resolve();
+  let mutationChain = Promise.resolve();
   let loaded = false;
 
   function notify() {
@@ -98,7 +99,9 @@ export function createWishlistStore({ onChange } = {}) {
           commentId: record.commentId || null,
         });
         entry.updatedAt = record.ts;
-        entry.quantity = entry.seenEvents.length;
+        entry.quantity += Number.isFinite(Number(record.quantity))
+          ? Math.max(0, Number(record.quantity))
+          : 1;
         break;
       }
       case "edited": {
@@ -158,19 +161,26 @@ export function createWishlistStore({ onChange } = {}) {
     // Раньше applyEvent выполнялся синхронно ДО постановки в очередь —
     // при параллельных add/edit/consume in-memory state мог опередить файл,
     // и порядок применения событий не совпадал с порядком записей в JSONL.
-    writeChain = writeChain
-      .then(async () => {
-        records.forEach(applyEvent);
-        await appendLines(lines);
-      })
-      .catch((error) => {
+    const operation = writeChain.then(async () => {
+      await appendLines(filePath, lines);
+      records.forEach(applyEvent);
+    });
+    // Keep the shared queue usable after failure, but reject this operation to
+    // its caller so no buyer receives a false persistence confirmation.
+    writeChain = operation.catch((error) => {
         logger.warn("wishlist-store", "append_failed", { error });
       });
-    await writeChain;
+    await operation;
     notify();
     // Событийный поток — после успешной записи на диск, чтобы JSONL-эмиттер
     // не выдал событие для записи, которой потом физически не оказалось.
     for (const record of records) notifyEvent(record);
+  }
+
+  function serializeMutation(callback) {
+    const operation = mutationChain.then(callback);
+    mutationChain = operation.catch(() => {});
+    return operation;
   }
 
   function buildProductMeta(productMetaInput) {
@@ -257,6 +267,7 @@ export function createWishlistStore({ onChange } = {}) {
     },
 
     async addFromOutOfStock({ event, lot, productMeta, trigger = "out_of_stock" }) {
+      return serializeMutation(async () => {
       if (!event || !lot) return null;
       const productCode = lot.code || productMeta?.productCode || "";
       const viewerId = event.viewerId;
@@ -284,6 +295,7 @@ export function createWishlistStore({ onChange } = {}) {
           entryId: existing.id,
           lotSessionId: lot.lotSessionId || null,
           commentId: event.commentId || null,
+          quantity: Math.max(1, Number(event.quantity) || 1),
         };
         await write([record]);
         return existing;
@@ -305,7 +317,7 @@ export function createWishlistStore({ onChange } = {}) {
         salePrice,
         discountAmount,
         effectivePrice,
-        quantity: 1,
+        quantity: Math.max(1, Number(event.quantity) || 1),
         lotCode: lot.code || null,
         lotSessionId: lot.lotSessionId || null,
         fromCommentId: event.commentId || null,
@@ -313,9 +325,11 @@ export function createWishlistStore({ onChange } = {}) {
       };
       await write([record]);
       return byId.get(record.id) || null;
+      });
     },
 
     async addFromWaitlistOnClose({ events, lot, reason, productMetaResolver }) {
+      return serializeMutation(async () => {
       if (!Array.isArray(events) || events.length === 0) return [];
       const records = [];
       const ts = new Date().toISOString();
@@ -337,6 +351,11 @@ export function createWishlistStore({ onChange } = {}) {
             entryId: active.get(key).id,
             lotSessionId: lot?.lotSessionId || event?.lotSessionId || null,
             commentId: event?.commentId || null,
+            // Startup may retry after the manual recovery report failed. The
+            // wishlist addition is already durable and must stay idempotent.
+            quantity: reason === "crash_recovery"
+              ? 0
+              : Math.max(1, Number(event?.quantity) || 1),
           });
           continue;
         }
@@ -355,7 +374,7 @@ export function createWishlistStore({ onChange } = {}) {
           supplierId: meta.supplierId,
           supplierName: meta.supplierName,
           buyPrice: meta.buyPrice,
-          quantity: 1,
+          quantity: Math.max(1, Number(event?.quantity) || 1),
           lotCode: lot?.code || code,
           lotSessionId: lot?.lotSessionId || event?.lotSessionId || null,
           fromCommentId: event?.commentId || null,
@@ -365,9 +384,11 @@ export function createWishlistStore({ onChange } = {}) {
 
       await write(records);
       return records;
+      });
     },
 
     async addManual({ viewerName, viewerId, productCode, quantity, supplierId, supplierName, buyPrice, productId, productName, lotCode }) {
+      return serializeMutation(async () => {
       if (!productCode) return null;
       const resolvedViewerId = viewerId != null ? viewerId : `manual-${randomUUID().slice(0, 8)}`;
       const record = {
@@ -391,9 +412,11 @@ export function createWishlistStore({ onChange } = {}) {
       };
       await write([record]);
       return byId.get(record.id) || null;
+      });
     },
 
     async edit(entryId, changes, actor = "operator") {
+      return serializeMutation(async () => {
       const entry = byId.get(entryId);
       if (!entry) return null;
       const allowed = ["quantity", "buyPrice", "supplierId", "supplierName", "productName"];
@@ -415,9 +438,11 @@ export function createWishlistStore({ onChange } = {}) {
       };
       await write([record]);
       return byId.get(entryId);
+      });
     },
 
     async remove(entryId, reason = "manual_delete") {
+      return serializeMutation(async () => {
       const entry = byId.get(entryId);
       if (!entry || entry.status !== "active") return null;
       const record = {
@@ -430,9 +455,11 @@ export function createWishlistStore({ onChange } = {}) {
       };
       await write([record]);
       return byId.get(entryId);
+      });
     },
 
     async consume({ entryIds, purchaseOrderId, purchaseOrderName, draftId, groupHash }) {
+      return serializeMutation(async () => {
       if (!Array.isArray(entryIds) || entryIds.length === 0) return [];
       const ts = new Date().toISOString();
       const records = [];
@@ -453,9 +480,11 @@ export function createWishlistStore({ onChange } = {}) {
       }
       await write(records);
       return records.map((r) => r.entryId);
+      });
     },
 
     async reconcileConsumedFromSubmissions(submissionsStore) {
+      return serializeMutation(async () => {
       if (!submissionsStore?.listAll) return;
       const drafts = submissionsStore.listAll();
       const reconciledRecords = [];
@@ -490,6 +519,7 @@ export function createWishlistStore({ onChange } = {}) {
         await write(reconciledRecords);
       }
       return reconciledRecords.length;
+      });
     },
   };
 }

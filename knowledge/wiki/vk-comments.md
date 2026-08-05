@@ -29,11 +29,11 @@ lot cards, price updates, reservation replies, and wishlist activity.
 - Service `order_failed` reply now shows the buyer concrete formats
   (`"03204"`, `"бр 03204"`, `"беру 03204"`, `"+03204"`) instead of only
   `"Бронь"`.
-- `out_of_stock` reservation overflow is silent in public VK comments. The
-  server still adds the buyer to [[wishlist]] via
-  `out_of_stock_reservation`, but `getReservationReplyMessage` returns an
-  empty string for that status so the operator can run W6 manual follow-up
-  without public comment noise.
+- `out_of_stock` reservation overflow adds the buyer to [[wishlist]] via
+  `out_of_stock_reservation` and publishes a final confirmation only after a
+  `wishlistEntryId` exists. A failed wishlist write produces an explicit
+  failure reply, never a false success. Requests from `/efir/` receive this
+  service reply in chat instead of VK.
 - `reserved` and `reserved_appended` replies now embed the lot code,
   e.g. «Аня, бронь подтверждена (код 03204).» When several lots are
   open simultaneously this avoids ambiguity over which article the

@@ -1215,3 +1215,37 @@ so it cannot be driven deterministically. A flaky concurrency test would be
 worse than none; the retention fix is the same for all four consumers.
 
 `npm test`: 467/467.
+
+## [2026-08-05] analysis | Broadcast waitlist audit for 2026-08-04
+
+The `0.1.82` bundle contains 10 temporary waitlist entries: 6 were promoted to
+`out_of_stock` and reached the wishlist, while 4 remained `waitlist_pending` at
+broadcast close and received no final outcome. Raw `orphan_waitlist` counts are
+misleading because `stream_stop` and `socket_close` flushed the same three lots
+twice: 6 audit events represent 4 unique buyers. Recorded the deduplication rule
+in [[log-verification-checklist]].
+
+The same audit confirmed the manual attention-reservation stock bug on codes
+`03824` and `03813`, intentional W6 silence after `out_of_stock`, one
+unknown-stock reservation, and one non-fatal uncaught Undici `terminated`
+exception. The attention path is fixed in current code; the waitlist lifecycle,
+analyzer count, and uncaught-fetch source remain open.
+
+## [2026-08-05] reliability | Waitlist close and crash recovery hardened
+
+The four unresolved buyers from the 2026-08-04 broadcast exposed a close race:
+`stream_stop` and `socket_close` could audit the same pending queue twice without
+giving buyers a final outcome. Close now uses one shared promise, removes lots
+from routing before migration, moves `waitlist_pending`, `pending_reservation`,
+and `order_failed` to wishlist, and awaits the final reply in the request's VK
+or `/efir/` channel. Wishlist quantity now preserves the requested amount.
+
+Crash recovery automatically migrates the same safe statuses across persisted
+open lots. `creating_order` remains manual because the MoySklad write outcome is
+uncertain. The analyzer now reports unique orphan buyers separately from raw
+audit events and includes close-migration/unresolved counters. This supersedes
+the former W6 silent-overflow rule in [[wishlist]], [[vk-comments]], and
+[[operator-feedback]]. Regression coverage lives in
+`test/ws-server.waitlist-close.test.js`, `test/ws-server.chat-source.test.js`,
+`test/wishlist-store.test.js`, `test/state-store.test.js`, and
+`test/analyze-broadcast-logs.test.js`.

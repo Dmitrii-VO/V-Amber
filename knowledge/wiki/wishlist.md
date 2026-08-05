@@ -15,8 +15,9 @@ Backend responsibilities:
   group hashes.
 - `server/log-bundle.js` and `server/bundle-index.js` include wishlist data in
   diagnostic bundles.
-- `server/index.js` handles crash recovery and avoids automatic wishlist
-  migration without explicit buyer confirmation.
+- `server/index.js` handles crash recovery: safe unfinished reservation states
+  migrate automatically, while uncertain `creating_order` stays for manual
+  MoySklad reconciliation.
 
 UI responsibilities live in `web-ui/app.js` around `wishlistState`: draft ID,
 supplier groups, archive cache, settings, suppliers, stores, pending submit
@@ -56,15 +57,15 @@ trigger `out_of_stock_reservation`. This is W5 from the 2026-05-30 operator
 wishes: overflow demand should stay visible to the operator instead of being
 lost.
 
-W6 manual mode is intentionally silent for buyers. `out_of_stock` entries go
-to the wishlist without a public VK reply; the operator handles follow-up
-manually from the wishlist modal.
+Since the 2026-08-04 incident fix, successful `out_of_stock` and close-time
+migrations notify buyers in the channel where the request originated. The reply
+states that the buyer was added to the waiting list. If wishlist persistence
+fails, the reply reports the failure instead of claiming success. Requested
+`quantity` is preserved in the wishlist entry.
 
 ## Open UX requests
 
 - Explain how to enter the waiting list.
-- Keep waiting-list overflow quiet in VK comments; public `out_of_stock`
-  replies are intentionally disabled for manual mode.
 - Prefer VK direct messages when possible.
 
 ## Related pages

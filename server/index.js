@@ -11,7 +11,12 @@ import { checkForUpdates } from "./version-check.js";
 import { createVkPublisher } from "./vk.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createProductCodeCache } from "./product-code-cache.js";
-import { loadActiveState, clearActiveState, extractOrphans } from "./state-store.js";
+import {
+  loadActiveState,
+  clearActiveState,
+  extractOrphans,
+  partitionOrphansForRecovery,
+} from "./state-store.js";
 import { createWishlistStore } from "./wishlist-store.js";
 import { createNameCacheStore } from "./name-cache-store.js";
 import { createBlockedViewersStore } from "./blocked-viewers-store.js";
@@ -40,6 +45,9 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
   const orphans = extractOrphans(state);
   const lot = state.activeLot || {};
   const openLots = Array.isArray(state.openLots) && state.openLots.length > 0 ? state.openLots : [lot].filter(Boolean);
+  const { safeOrphans, uncertainOrphans } = partitionOrphansForRecovery(orphans);
+  const migrationFailures = [];
+  let migratedCount = 0;
 
   logger.warn("recovery", "active_state_found_on_startup", {
     savedAt: state.savedAt,
@@ -50,16 +58,65 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
     orphanCount: orphans.length,
   });
 
-  if (orphans.length > 0) {
+  if (safeOrphans.length > 0) {
+    const byLotSessionId = new Map();
+    for (const entry of safeOrphans) {
+      const key = entry.lotSessionId || `code:${entry.lotCode || "unknown"}`;
+      if (!byLotSessionId.has(key)) byLotSessionId.set(key, []);
+      byLotSessionId.get(key).push(entry);
+    }
+
+    for (const [lotSessionId, events] of byLotSessionId) {
+      const sourceLot = openLots.find((candidate) => candidate.lotSessionId === lotSessionId)
+        || openLots.find((candidate) => candidate.code === events[0]?.lotCode)
+        || { code: events[0]?.lotCode || "", lotSessionId: events[0]?.lotSessionId || null };
+      try {
+        const expectedRecords = new Set(events.map((entry) => (
+          `${entry.viewerId ?? ""}::${entry.lotCode || sourceLot.code || ""}`
+        ))).size;
+        const records = await wishlistStore.addFromWaitlistOnClose({
+          events,
+          lot: sourceLot,
+          reason: "crash_recovery",
+          productMetaResolver: () => ({
+            productId: sourceLot.product?.id || null,
+            productName: sourceLot.product?.name || "",
+          }),
+        });
+        if (records.length !== expectedRecords) {
+          throw new Error(`Expected ${expectedRecords} wishlist records, wrote ${records.length}`);
+        }
+        migratedCount += records.length;
+      } catch (error) {
+        migrationFailures.push(...events);
+        logger.error("recovery", "wishlist_orphan_migration_failed", {
+          lotSessionId: sourceLot.lotSessionId || null,
+          code: sourceLot.code || null,
+          orphanCount: events.length,
+          error,
+        });
+      }
+    }
+
+    logger.info("recovery", "wishlist_orphans_migrated", {
+      candidates: safeOrphans.length,
+      migrated: migratedCount,
+      failed: migrationFailures.length,
+    });
+  }
+
+  const manualOrphans = [...uncertainOrphans, ...migrationFailures];
+  let manualOrphansRecorded = manualOrphans.length === 0;
+  if (manualOrphans.length > 0) {
     const lines = [
       ``,
       `---`,
       ``,
       `> **⚠ Восстановление после краша**  `,
       `> Сервер был перезапущен в ${new Date().toLocaleString("ru-RU")}, предыдущий процесс не успел корректно закрыть сессию.`,
-      `> На открытых лотах остались необработанные брони:`,
+      `> На открытых лотах остались заявки, требующие ручной сверки:`,
       ``,
-      ...orphans.map((entry, index) => {
+      ...manualOrphans.map((entry, index) => {
         const label = entry.viewerName || `id${entry.viewerId}`;
         const status = entry.status ? ` — _${entry.status}_` : "";
         const commentId = entry.commentId ? ` (comment ${entry.commentId})` : "";
@@ -67,9 +124,9 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
         return `${index + 1}. Лот **${lotLabel}**: **${label}**${commentId}${status}`;
       }),
       ``,
-      `**Что делать:** проверить вручную в МойСкладе, что для этих зрителей созданы заказы. Если нет — создать; если есть, но без позиции на нужный лот, добавить позицию. Ответьте им в VK.`,
+      `**Что делать:** для _creating_order_ проверить МойСклад — запись могла завершиться до падения. Остальные строки не удалось сохранить в wishlist, добавьте их вручную.`,
       ``,
-      `_Эти зрители не добавлены в Wish list автоматически: теперь нужно подтверждение комментарием «СПИСОК код товара»._`,
+      migratedCount > 0 ? `_Безопасные хвосты очереди автоматически перенесены в wishlist: ${migratedCount}._` : "",
       ``,
     ].join("\n");
 
@@ -80,7 +137,7 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
         await appendFile(state.sessionFilePath, lines, "utf8");
         logger.info("recovery", "orphans_appended_to_session", {
           file: state.sessionFilePath,
-          orphanCount: orphans.length,
+          orphanCount: manualOrphans.length,
         });
       } else {
         const recoveryFile = join(
@@ -90,18 +147,26 @@ async function recoverOrphansFromCrash({ wishlistStore } = {}) {
         await writeFile(recoveryFile, `# Восстановление после краша\n${lines}`, "utf8");
         logger.info("recovery", "orphans_written_to_recovery_file", {
           file: recoveryFile,
-          orphanCount: orphans.length,
+          orphanCount: manualOrphans.length,
         });
       }
+      manualOrphansRecorded = true;
     } catch (error) {
       logger.error("recovery", "orphan_writeout_failed", { error });
     }
 
-    logger.info("recovery", "wishlist_auto_migrate_skipped_confirmation_required", {
+    logger.info("recovery", "manual_orphans_recorded", {
       lotSessionId: lot.lotSessionId || null,
       code: lot.code || null,
-      orphanCount: orphans.length,
+      orphanCount: manualOrphans.length,
     });
+  }
+
+  if (!manualOrphansRecorded) {
+    logger.error("recovery", "active_state_preserved_after_writeout_failure", {
+      orphanCount: manualOrphans.length,
+    });
+    throw new Error("Crash recovery report could not be written; active state was preserved");
   }
 
   // В любом случае стираем state-файл — это «обработанный» инцидент.
@@ -368,13 +433,16 @@ async function main() {
 
 process.on("unhandledRejection", (reason) => {
   logger.error("process", "unhandled_rejection", {
-    reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason,
+    reason,
+    continued: true,
   });
 });
 
 process.on("uncaughtException", (error) => {
   logger.error("process", "uncaught_exception", {
-    error: { message: error?.message, stack: error?.stack },
+    error,
+    networkTermination: /\bterminated\b|fetch failed/i.test(error?.message || ""),
+    continued: true,
   });
 });
 

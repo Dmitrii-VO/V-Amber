@@ -188,9 +188,9 @@ operator's clarifying answers captured in-session.
   closing the lot.
 - **W6 — waiting-list columns + manual mode.** Wanted columns: Товар,
   Кол-во, Поставщик, Человек заказавший — mostly present in wishlist
-  already. "В ручном режиме пока": do **not** auto-message overflow
-  buyers — verify `notifyReservationStatus` does not post a public VK
-  reply for `out_of_stock`.
+  already. The original "manual mode" silence was superseded after the
+  2026-08-04 incident: overflow and close-migrated buyers now receive a final
+  confirmation in their originating channel.
 
 Operator's answers to open design questions:
 

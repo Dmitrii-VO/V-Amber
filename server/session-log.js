@@ -150,10 +150,10 @@ export function createSessionLog() {
       jsonlEvent("reservation_finalized", payload);
     },
 
-    logReservationWaitlist({ viewerName, viewerId, lotCode, position } = {}) {
+    logReservationWaitlist({ viewerName, viewerId, lotCode, lotSessionId, commentId, position } = {}) {
       const positionStr = position ? ` №${position}` : "";
       append(`- ${nowTime()} **В очереди${positionStr}** ${viewerName || `id${viewerId}`} (лот ${lotCode}) — ждёт исхода предыдущей брони`);
-      jsonlEvent("reservation_waitlist_pending", { viewerName, viewerId, lotCode, position });
+      jsonlEvent("reservation_waitlist_pending", { viewerName, viewerId, lotCode, lotSessionId, commentId, position });
     },
 
     logReservationOutOfStock({ viewerName, viewerId, lotCode } = {}) {
@@ -161,9 +161,9 @@ export function createSessionLog() {
       jsonlEvent("reservation_out_of_stock", { viewerName, viewerId, lotCode });
     },
 
-    logWaitlistPromoted({ viewerName, viewerId, lotCode, previousPrimaryStatus } = {}) {
+    logWaitlistPromoted({ viewerName, viewerId, lotCode, lotSessionId, commentId, previousPrimaryStatus } = {}) {
       append(`- ${nowTime()} **Очередь продвинулась** → ${viewerName || `id${viewerId}`} стал первым на лот ${lotCode} (предыдущая бронь: ${previousPrimaryStatus || "—"})`);
-      jsonlEvent("waitlist_promoted", { viewerName, viewerId, lotCode, previousPrimaryStatus });
+      jsonlEvent("waitlist_promoted", { viewerName, viewerId, lotCode, lotSessionId, commentId, previousPrimaryStatus });
     },
 
     logOrphanWaitlist({ lotCode, lotSessionId, reason, entries } = {}) {
@@ -194,9 +194,18 @@ export function createSessionLog() {
       });
     },
 
-    logWaitlistMigratedToWishlist({ lotCode, lotSessionId, reason, count } = {}) {
+    logWaitlistMigratedToWishlist({ lotCode, lotSessionId, reason, count, entries = [] } = {}) {
       append(`- ${nowTime()} **В лист предзаказов** перенесено ${count} зрителей с лота ${lotCode} (${reason || "?"})`);
-      jsonlEvent("waitlist_migrated_to_wishlist", { lotCode, lotSessionId, reason, count });
+      jsonlEvent("waitlist_migrated_to_wishlist", {
+        lotCode,
+        lotSessionId,
+        reason,
+        count,
+        entries: entries.map((entry) => ({
+          viewerId: entry.viewerId,
+          commentId: entry.commentId,
+        })),
+      });
     },
 
     logOrderCreated({ viewerName, viewerId, orderId, lotCode, appended } = {}) {

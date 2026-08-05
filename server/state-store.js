@@ -180,3 +180,10 @@ export function extractOrphans(state) {
       .map((entry) => ({ ...entry, lotCode: entry.lotCode || lot.code, lotSessionId: lot.lotSessionId }));
   });
 }
+
+export function partitionOrphansForRecovery(orphans = []) {
+  return {
+    safeOrphans: orphans.filter((entry) => entry.status !== "creating_order"),
+    uncertainOrphans: orphans.filter((entry) => entry.status === "creating_order"),
+  };
+}

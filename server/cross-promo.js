@@ -215,7 +215,14 @@ export function createCrossPromoPublisher({
       // Эфир кончился — плашку у зрителей снимаем сразу, не дожидаясь TTL.
       if (publishedMirrorUrl) {
         publishedMirrorUrl = null;
-        void chatClient?.publishBroadcastState?.({ vkMirrorUrl: "" });
+        const clearResult = chatClient?.publishBroadcastState?.({ vkMirrorUrl: "" });
+        void Promise.resolve(clearResult).then((result) => {
+          if (result && result.ok === false) {
+            logger?.warn?.("chat", "mirror_banner_clear_failed", { error: result.error });
+          }
+        }).catch((error) => {
+          logger?.warn?.("chat", "mirror_banner_clear_failed", { error });
+        });
       }
     },
 
