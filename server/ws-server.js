@@ -1219,6 +1219,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     async function processReservationEvent(lot, event) {
       const state = ensureReservationState(lot);
       const reservationSessionVersion = customerOrderSessionVersion;
+      const reservationCustomerOrders = customerOrdersByViewerId;
       const broadcastDate = formatBroadcastDate(new Date(event.createdAt || Date.now()));
       // Заказы объединяются только внутри одного эфира. Иначе сегодняшняя
       // бронь может попасть в старый или уже оплаченный заказ того же клиента.
@@ -1265,7 +1266,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
         logReservationFinalized(lot, event, { reason: "product_missing" });
         emitState();
-        notifyReservationStatus(lot, event);
+        await notifyReservationStatus(lot, event);
         return;
       }
 
@@ -1290,7 +1291,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
           logReservationFinalized(lot, event, { waitlistPosition });
           emitState();
-          notifyReservationStatus(lot, event);
+          await notifyReservationStatus(lot, event);
           return { proceed: false };
         }
 
@@ -1338,7 +1339,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           }
           logReservationFinalized(lot, event, { wishlistEntryId: event.wishlistEntryId || null });
           emitState();
-          notifyReservationStatus(lot, event);
+          await notifyReservationStatus(lot, event);
           return { proceed: false };
         }
 
@@ -1361,7 +1362,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       let nextWaitlistEvent = null;
 
       try {
-        let existingOrder = customerOrdersByViewerId.get(customerOrderKey) || null;
+        let existingOrder = reservationCustomerOrders.get(customerOrderKey) || null;
         let resolvedCounterparty = null;
 
         // Кэш заказа мог устареть: оператор перевёл заказ в закрытый статус
@@ -1380,7 +1381,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                 viewerId: event.viewerId,
                 orderId: existingOrder.id,
               });
-              customerOrdersByViewerId.delete(customerOrderKey);
+              reservationCustomerOrders.delete(customerOrderKey);
               existingOrder = null;
             }
           } catch (recheckError) {
@@ -1390,7 +1391,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               orderId: existingOrder.id,
               error: recheckError,
             });
-            customerOrdersByViewerId.delete(customerOrderKey);
+            reservationCustomerOrders.delete(customerOrderKey);
             existingOrder = null;
           }
         }
@@ -1495,7 +1496,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
           logReservationFinalized(lot, event, { reason: "safe_mode_mid_flight" });
           emitState();
-          notifyReservationStatus(lot, event);
+          await notifyReservationStatus(lot, event);
           return;
         }
 
@@ -1512,12 +1513,11 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
           event.status = "stale_discarded";
           event.customerOrder = order;
-          logReservationFinalized(lot, event, { reason: staleReason });
           return;
         }
 
         if (!existingOrder?.id && order?.id) {
-          customerOrdersByViewerId.set(customerOrderKey, order);
+          reservationCustomerOrders.set(customerOrderKey, order);
         }
 
         event.status = existingOrder?.id ? "reserved_appended" : "reserved";
@@ -1549,7 +1549,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           appended: Boolean(existingOrder?.id),
         });
         logReservationFinalized(lot, event, { appended: Boolean(existingOrder?.id) });
-        notifyReservationStatus(lot, event);
+        await notifyReservationStatus(lot, event);
       } catch (error) {
         state.acceptedUserIds.delete(event.viewerId);
         // Roll back the counter increment from line ~302 so a later viewer
@@ -1573,12 +1573,11 @@ export function attachWsServer(httpServer, config, services = {}) {
             viewerId: event.viewerId,
             reason: "stale_session_after_error",
           });
-          logReservationFinalized(lot, event, { reason: "stale_session_after_error" });
           return;
         }
 
         logReservationFinalized(lot, event, { error: event.error });
-        notifyReservationStatus(lot, event);
+        await notifyReservationStatus(lot, event);
       } finally {
         if (
           state.primaryReservation?.commentId === event.commentId

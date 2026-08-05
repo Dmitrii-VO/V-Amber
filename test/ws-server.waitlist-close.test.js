@@ -61,6 +61,13 @@ test("stream stop migrates a pending waitlist once and sends the final VK outcom
       .filter((reply) => reply.viewerId === 7002 && reply.status === "out_of_stock");
     assert.equal(finalReplies.length, 1);
     assert.match(finalReplies[0].message, /Добавили вас в список ожидания/);
+    assert.equal(
+      vk.callsTo("publishReservationReply").filter(
+        (call) => call.args[0].viewerId === 7001 && call.args[0].status === "reserved",
+      ).length,
+      1,
+      "close must await the final reply for the in-flight successful order",
+    );
 
     await client.close();
     clientClosed = true;
