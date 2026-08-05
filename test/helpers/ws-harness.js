@@ -219,7 +219,11 @@ function buildConfig(overrides = {}) {
 
 function createSessionLogMock() {
   const noop = () => {};
+  // Транскрипты записываем, а не глотаем: на них держатся тесты партиалов.
+  const transcripts = [];
   return {
+    transcripts,
+    logTranscriptPartial: (payload) => transcripts.push({ kind: "partial", ...payload }),
     getFilePath: () => null,
     getJsonl: () => null,
     logSafemodeToggled: noop,
@@ -239,7 +243,7 @@ function createSessionLogMock() {
     logPositionPricingBackfilled: noop,
     logLotOpened: noop,
     logSessionStart: noop,
-    logTranscriptFinal: noop,
+    logTranscriptFinal: (payload) => transcripts.push({ kind: "final", ...payload }),
     logDiscountSkipped: noop,
     logPriceChanged: noop,
     logManualCodeSubmitted: noop,
@@ -272,6 +276,7 @@ export async function startHarness({
 
   // Фейковая SpeechKit-сессия: захватывает handlers, отдаёт их тесту.
   const sessions = [];
+  const sessionLogs = [];
   const createSpeechKitSession = (_cfg, handlers) => {
     const session = {
       handlers,
@@ -293,7 +298,11 @@ export async function startHarness({
     wishlistStore,
     ...(blockedViewersStore ? { blockedViewersStore } : {}),
     createSpeechKitSession,
-    createSessionLog: createSessionLogOverride || createSessionLogMock,
+    createSessionLog: createSessionLogOverride || ((...args) => {
+      const sessionLog = createSessionLogMock(...args);
+      sessionLogs.push(sessionLog);
+      return sessionLog;
+    }),
     saveActiveState: () => {},
     clearActiveState: async () => {},
     packageVersion: "test",
@@ -311,6 +320,7 @@ export async function startHarness({
     productCodeCache,
     wishlistStore,
     getLastSpeechKitSession: () => sessions[sessions.length - 1] || null,
+    getLastSessionLog: () => sessionLogs[sessionLogs.length - 1] || null,
     // start обрабатывается асинхронно — ждём, пока фейковая сессия появится.
     async waitForSession({ timeoutMs = 2000 } = {}) {
       const deadline = Date.now() + timeoutMs;
