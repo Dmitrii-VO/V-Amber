@@ -39,7 +39,7 @@ V-Amber serves the browser UI and local operator APIs from
 | `/api/wishlist/:entryId` | `PATCH` | Edits an active wishlist entry. |
 | `/api/wishlist/:entryId` | `DELETE` | Removes an active wishlist entry. |
 | `/api/wishlist/check-customerorders` | `POST` | Checks whether wishlist entries already exist in open MoySklad customer orders. |
-| `/api/wishlist/purchase-order` | `POST` | Creates MoySklad purchase orders from selected wishlist groups, with idempotency by draft/group hash. |
+| `/api/wishlist/purchase-order` | `POST` | Creates MoySklad purchase orders from selected wishlist groups, with idempotency by draft/group hash. Returns `{purchaseOrders, failedGroups, unknownGroups, blockedGroupHashes}`. `unknownGroups` is separate from `failedGroups` on purpose: those writes may have landed in MoySklad, so the operator must check before creating anything by hand. See [[runtime-stores#MoySklad write journal]]. |
 
 ## Blocked viewer routes
 

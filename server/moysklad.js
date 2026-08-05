@@ -13,6 +13,7 @@ import {
   buildEntityMeta,
   buildProductSnapshot,
   buildPurchaseOrderPositionsFingerprint,
+  buildPurchaseOrderSyncId,
 } from "./moysklad-helpers.js";
 
 // Статусы заказа клиента, считающиеся «закрытыми» — после них новые брони
@@ -1128,6 +1129,33 @@ export function createMoySkladClient(config, options = {}) {
 
       return row ? { id: row.id, name: row.name, counterpartyId } : null;
     },
+    // Сверка (read-only) по внешнему коду: точный ответ на «этот заказ уже
+    // создан?». Работает только для заказов, отправленных с syncId, поэтому
+    // пустой ответ сам по себе НЕ доказывает, что заказа нет — вызывающий
+    // (write-reconciler) проверяет ещё и отпечаток.
+    //
+    // Возвращает { supported, rows }: если МойСклад не понимает такой фильтр,
+    // supported=false, и решение принимается по отпечатку, а не по пустоте.
+    async findPurchaseOrdersBySyncId({ syncId, source } = {}) {
+      if (!isEnabled || !syncId) {
+        return { supported: false, rows: [] };
+      }
+      try {
+        const payload = await requestJson("entity/purchaseorder", {
+          filter: `syncId=${syncId}`,
+          limit: 2,
+        }, { source });
+        return { supported: true, rows: Array.isArray(payload?.rows) ? payload.rows : [] };
+      } catch (error) {
+        // Фильтра может не быть в этой версии API — тогда это не «заказа нет»,
+        // а «спросить не получилось».
+        logger.warn("moysklad", "purchase_order_syncid_lookup_failed", {
+          syncId,
+          error: error?.message || String(error),
+        });
+        return { supported: false, rows: [] };
+      }
+    },
     // Сверка (read-only) для закупочного заказа: он уже создан или нет?
     // Маркера в description здесь нет и быть не должно — описание собирается по
     // шаблону оператора и читается людьми. Поэтому опознаём по отпечатку самой
@@ -1667,7 +1695,9 @@ export function createMoySkladClient(config, options = {}) {
       if (!isEnabled) return null;
       return resolveDefaults();
     },
-    async createPurchaseOrder({ organizationId, storeId, agentId, positions, description, source = "http" }) {
+    async createPurchaseOrder({
+      organizationId, storeId, agentId, positions, description, draftId, groupHash, source = "http",
+    }) {
       if (!isEnabled) {
         // Раньше возвращали skipped — HTTP handler принимал это за успех и
         // помечал записи consumed без созданного PO. Теперь бросаем; handler
@@ -1697,17 +1727,25 @@ export function createMoySkladClient(config, options = {}) {
       if (description) {
         payload.description = String(description).slice(0, 4000);
       }
+      // Внешний код группы. Оператор его не видит (в отличие от description),
+      // а нам он даёт точный поиск заказа при потерянном ответе.
+      const syncId = buildPurchaseOrderSyncId({ draftId, groupHash });
+      if (syncId) {
+        payload.syncId = syncId;
+      }
 
       const created = await postJson("entity/purchaseorder", payload, { source });
       logger.info("moysklad", "purchase_order_created", {
         orderId: created.id,
         agentId,
         positionsCount: positions.length,
+        syncId,
       });
       return {
         id: created.id,
         name: created.name,
         agentId,
+        syncId,
       };
     },
 

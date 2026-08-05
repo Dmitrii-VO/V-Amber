@@ -15,6 +15,26 @@ and follow the current JavaScript style unless the user asks for a refactor.
 - Before changing article, discount, or price parsing, check rule-based parsing
   and MoySklad product-code cache behavior.
 
+## Dev machine limits
+
+`api.moysklad.ru`, `online.moysklad.ru`, and `dev.moysklad.ru` are **unreachable
+from the Windows dev machine** — TCP connect times out, while the rest of the
+internet works. A direct request will not succeed no matter how it is made,
+which is why the `syncId` question in [[runtime-stores]] stayed open across two
+separate attempts before anyone thought to route around it.
+
+The way around it is an SSH tunnel through a machine that does have access:
+
+```bash
+ssh -N -L 18443:api.moysklad.ru:443 <host-with-access>
+curl --compressed --connect-to api.moysklad.ru:443:127.0.0.1:18443 \
+  -u "$MOYSKLAD_LOGIN:$MOYSKLAD_PASSWORD" https://api.moysklad.ru/api/remap/1.2/…
+```
+
+`--connect-to` keeps the real hostname for SNI and certificate checks, and the
+MoySklad credentials never leave the local machine — the tunnel carries only
+encrypted TLS. Prefer this over copying credentials onto another host.
+
 ## Documentation conventions
 
 `Amberry_Voice_Technical_Specification.md`, `README.md`, `AGENTS.md`,

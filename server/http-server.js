@@ -13,6 +13,7 @@ import { createAuth } from "./auth.js";
 import { getStreamStatus } from "./stream-status.js";
 import { preflightBroadcast, startBroadcast, stopBroadcast, getRelayStatus } from "./stream-orchestrator.js";
 import { createChatClient } from "./chat-client.js";
+import { classifyWriteOutcome } from "./write-journal.js";
 
 const SEND_LOGS_MAX_BODY = 16 * 1024;
 const SEND_LOGS_TIMEOUT_MS = 60 * 1000;
@@ -1110,7 +1111,13 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
             id: g.purchaseOrderId, name: g.purchaseOrderName, supplierId: g.supplierId,
           }));
         return jsonResponse(response, 200, {
-          ok: true, status: "complete", purchaseOrders, failedGroups: [], blockedGroupHashes: [], replayed: true,
+          ok: true,
+          status: "complete",
+          purchaseOrders,
+          failedGroups: [],
+          unknownGroups: [],
+          blockedGroupHashes: [],
+          replayed: true,
         });
       }
 
@@ -1132,6 +1139,7 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
 
       const purchaseOrders = [];
       const failedGroups = [];
+      const unknownGroups = [];
       const blockedGroupHashes = [];
 
       for (let i = 0; i < groups.length; i++) {
@@ -1248,32 +1256,47 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
           purchaseOrders.push({ id: result.id, name: result.name, supplierId: group.supplierId });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          logger.error("wishlist", "purchase_order_failed", { draftId, groupHash, error: message });
+          // «Не удалось» и «не знаю» — разные вещи для оператора. Второе значит,
+          // что заказ в МойСкладе мог всё-таки появиться: сверка не смогла
+          // ответить. Такую группу нельзя показывать как обычную ошибку —
+          // оператор пойдёт создавать заказ руками и получит дубль.
+          const outcomeUnknown = error?.code === "MOYSKLAD_WRITE_OUTCOME_UNKNOWN"
+            || classifyWriteOutcome(error) === "unknown";
+          logger.error("wishlist", outcomeUnknown ? "purchase_order_unknown" : "purchase_order_failed", {
+            draftId, groupHash, error: message,
+          });
           await wishlistSubmissions.recordGroupResult(draftId, groupHash, {
-            status: "failed",
+            status: outcomeUnknown ? "unknown" : "failed",
             supplierId: group.supplierId,
             error: message,
             attemptCount: (existingResult?.attemptCount || 0) + 1,
             lastAttemptAt: new Date().toISOString(),
           });
-          failedGroups.push({ groupHash, supplierId: group.supplierId, error: message });
+          if (outcomeUnknown) {
+            unknownGroups.push({ groupHash, supplierId: group.supplierId, error: message });
+          } else {
+            failedGroups.push({ groupHash, supplierId: group.supplierId, error: message });
+          }
           // Парсим HTTP-статус из текста ошибки если МС вернул "MoySklad HTTP NNN".
           const httpMatch = /MoySklad HTTP (\d+)/.exec(message);
           diag("purchase_order_response", {
             draftId, groupHash, ok: false,
+            outcome: outcomeUnknown ? "unknown" : "failed",
             httpStatus: httpMatch ? Number(httpMatch[1]) : null,
             errorMessage: message,
           });
         }
       }
 
-      if (failedGroups.length > 0 || blockedGroupHashes.length > 0) {
+      if (failedGroups.length > 0 || blockedGroupHashes.length > 0 || unknownGroups.length > 0) {
         diag("purchase_order_partial", {
           draftId,
           successCount: purchaseOrders.length,
           failedCount: failedGroups.length,
           blockedCount: blockedGroupHashes.length,
+          unknownCount: unknownGroups.length,
           failedGroupHashes: failedGroups.map((g) => g.groupHash),
+          unknownGroupHashes: unknownGroups.map((g) => g.groupHash),
           blockedGroupHashes,
         });
       }
@@ -1287,7 +1310,8 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         });
       }
 
-      const status = failedGroups.length === 0 && blockedGroupHashes.length === 0
+      const unresolved = failedGroups.length + blockedGroupHashes.length + unknownGroups.length;
+      const status = unresolved === 0
         ? "complete"
         : (purchaseOrders.length === 0 ? "failed" : "partial");
 
@@ -1296,6 +1320,7 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         status,
         purchaseOrders,
         failedGroups,
+        unknownGroups,
         blockedGroupHashes,
       });
       return;

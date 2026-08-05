@@ -87,19 +87,45 @@ A write is retried only when the outcome is known to be `not_applied`. For
   outcome. Exactly one additional position means the lost write landed. This
   baseline includes positions created before the journal existed and positions
   that an operator added manually.
-- **Purchase-order path** — there is no marker to look for: the description is
-  built from the operator's template and read by people. Instead the reconciler
-  fetches the supplier's 50 newest purchase orders, keeps those matching the
-  store and the exact description, and compares each one's positions
-  (product, quantity, price) with the group being written — the same fields
-  `groupHash` is built from, so neighbouring groups of the same submission
-  cannot match. Exactly one match means the lost write landed; more than one
-  match, or more than five same-description candidates, is `inconclusive`.
+- **Purchase-order path** — two layers, in this order.
+  1. **`syncId`** — `createPurchaseOrder` stamps the order with a deterministic
+     UUIDv5 built from `draftId::groupHash`
+     (`buildPurchaseOrderSyncId`, `moysklad-helpers.js`). It is MoySklad's
+     external-code field, invisible to operators, so unlike the reservation
+     path there is no marker in the human-read description. Reconciliation is
+     an exact lookup: `filter=syncId=<uuid>`. One row means the lost write
+     landed; two rows is `inconclusive`.
+  2. **Fingerprint** — an *empty* `syncId` result proves nothing on its own
+     (an order written by an older build carries no `syncId`, and the filter
+     itself could be unavailable), so the verdict falls through to the
+     heuristic: the supplier's 50 newest purchase orders, filtered by store
+     and exact description, compared position by position (product, quantity,
+     price) — the same fields `groupHash` is built from, so neighbouring
+     groups of the same submission cannot match. Exactly one match means
+     applied; more than one match, or more than five same-description
+     candidates, is `inconclusive`. Only this layer may say `not_applied`.
+
+  MoySklad also treats `syncId` as an **upsert key** — verified against the
+  live account on 2026-08-05 with `scripts/probe-moysklad-syncid.mjs`: a second
+  POST carrying the same `syncId` returned the *first* order's id and name, and
+  `filter=syncId=` then found exactly one order. So a duplicate purchase order
+  is impossible server-side as long as the write carries `syncId`, and the
+  fingerprint layer is belt-and-braces rather than load-bearing.
+
+  Two API requirements bit during that check and are easy to hit again:
+  `Accept-Encoding: gzip` is mandatory (nginx answers `415` without it), and
+  the request body must be sent verbatim (a reformatted body gets error 2001).
 
 Any other difference returns `inconclusive`, and so does a failed
 reconciliation or a missing counterparty. `inconclusive` never retries and
 never claims success — it surfaces the reservation to the operator instead of
 risking a duplicate order or a silently lost бронь.
+
+For purchase orders that surfacing is explicit: the group is recorded with
+status `unknown` (not `failed`), returned in `unknownGroups`, and the wishlist
+UI warns that the order may exist in MoySklad and must be checked before
+anything is created by hand. Re-submitting from V-Amber is safe either way —
+the journal key blocks a blind second POST.
 
 On startup, `pending` and `unknown` entries are reconciled before any new POST
 with the same key. Concurrent calls with the same key share one in-flight
