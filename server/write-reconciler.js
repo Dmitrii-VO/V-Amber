@@ -131,6 +131,13 @@ export function createReservationReconciler({ moysklad, journal } = {}) {
       if (rows.length > 1) {
         return { status: "inconclusive", reason: "sync_id_ambiguous" };
       }
+      // Пусто по двум разным причинам, и в логе их надо различать: заказа
+      // действительно нет — или спросить не получилось и дальше работает
+      // эвристика.
+      logger.warn("write-reconciler", "purchase_order_syncid_miss", {
+        syncId,
+        supported: bySyncId?.supported === true,
+      });
     }
 
     const found = await moysklad.findPurchaseOrdersByFingerprint({

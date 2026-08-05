@@ -101,13 +101,17 @@ if (!writeTest) {
 }
 
 // --- 3. Принимает ли POST syncId и что делает повторный POST ---
-const defaultsOrg = env.MOYSKLAD_ORGANIZATION_ID;
+// MOYSKLAD_ORGANIZATION_ID в .env может быть пустым (у оператора он и пуст) —
+// приложение в этом случае берёт организацию через getDefaults(), делаем так же.
+const organizations = await call("GET", "entity/organization", { params: { limit: "1" } });
+const defaultsOrg = env.MOYSKLAD_ORGANIZATION_ID || organizations.json?.rows?.[0]?.id;
 const suppliers = await call("GET", "entity/counterparty", { params: { limit: "1" } });
 const agentId = suppliers.json?.rows?.[0]?.id;
 if (!defaultsOrg || !agentId) {
   console.log("\n[3] Пропущено: не удалось определить организацию или контрагента.");
   process.exit(1);
 }
+console.log(`\n    организация: ${defaultsOrg}, контрагент: ${agentId}`);
 
 const syncId = buildDeterministicUuid(V_AMBER_UUID_NAMESPACE, "probe-write::" + new Date().toISOString());
 const meta = (entity, id) => ({
