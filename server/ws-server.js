@@ -312,6 +312,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     let allLotsClosePromise = null;
     const reservationWorkByLotSessionId = new Map();
     const closingLotsBySessionId = new Map();
+    const closingReservationAdmission = new Set();
 
     function isLotPoisoned(lotSessionId) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
@@ -414,6 +415,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       allLotsClosePromise = null;
       reservationWorkByLotSessionId.clear();
       closingLotsBySessionId.clear();
+      closingReservationAdmission.clear();
       lastDetection = null;
       activeDetectionActionId = null;
       // Токены строк внимания привязаны к комментариям прошлого эфира: после
@@ -532,6 +534,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       allLotsClosePromise = (async () => {
         const lots = getOpenLots();
         const alreadyClosing = [...closingLotsBySessionId.values()];
+        for (const lot of lots) closingReservationAdmission.add(lot.lotSessionId);
         // Detach first: promoted waitlist work may already be queued in a
         // microtask. It must observe a closed lot before any MoySklad write.
         openLotsBySessionId.clear();
@@ -546,6 +549,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           await flushOrphanWaitlist(lot, reason);
           logLotClosedOnce(lot, reason);
           if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
+            closingReservationAdmission.delete(lot.lotSessionId);
             continue;
           }
           try {
@@ -576,6 +580,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
             }
           }
+          closingReservationAdmission.delete(lot.lotSessionId);
         }
       })();
 
@@ -1172,7 +1177,10 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function isReservationSessionCurrent(lot, reservationSessionVersion) {
       return reservationSessionVersion === customerOrderSessionVersion
-        && openLotsBySessionId.get(lot?.lotSessionId) === lot;
+        && (
+          openLotsBySessionId.get(lot?.lotSessionId) === lot
+          || closingReservationAdmission.has(lot?.lotSessionId)
+        );
     }
 
     function buildCustomerOrderCacheKey(viewerId, broadcastDate) {
@@ -1491,14 +1499,6 @@ export function attachWsServer(httpServer, config, services = {}) {
           return;
         }
 
-        // The order was created/appended in MoySklad. Even if the lot has
-        // moved on since we started, register it so a future reservation by
-        // the same viewer appends to this order instead of creating a third
-        // orphan record. This is the orphan-prevention path.
-        if (!existingOrder?.id && order?.id) {
-          customerOrdersByViewerId.set(customerOrderKey, order);
-        }
-
         if (!isReservationSessionCurrent(lot, reservationSessionVersion)) {
           const staleReason = existingOrder?.id ? "stale_session_after_append" : "stale_session_after_create";
           logger.info("vk", "reservation_result_discarded", {
@@ -1508,12 +1508,16 @@ export function attachWsServer(httpServer, config, services = {}) {
             viewerId: event.viewerId,
             orderId: order?.id || null,
             reason: staleReason,
-            note: "MoySklad write completed; recorded in customerOrdersByViewerId to avoid duplicate orders.",
+            note: "MoySklad write completed after the reservation session closed; omitted from the current-session cache.",
           });
           event.status = "stale_discarded";
           event.customerOrder = order;
           logReservationFinalized(lot, event, { reason: staleReason });
           return;
+        }
+
+        if (!existingOrder?.id && order?.id) {
+          customerOrdersByViewerId.set(customerOrderKey, order);
         }
 
         event.status = existingOrder?.id ? "reserved_appended" : "reserved";
@@ -2802,6 +2806,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       const existingClose = closingLotsBySessionId.get(lot.lotSessionId);
       if (existingClose) return existingClose;
+      closingReservationAdmission.add(lot.lotSessionId);
 
       const closePromise = (async () => {
         await settleReservationWorkAtClose(lot, reason);
@@ -2825,6 +2830,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
         });
       })().finally(() => {
+        closingReservationAdmission.delete(lot.lotSessionId);
         if (closingLotsBySessionId.get(lot.lotSessionId) === closePromise) {
           closingLotsBySessionId.delete(lot.lotSessionId);
         }

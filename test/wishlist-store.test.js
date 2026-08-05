@@ -98,3 +98,31 @@ test("concurrent wishlist additions deduplicate atomically", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("concurrent removal and close migration leave an active replacement", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "v-amber-wishlist-remove-race-"));
+  const store = createWishlistStore({ filePath: join(dir, "events.jsonl") });
+
+  try {
+    const lot = { code: "03820", lotSessionId: "lot-remove-race", product: {} };
+    const original = await store.addFromOutOfStock({
+      event: { viewerId: 77, viewerName: "Оля", commentId: 20, quantity: 1 },
+      lot,
+      productMeta: {},
+    });
+    await Promise.all([
+      store.remove(original.id),
+      store.addFromWaitlistOnClose({
+        events: [{ viewerId: 77, viewerName: "Оля", commentId: 21, quantity: 2 }],
+        lot,
+        reason: "stream_stop",
+      }),
+    ]);
+
+    assert.equal(store.getActiveCount(), 1);
+    assert.notEqual(store.listActive()[0].id, original.id);
+    assert.equal(store.listActive()[0].quantity, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

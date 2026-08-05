@@ -388,6 +388,7 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
     },
 
     async addManual({ viewerName, viewerId, productCode, quantity, supplierId, supplierName, buyPrice, productId, productName, lotCode }) {
+      return serializeMutation(async () => {
       if (!productCode) return null;
       const resolvedViewerId = viewerId != null ? viewerId : `manual-${randomUUID().slice(0, 8)}`;
       const record = {
@@ -411,9 +412,11 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
       };
       await write([record]);
       return byId.get(record.id) || null;
+      });
     },
 
     async edit(entryId, changes, actor = "operator") {
+      return serializeMutation(async () => {
       const entry = byId.get(entryId);
       if (!entry) return null;
       const allowed = ["quantity", "buyPrice", "supplierId", "supplierName", "productName"];
@@ -435,9 +438,11 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
       };
       await write([record]);
       return byId.get(entryId);
+      });
     },
 
     async remove(entryId, reason = "manual_delete") {
+      return serializeMutation(async () => {
       const entry = byId.get(entryId);
       if (!entry || entry.status !== "active") return null;
       const record = {
@@ -450,9 +455,11 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
       };
       await write([record]);
       return byId.get(entryId);
+      });
     },
 
     async consume({ entryIds, purchaseOrderId, purchaseOrderName, draftId, groupHash }) {
+      return serializeMutation(async () => {
       if (!Array.isArray(entryIds) || entryIds.length === 0) return [];
       const ts = new Date().toISOString();
       const records = [];
@@ -473,9 +480,11 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
       }
       await write(records);
       return records.map((r) => r.entryId);
+      });
     },
 
     async reconcileConsumedFromSubmissions(submissionsStore) {
+      return serializeMutation(async () => {
       if (!submissionsStore?.listAll) return;
       const drafts = submissionsStore.listAll();
       const reconciledRecords = [];
@@ -510,6 +519,7 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
         await write(reconciledRecords);
       }
       return reconciledRecords.length;
+      });
     },
   };
 }

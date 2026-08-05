@@ -252,7 +252,7 @@ const wlPromoted = promotedKeys.size;
 const wlMigrated = migrationKeys.size + legacyMigrationCount;
 const resolvedKeys = new Set([...promotedKeys, ...migrationKeys]);
 const identityUnresolved = [...pendingKeys].filter((key) => !resolvedKeys.has(key)).length;
-const wlUnresolved = Math.max(0, identityUnresolved - legacyMigrationCount);
+const wlUnresolved = identityUnresolved;
 const orphanWaitlistEvents = by(events, "orphan_waitlist");
 const orphanWaitlistEntries = new Map();
 for (const event of orphanWaitlistEvents) {
