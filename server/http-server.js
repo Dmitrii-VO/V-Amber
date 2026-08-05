@@ -1191,12 +1191,18 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
         diag("purchase_order_submitted", sanitizedSubmit);
 
         try {
+          // draftId и groupHash сам createPurchaseOrder не использует — это
+          // ключ журнала внешних записей (write-journal). Без него потерянный
+          // ответ МойСклада записывался бы как ошибка, а повторная отправка
+          // группы создавала бы второй закупочный заказ.
           const result = await moysklad.createPurchaseOrder({
             organizationId,
             storeId: group.storeId,
             agentId: group.supplierId,
             positions: positionsPayload,
             description,
+            draftId,
+            groupHash,
           });
 
           if (result && result.skipped === true && result.safeMode === true) {

@@ -9,7 +9,8 @@ import { logger } from "./logger.js";
 // Ничего специально в МойСклад для этого не пишется. Create-путь опознаётся по
 // маркеру commentId, который createCustomerOrderReservation и так кладёт в
 // description. Append-путь — сравнением числа позиций до записи и после
-// неизвестного исхода.
+// неизвестного исхода. Закупочный заказ — по отпечатку группы (поставщик,
+// склад, описание, состав позиций), из которого и так считается groupHash.
 //
 // Ответ "inconclusive" — законный и намеренный: лучше оставить бронь оператору
 // с громкой записью в логе, чем угадать и создать дубль или потерять бронь.
@@ -89,6 +90,40 @@ export function createReservationReconciler({ moysklad, journal } = {}) {
     return { status: "inconclusive", reason: "position_count_mismatch", baseline, actual };
   }
 
+  // Закупочный заказ. args приходят от того же обработчика отправки, что и в
+  // первой попытке (группа детерминирована groupHash), поэтому отпечаток можно
+  // собрать прямо из них; meta — фоллбэк для полей, которые в args могут
+  // отсутствовать.
+  async function resolvePurchaseOrder(args, entry) {
+    const agentId = args?.agentId || entry?.meta?.agentId || null;
+    const positions = Array.isArray(args?.positions) ? args.positions : [];
+    if (!agentId || positions.length === 0) {
+      return { status: "inconclusive", reason: "purchase_order_args_missing" };
+    }
+
+    const found = await moysklad.findPurchaseOrdersByFingerprint({
+      agentId,
+      storeId: args?.storeId || entry?.meta?.storeId || null,
+      positions,
+      description: args?.description || "",
+      source: "write_reconcile",
+    });
+
+    if (found?.inconclusiveReason) {
+      return { status: "inconclusive", reason: found.inconclusiveReason };
+    }
+    const matches = Array.isArray(found?.matches) ? found.matches : [];
+    if (matches.length === 0) {
+      return { status: "not_applied" };
+    }
+    // Два одинаковых заказа — либо дубль уже есть, либо оператор создал такой
+    // же руками. Ни то, ни другое не даёт права повторять запись.
+    if (matches.length > 1) {
+      return { status: "inconclusive", reason: "purchase_order_ambiguous" };
+    }
+    return { status: "applied", result: { id: matches[0].id, name: matches[0].name, agentId } };
+  }
+
   return {
     async prepare({ method, args, meta }) {
       if (method !== "appendPositionToCustomerOrder") return meta;
@@ -114,6 +149,9 @@ export function createReservationReconciler({ moysklad, journal } = {}) {
         }
         if (method === "appendPositionToCustomerOrder") {
           return await resolveAppend(args, key, entry);
+        }
+        if (method === "createPurchaseOrder") {
+          return await resolvePurchaseOrder(args, entry);
         }
         return { status: "inconclusive", reason: "unsupported_method" };
       } catch (error) {

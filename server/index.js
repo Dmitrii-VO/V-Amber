@@ -23,7 +23,12 @@ import { createBlockedViewersStore } from "./blocked-viewers-store.js";
 import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
-import { createWriteJournal, wrapWithWriteJournal, buildReservationWriteKey } from "./write-journal.js";
+import {
+  createWriteJournal,
+  wrapWithWriteJournal,
+  buildReservationWriteKey,
+  buildPurchaseOrderWriteKey,
+} from "./write-journal.js";
 import { createReservationReconciler } from "./write-reconciler.js";
 import { getStreamStatus } from "./stream-status.js";
 
@@ -277,11 +282,18 @@ async function main() {
     {
       createCustomerOrderReservation: (args) => buildReservationWriteKey(args || {}),
       appendPositionToCustomerOrder: (args) => buildReservationWriteKey(args || {}),
+      createPurchaseOrder: (args) => buildPurchaseOrderWriteKey(args || {}),
     },
     {
       metaBuilders: {
         createCustomerOrderReservation: (args) => buildReservationMeta(args || {}),
         appendPositionToCustomerOrder: (args) => buildReservationMeta(args || {}),
+        createPurchaseOrder: (args) => ({
+          draftId: args?.draftId || null,
+          groupHash: args?.groupHash || null,
+          agentId: args?.agentId || null,
+          storeId: args?.storeId || null,
+        }),
       },
       reconciler: writeReconciler,
       retryAttempts: config.moysklad?.writeRetryAttempts,
