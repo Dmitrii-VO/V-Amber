@@ -116,3 +116,45 @@ test("vk and chat reservations share one lot and one stock counter", async () =>
     await harness.close();
   }
 });
+
+test("out_of_stock from the viewer app replies in chat, not VK", async () => {
+  const vk = createVkMock();
+  const chatClient = createChatClientMock();
+  const harness = await startHarness({
+    cardsByCode: { "03204": { ...CARD_03204, availableStock: 1 } },
+    knownCodes: ["03204"],
+    vk,
+    chatClient,
+    config: { chat: { pollMs: 50 } },
+  });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+    client.send({ type: "manualCode", code: "03204" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot);
+    await chatClient.waitForFeedInit();
+
+    vk.pushComment({ id: 301, fromId: VK_VIEWER_ID, text: "03204", firstName: "Аня" });
+    await client.waitFor(hasReservedFrom(VK_VIEWER_ID), { timeoutMs: 6000 });
+
+    chatClient.pushMessage({
+      viewerId: CHAT_VIEWER_ID,
+      name: "Оля Чатовая",
+      text: "03204",
+    });
+    await client.waitFor((m) => m.type === "state"
+      && m.activeLot?.reservations?.events?.some(
+        (event) => event.viewerId === CHAT_VIEWER_ID && event.status === "out_of_stock",
+      ), { timeoutMs: 6000 });
+
+    assert.ok(chatClient.serviceMessages.some((text) => /Добавили вас в список ожидания/.test(text)));
+    assert.equal(
+      vk.callsTo("publishReservationReply").filter((call) => call.args[0].status === "out_of_stock").length,
+      0,
+    );
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});

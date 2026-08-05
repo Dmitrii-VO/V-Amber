@@ -85,12 +85,15 @@ export function getLotEffectivePrice(lot) {
 }
 
 export function getReservationReplyMessage(event, options = {}) {
-  // W6 — ручной режим: переполнение по остатку тихо уходит в лист ожидания
-  // на стороне сервера (addWishlistFromComment), но покупателю публично
-  // НИЧЕГО не пишем. Оператор работает со списком вручную. См.
-  // knowledge/wiki/operator-feedback.md (W6).
+  const code = options?.code || event?.lotCode || null;
+  const codeSuffix = code ? ` (код ${code})` : "";
+  const viewerName = String(event?.viewerName || "").trim();
+  const namePrefix = viewerName ? `${viewerName}, ` : "";
+
   if (event.status === "out_of_stock") {
-    return "";
+    return event.wishlistEntryId
+      ? `${namePrefix}товара не хватило${codeSuffix}. Добавили вас в список ожидания.`
+      : `${namePrefix}товара не хватило${codeSuffix}, и автоматически добавить вас в список ожидания не удалось — оператор проверит вручную.`;
   }
 
   if (event.status === "product_not_found") {
@@ -104,9 +107,6 @@ export function getReservationReplyMessage(event, options = {}) {
   // Этап 5: явно указываем код лота, чтобы покупатель видел, какой
   // именно артикул мы за ним закрепили — иначе при нескольких открытых
   // лотах непонятно, к чему относится reply.
-  const code = options?.code || event?.lotCode || null;
-  const codeSuffix = code ? ` (код ${code})` : "";
-
   if (event.status === "reserved") {
     return `${event.viewerName}, бронь подтверждена${codeSuffix}.`;
   }
@@ -116,6 +116,9 @@ export function getReservationReplyMessage(event, options = {}) {
   }
 
   if (event.status === "order_failed") {
+    if (event.wishlistEntryId) {
+      return `${namePrefix}бронь создать не удалось${codeSuffix}. Добавили вас в список ожидания.`;
+    }
     return "Не удалось обработать бронь. Напишите код товара ещё раз — можно так: \"03204\", \"бр 03204\", \"беру 03204\" или \"+03204\".";
   }
 

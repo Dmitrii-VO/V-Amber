@@ -281,6 +281,11 @@ open at all (the comment poller is not running then).
 - [ ] **`reservation_waitlist_pending` count == `waitlist_promoted` count** — every
   queued buyer was promoted when stock freed up. Unpromoted leftovers = buyers
   stuck in limbo with no order.
+- [ ] **Count orphan buyers, not raw `orphan_waitlist` events.** Deduplicate
+  entries by `lotSessionId + commentId + viewerId`. The same open lot can be
+  flushed once for `stream_stop` and again for `socket_close`; the 2026-08-04
+  bundle therefore contains 6 orphan events but only 4 unique stranded buyers.
+  `scripts/analyze-broadcast-logs.mjs` currently reports the raw event count.
 - [ ] Each promotion should resolve to a later `reserved`/`reserved_appended` for
   that viewer+product (spot-check one lot).
 - [ ] **`orphan_waitlist`** — a queue with no lot behind it. Rare (1 event in the

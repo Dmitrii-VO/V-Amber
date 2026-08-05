@@ -149,24 +149,22 @@ test("getReservationReplyMessage produces status-specific text", () => {
   );
 });
 
-test("getReservationReplyMessage out_of_stock is silent (W6 manual mode)", () => {
-  // W6: переполнение тихо уходит в лист ожидания на сервере, покупателю
-  // публично ничего не пишем — независимо от wishlistEntryId.
-  assert.equal(
+test("getReservationReplyMessage reports the real out_of_stock wishlist outcome", () => {
+  assert.match(
     getReservationReplyMessage({
       status: "out_of_stock",
       viewerName: "Аня",
       wishlistEntryId: "entry-1",
-    }),
-    "",
+    }, { code: "03204" }),
+    /Аня, товара не хватило \(код 03204\)\. Добавили вас в список ожидания\./,
   );
-  assert.equal(
+  assert.match(
     getReservationReplyMessage({
       status: "out_of_stock",
       viewerName: "Аня",
       lotCode: "03204",
     }),
-    "",
+    /автоматически добавить вас в список ожидания не удалось/,
   );
 });
 

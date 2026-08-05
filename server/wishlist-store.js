@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { logger } from "./logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const filePath = join(__dirname, "..", "logs", "wishlist.jsonl");
+const DEFAULT_FILE = join(__dirname, "..", "logs", "wishlist.jsonl");
 
 const SCHEMA_VERSION = 1;
 
@@ -18,13 +18,13 @@ function dedupKey(viewerId, productCode) {
   return `${viewerId}::${productCode}`;
 }
 
-async function appendLines(lines) {
+async function appendLines(filePath, lines) {
   if (!lines.length) return;
   await mkdir(dirname(filePath), { recursive: true });
   await appendFile(filePath, lines.join("\n") + "\n", "utf8");
 }
 
-export function createWishlistStore({ onChange } = {}) {
+export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) {
   // Active entries: key (viewerId+code) -> entry object (current state).
   const active = new Map();
   // All entries by id, including archived (consumed/removed).
@@ -98,7 +98,9 @@ export function createWishlistStore({ onChange } = {}) {
           commentId: record.commentId || null,
         });
         entry.updatedAt = record.ts;
-        entry.quantity = entry.seenEvents.length;
+        entry.quantity += Number.isFinite(Number(record.quantity))
+          ? Math.max(0, Number(record.quantity))
+          : 1;
         break;
       }
       case "edited": {
@@ -158,15 +160,16 @@ export function createWishlistStore({ onChange } = {}) {
     // Раньше applyEvent выполнялся синхронно ДО постановки в очередь —
     // при параллельных add/edit/consume in-memory state мог опередить файл,
     // и порядок применения событий не совпадал с порядком записей в JSONL.
-    writeChain = writeChain
-      .then(async () => {
-        records.forEach(applyEvent);
-        await appendLines(lines);
-      })
-      .catch((error) => {
+    const operation = writeChain.then(async () => {
+      await appendLines(filePath, lines);
+      records.forEach(applyEvent);
+    });
+    // Keep the shared queue usable after failure, but reject this operation to
+    // its caller so no buyer receives a false persistence confirmation.
+    writeChain = operation.catch((error) => {
         logger.warn("wishlist-store", "append_failed", { error });
       });
-    await writeChain;
+    await operation;
     notify();
     // Событийный поток — после успешной записи на диск, чтобы JSONL-эмиттер
     // не выдал событие для записи, которой потом физически не оказалось.
@@ -284,6 +287,7 @@ export function createWishlistStore({ onChange } = {}) {
           entryId: existing.id,
           lotSessionId: lot.lotSessionId || null,
           commentId: event.commentId || null,
+          quantity: Math.max(1, Number(event.quantity) || 1),
         };
         await write([record]);
         return existing;
@@ -305,7 +309,7 @@ export function createWishlistStore({ onChange } = {}) {
         salePrice,
         discountAmount,
         effectivePrice,
-        quantity: 1,
+        quantity: Math.max(1, Number(event.quantity) || 1),
         lotCode: lot.code || null,
         lotSessionId: lot.lotSessionId || null,
         fromCommentId: event.commentId || null,
@@ -337,6 +341,11 @@ export function createWishlistStore({ onChange } = {}) {
             entryId: active.get(key).id,
             lotSessionId: lot?.lotSessionId || event?.lotSessionId || null,
             commentId: event?.commentId || null,
+            // Startup may retry after the manual recovery report failed. The
+            // wishlist addition is already durable and must stay idempotent.
+            quantity: reason === "crash_recovery"
+              ? 0
+              : Math.max(1, Number(event?.quantity) || 1),
           });
           continue;
         }
@@ -355,7 +364,7 @@ export function createWishlistStore({ onChange } = {}) {
           supplierId: meta.supplierId,
           supplierName: meta.supplierName,
           buyPrice: meta.buyPrice,
-          quantity: 1,
+          quantity: Math.max(1, Number(event?.quantity) || 1),
           lotCode: lot?.code || code,
           lotSessionId: lot?.lotSessionId || event?.lotSessionId || null,
           fromCommentId: event?.commentId || null,

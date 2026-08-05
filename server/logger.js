@@ -81,6 +81,15 @@ function normalizeMeta(meta) {
           name: value.name,
           message: value.message,
           stack: value.stack,
+          code: value.code ?? undefined,
+          cause: value.cause instanceof Error
+            ? {
+                name: value.cause.name,
+                message: value.cause.message,
+                stack: value.cause.stack,
+                code: value.cause.code ?? undefined,
+              }
+            : value.cause,
         };
       }
 

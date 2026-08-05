@@ -232,18 +232,45 @@ if (latePriceChanges.length) flag(`правок цены/скидки после
 
 // ─── §5/§6 Waitlist & wishlist ─────────────────────────────────────────────
 const wlPending = by(events, "reservation_waitlist_pending").length;
-const wlPromoted = by(events, "waitlist_promoted").length;
-const orphanWaitlist = by(events, "orphan_waitlist").length;
+const waitlistPendingEvents = by(events, "reservation_waitlist_pending");
+const waitlistPromotedEvents = by(events, "waitlist_promoted");
+const wlPromoted = waitlistPromotedEvents.length;
+const waitlistMigrations = by(events, "waitlist_migrated_to_wishlist");
+const wlMigrated = waitlistMigrations.reduce((sum, event) => sum + (Number(event.count) || 0), 0);
+const waitlistKey = (event, parent = event) => [
+  parent.lotSessionId || `code:${parent.lotCode || event.lotCode || ""}`,
+  event.commentId ?? `viewer:${event.viewerId ?? ""}`,
+].join("|");
+const pendingKeys = new Set(waitlistPendingEvents.map((event) => waitlistKey(event)));
+const resolvedKeys = new Set(waitlistPromotedEvents.map((event) => waitlistKey(event)));
+let migrationsWithEntries = 0;
+for (const migration of waitlistMigrations) {
+  const entries = Array.isArray(migration.entries) ? migration.entries : [];
+  if (entries.length > 0) migrationsWithEntries += Number(migration.count) || entries.length;
+  for (const entry of entries) resolvedKeys.add(waitlistKey(entry, migration));
+}
+const identityUnresolved = [...pendingKeys].filter((key) => !resolvedKeys.has(key)).length;
+const legacyMigrationCount = Math.max(0, wlMigrated - migrationsWithEntries);
+const wlUnresolved = Math.max(0, identityUnresolved - legacyMigrationCount);
+const orphanWaitlistEvents = by(events, "orphan_waitlist");
+const orphanWaitlistEntries = new Map();
+for (const event of orphanWaitlistEvents) {
+  for (const entry of Array.isArray(event.entries) ? event.entries : []) {
+    const key = [event.lotSessionId, entry.commentId, entry.viewerId].map((value) => value ?? "").join("|");
+    orphanWaitlistEntries.set(key, { ...entry, lotSessionId: event.lotSessionId, lotCode: event.lotCode });
+  }
+}
+const orphanWaitlist = orphanWaitlistEntries.size;
 const oos = finalized.filter((e) => e.status === "out_of_stock");
 const wishAdded = wishlistEvents.filter((e) => e.kind === "added" && inWindow(e, win));
 const wishFromFailure = wishAdded.filter((e) => e.trigger === "order_failed");
 const wishNoSupplier = wishAdded.filter((e) => !e.supplierName);
 
 p(`\n[5] Waitlist`);
-p(`    pending=${wlPending}  promoted=${wlPromoted}   ${wlPending === wlPromoted ? "✓ все продвинуты" : "⚠ остались непродвинутые"}`);
-if (wlPending !== wlPromoted) flag(`waitlist: ${wlPending} в очереди vs ${wlPromoted} продвинуто`);
-p(`    orphan_waitlist=${orphanWaitlist}${orphanWaitlist ? " ✗ очередь без лота" : ""}`);
-if (orphanWaitlist) flag(`${orphanWaitlist} orphan_waitlist — очередь без лота`);
+p(`    pending=${wlPending}  promoted=${wlPromoted}  migrated_at_close=${wlMigrated}  unresolved=${wlUnresolved}   ${wlUnresolved === 0 ? "✓" : "⚠"}`);
+if (wlUnresolved > 0) flag(`waitlist: ${wlUnresolved} заявок без promotion или миграции`);
+p(`    orphan_waitlist: unique=${orphanWaitlist}, audit_events=${orphanWaitlistEvents.length}${orphanWaitlist ? " ✗ очередь без финала" : ""}`);
+if (orphanWaitlist) flag(`${orphanWaitlist} уникальных orphan waitlist-заявок`);
 
 p(`\n[6] Wishlist  (источник: wishlist/events.jsonl, окно эфира)`);
 p(`    out_of_stock=${oos.length}  wishlist added=${wishAdded.length}   ${oos.length <= wishAdded.length ? "✓" : "✗ часть OOS не попала в wish list"}`);
@@ -281,7 +308,7 @@ if (asJson) {
     cancels: { byComment: commentCancels.length, declined: commentCancelsDeclined.length, voice: voiceCancels.length, done: cancelled.length, noPosition: cancelNoPos.length, failed: cancelFailed.length, unmatched: unmatchedCancels },
     noOpenLot: { logged: noOpenLot.length, suppressed, attentionCreated: attention.length },
     pricing: { zero: zeroPrice.length, mismatched: mismatches.length, discountApplied: discApplied, discountSkipped: discSkipped.length, backfilled: backfillUpdated, backfillFailed, invalidDiscount: invalidDiscount.length, latePriceChanges: latePriceChanges.length },
-    waitlist: { pending: wlPending, promoted: wlPromoted, orphan: orphanWaitlist },
+    waitlist: { pending: wlPending, promoted: wlPromoted, migrated: wlMigrated, unresolved: wlUnresolved, orphan: orphanWaitlist, orphanEvents: orphanWaitlistEvents.length },
     wishlist: { outOfStock: oos.length, added: wishAdded.length, fromOrderFailed: wishFromFailure.length },
     stock: { lotsUnknown: lotsUnknownStock.length, reservationsUnknown: stockUnknown.length },
     flags,

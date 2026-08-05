@@ -309,6 +309,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // того, как первый допишет позицию. Получалось ДВА заказа на одного
     // покупателя. Тот же приём, что у appendReservationQuantity (appendInFlight).
     const attentionReservationsInFlight = new Set();
+    let allLotsClosePromise = null;
 
     function isLotPoisoned(lotSessionId) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
@@ -408,6 +409,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       chatFeedCursor = null;
       activeLot = null;
       openLotsBySessionId.clear();
+      allLotsClosePromise = null;
       lastDetection = null;
       activeDetectionActionId = null;
       // Токены строк внимания привязаны к комментариям прошлого эфира: после
@@ -518,49 +520,59 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
-    async function publishAllLotsClosed(reason) {
-      const lots = getOpenLots();
-      // Последовательно, чтобы при «video not found» на конце эфира можно
-      // было записать ровно один warning и пропустить публикацию закрытия
-      // оставшихся лотов вместо серии error publish failures в логе.
-      let vkStreamUnavailable = false;
-      for (const lot of lots) {
-        await flushOrphanWaitlist(lot, reason);
-        logLotClosedOnce(lot, reason);
-        if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
-          continue;
-        }
-        try {
-          await vk.publishLotClosed(lot);
-        } catch (error) {
-          // Расширили классификатор: stream-fatal означает «дальше публикация
-          // под этим видео не пройдёт» (видео удалено/недоступно/комментарии
-          // закрыты/некорректные параметры) — для массового закрытия лотов
-          // условия видео-уровневые, поэтому останавливаем дальнейшие попытки.
-          if (isVkStreamFatalError(error)) {
-            vkStreamUnavailable = true;
-            logger.warn("vk", "lot_close_skipped_video_unavailable", {
-              connectionId,
-              code: lot.code,
-              lotSessionId: lot.lotSessionId,
-              reason,
-              vkErrorCode: error?.vkErrorCode ?? null,
-              error,
-            });
-          } else {
-            handleVkPublishError(lot, error);
-            logger.error("vk", "lot_close_publish_failed", {
-              connectionId,
-              code: lot.code,
-              lotSessionId: lot.lotSessionId,
-              reason,
-              error,
-            });
+    function publishAllLotsClosed(reason) {
+      if (allLotsClosePromise) {
+        return allLotsClosePromise;
+      }
+
+      allLotsClosePromise = (async () => {
+        const lots = getOpenLots();
+        // Detach first: promoted waitlist work may already be queued in a
+        // microtask. It must observe a closed lot before any MoySklad write.
+        openLotsBySessionId.clear();
+        activeLot = null;
+        // Последовательно, чтобы при «video not found» на конце эфира можно
+        // было записать ровно один warning и пропустить публикацию закрытия
+        // оставшихся лотов вместо серии error publish failures в логе.
+        let vkStreamUnavailable = false;
+        for (const lot of lots) {
+          await flushOrphanWaitlist(lot, reason);
+          logLotClosedOnce(lot, reason);
+          if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
+            continue;
+          }
+          try {
+            await vk.publishLotClosed(lot);
+          } catch (error) {
+            // Расширили классификатор: stream-fatal означает «дальше публикация
+            // под этим видео не пройдёт» (видео удалено/недоступно/комментарии
+            // закрыты/некорректные параметры) — для массового закрытия лотов
+            // условия видео-уровневые, поэтому останавливаем дальнейшие попытки.
+            if (isVkStreamFatalError(error)) {
+              vkStreamUnavailable = true;
+              logger.warn("vk", "lot_close_skipped_video_unavailable", {
+                connectionId,
+                code: lot.code,
+                lotSessionId: lot.lotSessionId,
+                reason,
+                vkErrorCode: error?.vkErrorCode ?? null,
+                error,
+              });
+            } else {
+              handleVkPublishError(lot, error);
+              logger.error("vk", "lot_close_publish_failed", {
+                connectionId,
+                code: lot.code,
+                lotSessionId: lot.lotSessionId,
+                reason,
+                error,
+              });
+            }
           }
         }
-      }
-      openLotsBySessionId.clear();
-      activeLot = null;
+      })();
+
+      return allLotsClosePromise;
     }
 
     function resetCustomerOrders() {
@@ -1056,14 +1068,14 @@ export function attachWsServer(httpServer, config, services = {}) {
     function notifyReservationStatus(lot, event) {
       const message = getReservationReplyMessage(event, { code: lot?.code || null });
       if (!message) {
-        return;
+        return Promise.resolve();
       }
 
       // Бронь из чата /efir/ → ответ в тот же чат сервисным сообщением.
       // VK-poison тут не при чём (это про закрытые VK-комментарии), а ошибка
       // чата ничего не отравляет — best-effort, как и весь канал ответов.
       if (event.source === "chat") {
-        void chatClient.postServiceMessage(message).then((result) => {
+        return chatClient.postServiceMessage(message).then((result) => {
           if (!result.ok) {
             logger.warn("chat", "reservation_reply_failed", {
               connectionId,
@@ -1075,15 +1087,24 @@ export function attachWsServer(httpServer, config, services = {}) {
               error: result.error,
             });
           }
+        }).catch((error) => {
+          logger.warn("chat", "reservation_reply_failed", {
+            connectionId,
+            lotSessionId: lot?.lotSessionId || null,
+            code: lot?.code || null,
+            commentId: event.commentId,
+            viewerId: event.viewerId,
+            status: event.status,
+            error,
+          });
         });
-        return;
       }
 
       if (isLotPoisoned(lot?.lotSessionId)) {
-        return;
+        return Promise.resolve();
       }
 
-      void vk.publishReservationReply({
+      return vk.publishReservationReply({
         commentId: event.commentId,
         message,
         lotSessionId: lot?.lotSessionId || null,
@@ -1105,7 +1126,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     async function addWishlistFromComment(lot, event, trigger = "wishlist_confirmed") {
-      if (!wishlistStore || !lot || !event?.viewerName) {
+      if (!wishlistStore || !lot || event?.viewerId == null) {
         return null;
       }
 
@@ -1248,6 +1269,8 @@ export function attachWsServer(httpServer, config, services = {}) {
             viewerName: event.viewerName,
             viewerId: event.viewerId,
             lotCode: lot.code,
+            lotSessionId: lot.lotSessionId,
+            commentId: event.commentId,
             position: waitlistPosition,
           });
           logReservationFinalized(lot, event, { waitlistPosition });
@@ -1577,9 +1600,25 @@ export function attachWsServer(httpServer, config, services = {}) {
           viewerName: nextWaitlistEvent.viewerName,
           viewerId: nextWaitlistEvent.viewerId,
           lotCode: lot.code,
+          lotSessionId: lot.lotSessionId,
+          commentId: nextWaitlistEvent.commentId,
           previousPrimaryStatus: event.status,
         });
-        void processReservationEvent(lot, nextWaitlistEvent);
+        void processReservationEvent(lot, nextWaitlistEvent).catch((error) => {
+          logger.error("vk", "reservation_processing_unhandled", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            commentId: nextWaitlistEvent.commentId,
+            viewerId: nextWaitlistEvent.viewerId,
+            status: nextWaitlistEvent.status,
+            error,
+          });
+          sendJson(websocket, {
+            type: "warning",
+            message: `${lot.code}: обработка брони оборвалась — проверьте заявку вручную`,
+          });
+        });
       }
     }
 
@@ -2293,7 +2332,21 @@ export function attachWsServer(httpServer, config, services = {}) {
         matchedReservation,
       }));
       emitState();
-      void processReservationEvent(currentLot, event);
+      void processReservationEvent(currentLot, event).catch((error) => {
+        logger.error("vk", "reservation_processing_unhandled", {
+          connectionId,
+          lotSessionId: currentLot.lotSessionId,
+          code: currentLot.code,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          status: event.status,
+          error,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `${currentLot.code}: обработка брони оборвалась — проверьте заявку вручную`,
+        });
+      });
     }
 
     // Поллер чата /efir/ — второй источник броней. Жизненный цикл зеркалит
@@ -2569,56 +2622,113 @@ export function attachWsServer(httpServer, config, services = {}) {
       })();
     }
 
-    // Async: caller ждёт фиксацию «брошенных» броней в логе ДО clearActiveState
-    // и потенциального завершения процесса.
+    // Async: caller ждёт durable wishlist и финальный ответ покупателю ДО
+    // clearActiveState и потенциального завершения процесса.
     async function flushOrphanWaitlist(lot, reason) {
       if (!lot?.reservations?.events) {
         return;
       }
-      // Кандидаты на ручной разбор при закрытии лота: ждавшие исхода брони
-      // (waitlist_pending/pending_reservation), либо для которых попытка
-      // создания заказа упала (order_failed — зритель товар не получил,
-      // спрос есть, но wishlist теперь требует комментарий «СПИСОК код»).
-      //
-      // НЕ мигрируем reserved/reserved_appended (получили), safe_mode_logged
-      // (записан для replay).
       const MIGRATE_STATUSES = new Set([
         "waitlist_pending",
         "pending_reservation",
         "order_failed",
       ]);
-      const candidates = lot.reservations.events.filter((entry) => MIGRATE_STATUSES.has(entry?.status));
+      const candidates = lot.reservations.events.filter((entry) => (
+        MIGRATE_STATUSES.has(entry?.status) && !entry?.wishlistEntryId
+      ));
       if (candidates.length === 0) {
         return;
       }
-      logger.warn("vk", "orphan_waitlist_at_close", {
+
+      let migrated = 0;
+      const migratedEntries = [];
+      const failed = [];
+      for (const entry of candidates) {
+        const previousStatus = entry.status;
+        try {
+          const wishlistEntry = await addWishlistFromComment(
+            lot,
+            entry,
+            previousStatus === "order_failed" ? "order_failed" : "waitlist_close",
+          );
+          if (!wishlistEntry?.id) {
+            throw new Error("Wishlist entry was not created");
+          }
+
+          entry.wishlistEntryId = wishlistEntry.id;
+          if (previousStatus !== "order_failed") {
+            entry.status = "out_of_stock";
+            sessionLog.logReservationOutOfStock({
+              viewerName: entry.viewerName,
+              viewerId: entry.viewerId,
+              lotCode: lot.code,
+            });
+          }
+          logReservationFinalized(lot, entry, {
+            previousStatus,
+            reason: `${reason}_wishlist_migration`,
+            wishlistEntryId: wishlistEntry.id,
+          });
+          await notifyReservationStatus(lot, entry);
+          migrated += 1;
+          migratedEntries.push(entry);
+        } catch (error) {
+          if (previousStatus !== "order_failed") {
+            entry.status = "out_of_stock";
+            entry.wishlistMigrationFailed = true;
+            logReservationFinalized(lot, entry, {
+              previousStatus,
+              reason: `${reason}_wishlist_migration_failed`,
+              wishlistEntryId: null,
+            });
+            await notifyReservationStatus(lot, entry);
+          }
+          failed.push(entry);
+          logger.error("wishlist", "waitlist_migration_failed", {
+            connectionId,
+            lotSessionId: lot.lotSessionId,
+            code: lot.code,
+            reason,
+            commentId: entry.commentId,
+            viewerId: entry.viewerId,
+            previousStatus,
+            error,
+          });
+        }
+      }
+
+      if (migrated > 0) {
+        sessionLog.logWaitlistMigratedToWishlist({
+          lotCode: lot.code,
+          lotSessionId: lot.lotSessionId,
+          reason,
+          count: migrated,
+          entries: migratedEntries,
+        });
+      }
+
+      logger.info("wishlist", "waitlist_migration_completed", {
         connectionId,
         lotSessionId: lot.lotSessionId,
         code: lot.code,
         reason,
-        count: candidates.length,
-        entries: candidates.map((entry) => ({
-          commentId: entry.commentId,
-          viewerId: entry.viewerId,
-          viewerName: entry.viewerName,
-          status: entry.status,
-          createdAt: entry.createdAt,
-        })),
-      });
-      sessionLog.logOrphanWaitlist({
-        lotCode: lot.code,
-        lotSessionId: lot.lotSessionId,
-        reason,
-        entries: candidates,
+        candidates: candidates.length,
+        migrated,
+        failed: failed.length,
       });
 
-      logger.info("wishlist", "auto_migrate_skipped_confirmation_required", {
-        connectionId,
-        lotSessionId: lot.lotSessionId,
-        code: lot.code,
-        reason,
-        count: candidates.length,
-      });
+      if (failed.length > 0) {
+        sessionLog.logOrphanWaitlist({
+          lotCode: lot.code,
+          lotSessionId: lot.lotSessionId,
+          reason: `${reason}_wishlist_migration_failed`,
+          entries: failed,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `${lot.code}: ${failed.length} заявок не удалось добавить в список ожидания — проверьте вручную`,
+        });
+      }
     }
 
     async function publishLotClosed(lot, reason) {
@@ -3902,8 +4012,8 @@ export function attachWsServer(httpServer, config, services = {}) {
               lotSessionId: closingLot.lotSessionId,
               code: closingLot.code,
             });
-            await publishLotClosed(closingLot, "manual_close");
             unregisterOpenLot(closingLot);
+            await publishLotClosed(closingLot, "manual_close");
             if (openLotsBySessionId.size === 0) {
               resetCustomerOrders();
             }
