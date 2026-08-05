@@ -23,7 +23,6 @@ import { createCommentFloodGuard } from "./comment-flood-guard.js";
 import {
   sendJson,
   getVkPublicationCommentId,
-  getVkApiErrorCode,
   formatBroadcastDate,
   normalizeReservationCode,
   createBoundedIdSet,
@@ -33,7 +32,6 @@ import {
   getReservationReplyMessage,
   getCancelReplyMessage,
   getCommittedReservationCount,
-  isFatalCommentReadError,
   RESERVATION_HISTORY_LIMIT,
 } from "./ws-helpers.js";
 import { createVoicePipeline } from "./domain/voice-pipeline.js";
