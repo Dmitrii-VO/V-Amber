@@ -3435,32 +3435,19 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       const confirmedLot = buildConfirmedLot(detection, selectedCode, source, productCard);
-      let publicationCommentId = null;
 
-      try {
-        const publication = await vk.publishLotCard(confirmedLot, productCard);
-        publicationCommentId = getVkPublicationCommentId(publication);
-      } catch (error) {
-        handleVkPublishError(confirmedLot, error);
-        logger.error("vk", "lot_card_publish_failed", {
-          connectionId,
-          code: selectedCode,
-          lotSessionId: confirmedLot.lotSessionId,
-          error,
-        });
-      }
-
-      if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
-        return;
-      }
-
-      if (publicationCommentId !== null) {
-        const reservationState = ensureReservationState(confirmedLot);
-        confirmedLot.vkPublication = {
-          commentId: publicationCommentId,
-        };
-        reservationState.lastCommentId = Math.max(reservationState.lastCommentId, publicationCommentId);
-      }
+      // Публикацию карточки в ВК запускаем сразу, но лот открываем НЕ дожидаясь
+      // её. Раньше активация шла строго после ответа ВК, и оператор видел лот с
+      // задержкой: по логам шести эфиров медиана «финал с кодом → lot_opened»
+      // 1.8 с, p90 7.7 с — при том что вызовы МойСклада в этом окне занимают
+      // 150–500 мс, остальное съедало ожидание ВК.
+      //
+      // Брони от этого не разъезжаются: поллер отбирает новые комментарии по
+      // собственному курсору commentPollingLastCommentId, а комментарий
+      // привязывается к лоту по КОДУ (findCommentTarget). Лотовый
+      // lastCommentId, который заполнялся из publicationCommentId, ни на что
+      // не влиял — он нигде не читается.
+      const publication = vk.publishLotCard(confirmedLot, productCard);
 
       activateConfirmedLot(detection, confirmedLot, source);
       sessionLog.logLotOpened({
@@ -3477,6 +3464,32 @@ export function attachWsServer(httpServer, config, services = {}) {
       startChatPolling();
 
       voicePipeline.resetTriggerWindow("confirmed_detection_completed");
+
+      // Хвост публикации. Ждём его здесь, в конце: цепочка финалов остаётся
+      // сериализованной (следующая фраза по-прежнему обрабатывается после этой),
+      // но оператор увидел лот ещё до ответа ВК.
+      await publication.then((result) => {
+        const publicationCommentId = getVkPublicationCommentId(result);
+        // Лот мог закрыться, пока карточка публиковалась.
+        if (publicationCommentId === null || !openLotsBySessionId.has(confirmedLot.lotSessionId)) {
+          return;
+        }
+        const reservationState = ensureReservationState(confirmedLot);
+        confirmedLot.vkPublication = { commentId: publicationCommentId };
+        reservationState.lastCommentId = Math.max(reservationState.lastCommentId, publicationCommentId);
+        emitState();
+      }).catch((error) => {
+        // Отравление лота теперь происходит ПОСЛЕ startCommentPolling, поэтому
+        // поднятый generation гасит уже запущенный цикл. Раньше было наоборот:
+        // отравляли до старта, и опрос всё равно поднимался заново.
+        handleVkPublishError(confirmedLot, error);
+        logger.error("vk", "lot_card_publish_failed", {
+          connectionId,
+          code: selectedCode,
+          lotSessionId: confirmedLot.lotSessionId,
+          error,
+        });
+      });
     }
 
     logger.info("ws", "client_connected", { connectionId });
