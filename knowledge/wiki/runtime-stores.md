@@ -133,6 +133,36 @@ operation. If the journal cannot persist `begin`, the external write does not
 start. Append writes also stop when the pre-write position baseline cannot be
 read, because an unknown result would otherwise be impossible to reconcile.
 
+## Product code cache
+
+`server/product-code-cache.js` holds every MoySklad product keyed by code and
+persists the last successful load to `logs/product-code-cache.json`
+(tmp + rename). `loadFromDisk()` runs at startup before the first MoySklad
+call.
+
+This exists for one scenario: **MoySklad is down when the эфир starts.** The
+catalog gate in `server/ws-server.js` refuses to open a lot whose code is not
+in the cache — but only when the cache is non-empty, so an empty cache lets
+*any* recognised code through. That happened on 2026-06-27: 78 of 78 MoySklad
+calls failed, and 5 of the 49 lots opened that session got seven-digit codes
+where the product's size had been glued onto the article («артикул 03413
+пятьдесят сантиметров» → `0341350`). None of them exist — the longest real
+code is 6 digits. Across the other 24 sessions in the same bundles, all 476
+opened lots resolved to the catalog.
+
+An empty bulk response never replaces a loaded catalog: that is almost always
+a MoySklad-side failure, and trading a full catalog for an empty one reopens
+exactly this hole.
+
+`getCodeLengthBounds()` derives the article length window from the catalog
+itself, and `ws-server` passes it into `detectArticle` in place of
+`VOICE_ARTICLE_MIN_LENGTH` / `VOICE_ARTICLE_MAX_LENGTH` (1..10 by default,
+against a real catalog of 2407 products with codes of 2, 3, 5 and 6 digits).
+The lower bound is measured **after stripping leading zeros**, because the
+operator says «пятьсот восемьдесят восемь» for `00588` and the candidate
+reaches detection three digits long. The env values remain the fallback for
+when no catalog exists in memory or on disk.
+
 ## Reservation digest log
 
 `server/reservation-digest-log.js` writes sent digest records and supports
