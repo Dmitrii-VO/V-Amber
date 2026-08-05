@@ -23,7 +23,6 @@ import { createCommentFloodGuard } from "./comment-flood-guard.js";
 import {
   sendJson,
   getVkPublicationCommentId,
-  getVkApiErrorCode,
   formatBroadcastDate,
   normalizeReservationCode,
   createBoundedIdSet,
@@ -33,10 +32,10 @@ import {
   getReservationReplyMessage,
   getCancelReplyMessage,
   getCommittedReservationCount,
-  isFatalCommentReadError,
   RESERVATION_HISTORY_LIMIT,
 } from "./ws-helpers.js";
 import { createVoicePipeline } from "./domain/voice-pipeline.js";
+import { createCommentPollers } from "./domain/comment-pollers.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -264,15 +263,19 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       return created;
     }
-    let commentPollingGeneration = 0;
-    let commentPollingActive = false;
-    let commentPollingLastCommentId = 0;
-    const commentPollingSeenIds = createBoundedIdSet();
-    // Отдельный жизненный цикл поллера чата /efir/: VK-poison (ошибка 801 и
-    // т.п.) не должен убивать приём броней из собственного чата.
-    let chatPollingGeneration = 0;
-    let chatPollingActive = false;
-    let chatFeedCursor = null;
+    // Транспорт покупательских комментариев (VK + чат /efir/). Курсоры,
+    // generation и backoff живут внутри модуля; наружу он отдаёт комментарии
+    // в ingestViewerComment и принимает два управляющих вызова — stopVk() при
+    // отравлении лота и reset() при перезапуске эфира.
+    const commentPollers = createCommentPollers({
+      vk,
+      chatClient,
+      config,
+      connectionId,
+      onComment: (comment) => ingestViewerComment(comment),
+      getOpenLotCount: () => openLotsBySessionId.size,
+      notify: (payload) => sendJson(websocket, payload),
+    });
     let customerOrdersByViewerId = new Map();
     let customerOrderSessionVersion = 1;
     // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
@@ -324,10 +327,9 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
       poisonedLotSessionIds.add(lotSessionId);
-      // Останавливаем активный poll-цикл этого лота — следующая итерация
-      // увидит увеличенный generation и выйдет.
-      commentPollingGeneration += 1;
-      commentPollingActive = false;
+      // Останавливаем активный VK-цикл — следующая итерация увидит выросший
+      // generation и выйдет. Чат /efir/ при этом продолжает принимать брони.
+      commentPollers.stopVk();
       logger.warn("vk", "lot_poisoned", {
         connectionId,
         lotSessionId,
@@ -403,13 +405,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function resetDetectionState() {
       stopViewerInstructions();
-      commentPollingGeneration += 1;
-      commentPollingActive = false;
-      commentPollingLastCommentId = 0;
-      commentPollingSeenIds.clear();
-      chatPollingGeneration += 1;
-      chatPollingActive = false;
-      chatFeedCursor = null;
+      commentPollers.reset();
       activeLot = null;
       openLotsBySessionId.clear();
       allLotsClosePromise = null;
@@ -2416,279 +2412,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
     }
 
-    // Поллер чата /efir/ — второй источник броней. Жизненный цикл зеркалит
-    // VK-поллер (старт при открытии лота, стоп по grace-окну без открытых
-    // лотов), но generation у него свой: VK-poison не должен глушить чат.
-    // Курсорчик chatFeedCursor переживает рестарты поллера внутри соединения;
-    // null → первая итерация только инициализирует его последним seq сервиса
-    // (историю до эфира не переигрываем — как VK-поллер по последнему id).
-    function startChatPolling() {
-      if (!chatClient?.enabled || chatPollingActive) {
-        return;
-      }
-
-      const generation = ++chatPollingGeneration;
-      chatPollingActive = true;
-      const pollMs = Number(config.chat?.pollMs) > 0 ? Number(config.chat.pollMs) : 3000;
-      const NO_OPEN_LOT_GRACE_MS = 30000;
-
-      void (async function chatPollLoop() {
-        let consecutiveFailures = 0;
-        let noOpenLotsSince = null;
-
-        while (generation === chatPollingGeneration) {
-          if (openLotsBySessionId.size > 0) {
-            noOpenLotsSince = null;
-          } else {
-            noOpenLotsSince = noOpenLotsSince || Date.now();
-            if (Date.now() - noOpenLotsSince > NO_OPEN_LOT_GRACE_MS) {
-              break;
-            }
-          }
-
-          try {
-            const feed = await chatClient.fetchFeed(chatFeedCursor);
-            if (generation !== chatPollingGeneration) {
-              break;
-            }
-
-            if (chatFeedCursor === null) {
-              chatFeedCursor = feed.latestSeq;
-            } else {
-              for (const message of feed.messages) {
-                if (!(Number(message.seq) > chatFeedCursor)) {
-                  continue;
-                }
-                chatFeedCursor = Number(message.seq);
-                ingestViewerComment({
-                  id: message.commentId,
-                  viewerId: message.viewerId,
-                  viewerName: message.name || "",
-                  text: message.text,
-                  createdAt: new Date(message.ts).toISOString(),
-                  source: "chat",
-                  phone: message.phone || null,
-                });
-              }
-            }
-
-            if (consecutiveFailures > 0) {
-              logger.info("chat", "chat_poll_recovered", {
-                connectionId,
-                openLotCount: openLotsBySessionId.size,
-                afterFailures: consecutiveFailures,
-              });
-              sendJson(websocket, { type: "info", message: "Чат эфира снова отвечает" });
-            }
-            consecutiveFailures = 0;
-          } catch (error) {
-            consecutiveFailures += 1;
-            logger.warn("chat", "chat_poll_failed", {
-              connectionId,
-              openLotCount: openLotsBySessionId.size,
-              consecutiveFailures,
-              error,
-            });
-            // Однократное предупреждение оператору на серию сбоев; цикл не
-            // останавливаем — чат-сервис может вернуться в любой момент.
-            if (consecutiveFailures === 5) {
-              sendJson(websocket, {
-                type: "warning",
-                message: "Чат эфира не отвечает — брони со страницы зрителей временно не приходят",
-              });
-            }
-          }
-
-          const delayMs = consecutiveFailures > 0
-            ? Math.min(30000, 3000 * 2 ** Math.min(consecutiveFailures - 1, 3))
-            : pollMs;
-          await new Promise((resolve) => {
-            setTimeout(resolve, delayMs);
-          });
-        }
-
-        chatPollingActive = false;
-      })();
-    }
-
-    function startCommentPolling() {
-      if (commentPollingActive) {
-        return;
-      }
-
-      const generation = ++commentPollingGeneration;
-      commentPollingActive = true;
-
-      // Адаптивная частота опроса: пока в чате идут новые комментарии — опрос
-      // частый (ACTIVE_POLL_MS), в тишине плавно растягивается до IDLE_*. Так
-      // в активной фазе брони ловятся быстрее, а в простое мы не жжём квоту VK
-      // и не толкаемся с публикациями. Раньше интервал был фиксированный 2с.
-      const ACTIVE_POLL_MS = 1500;
-      const IDLE_POLL_STEP_MS = 1500;
-      const IDLE_POLL_MAX_MS = 8000;
-      const NO_OPEN_LOT_GRACE_MS = 30000;
-      // Пока в high-полосе VK-очереди ждут публикации (закрытия лотов,
-      // ответы о брони) — опрос комментариев не чаще этого интервала.
-      const PUBLISH_PRESSURE_POLL_MS = 4000;
-
-      void (async function pollLoop() {
-        let initialized = false;
-        let consecutiveFailures = 0;
-        let quietCycles = 0;
-        let noOpenLotsSince = null;
-        // VK user id самого бота: его комментарии (карточки, обновления цены,
-        // подтверждения броней) нельзя переисследовать как чужие брони. 0 =
-        // не удалось определить → фильтр выключен (поведение как раньше).
-        const selfUserId = (await vk.getSelfUserId?.()) || 0;
-
-        while (generation === commentPollingGeneration) {
-          if (openLotsBySessionId.size > 0) {
-            noOpenLotsSince = null;
-          } else {
-            noOpenLotsSince = noOpenLotsSince || Date.now();
-            if (Date.now() - noOpenLotsSince > NO_OPEN_LOT_GRACE_MS) {
-              break;
-            }
-          }
-
-          let activityThisCycle = false;
-          try {
-            const comments = await vk.getComments(100);
-            if (generation !== commentPollingGeneration) {
-              break;
-            }
-
-            const profileMap = new Map((comments.profiles || []).map((profile) => [profile.id, profile]));
-            const sortedItems = (comments.items || []).sort((left, right) => left.id - right.id);
-
-            if (!initialized) {
-              initialized = true;
-              consecutiveFailures = 0;
-
-              if (commentPollingLastCommentId <= 0) {
-                commentPollingLastCommentId = sortedItems.at(-1)?.id || commentPollingLastCommentId;
-
-                await new Promise((resolve) => {
-                  setTimeout(resolve, 2000);
-                });
-                continue;
-              }
-            }
-
-            const newItems = (comments.items || [])
-              .filter((item) => item.id > commentPollingLastCommentId && !commentPollingSeenIds.has(item.id))
-              .sort((left, right) => left.id - right.id);
-
-            // Был ли в этом цикле новый трафик — задаёт частоту следующего опроса.
-            activityThisCycle = newItems.length > 0;
-
-            for (const comment of newItems) {
-              commentPollingLastCommentId = Math.max(commentPollingLastCommentId, comment.id);
-              addBoundedId(commentPollingSeenIds, comment.id);
-
-              // Игнорируем собственные комментарии бота: иначе ответ «бронь
-              // подтверждена (код …)» переисследуется как новая бронь от имени
-              // бота → ложный out_of_stock, мусор в wishlist, а при остатке ≥2
-              // — фантомный заказ в МойСкладе на аккаунт бота.
-              if (selfUserId && comment.from_id === selfUserId) {
-                continue;
-              }
-
-              const profile = profileMap.get(comment.from_id);
-              ingestViewerComment({
-                id: comment.id,
-                viewerId: comment.from_id,
-                viewerName: profile
-                  ? [profile.first_name, profile.last_name].filter(Boolean).join(" ")
-                  : "",
-                text: comment.text,
-                createdAt: new Date(comment.date * 1000).toISOString(),
-                source: "vk",
-              });
-            }
-            if (consecutiveFailures > 0) {
-              logger.info("vk", "comment_poll_recovered", {
-                connectionId,
-                openLotCount: openLotsBySessionId.size,
-                afterFailures: consecutiveFailures,
-              });
-              sendJson(websocket, { type: "info", message: "VK комменты снова приходят" });
-            }
-            consecutiveFailures = 0;
-          } catch (error) {
-            consecutiveFailures += 1;
-            const errorCode = getVkApiErrorCode(error);
-            logger.warn("vk", "comment_poll_failed", {
-              connectionId,
-              openLotCount: openLotsBySessionId.size,
-              consecutiveFailures,
-              errorCode,
-              error,
-            });
-
-            if (isFatalCommentReadError(error)) {
-              logger.warn("vk", "comment_poll_stopped", {
-                connectionId,
-                openLotCount: openLotsBySessionId.size,
-                reason: "fatal_api_error",
-                errorCode,
-              });
-              sendJson(websocket, {
-                type: "error",
-                message: `VK comments недоступны для этого видео: ${error?.message || "unknown"}`,
-              });
-              break;
-            }
-
-            // Notify operator ONCE per outage instead of breaking the loop.
-            if (consecutiveFailures === 5) {
-              const hint = errorCode === 5
-                ? "истёк VK-токен — обновите VK_TOKEN в .env и перезапустите"
-                : "проверьте сеть/VK API";
-              sendJson(websocket, {
-                type: "warning",
-                message: `VK комменты не приходят (${consecutiveFailures} ошибок подряд): ${hint}`,
-              });
-            }
-          }
-
-          let delayMs;
-          if (consecutiveFailures > 0) {
-            // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
-            delayMs = Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
-          } else if (activityThisCycle) {
-            // Чат активен — опрашиваем часто.
-            quietCycles = 0;
-            delayMs = ACTIVE_POLL_MS;
-          } else {
-            // Тишина — плавно растягиваем интервал до потолка.
-            quietCycles += 1;
-            delayMs = Math.min(IDLE_POLL_MAX_MS, ACTIVE_POLL_MS + quietCycles * IDLE_POLL_STEP_MS);
-          }
-
-          // Опрос — low-priority: под rate-limit'ом (адаптивный backoff после
-          // VK 6) или при очереди публикаций отступаем, чтобы квота уходила
-          // ответам покупателям, а не чтению (эфир 2026-07-25: 52 из 63
-          // rate-limit'ов пришлись на video.getComments, и в этот момент
-          // подтверждения броней уходили со 2–3 попытки).
-          const pressure = vk.getQueuePressure?.();
-          if (pressure && consecutiveFailures === 0) {
-            if (pressure.backoffMultiplier > 1) {
-              delayMs = Math.max(delayMs, ACTIVE_POLL_MS * pressure.backoffMultiplier);
-            }
-            if (pressure.highPending > 0) {
-              delayMs = Math.max(delayMs, PUBLISH_PRESSURE_POLL_MS);
-            }
-          }
-          await new Promise((resolve) => {
-            setTimeout(resolve, delayMs);
-          });
-        }
-
-        commentPollingActive = false;
-      })();
-    }
-
     // Async: caller ждёт durable wishlist и финальный ответ покупателю ДО
     // clearActiveState и потенциального завершения процесса.
     async function flushOrphanWaitlist(lot, reason) {
@@ -3443,7 +3166,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // 150–500 мс, остальное съедало ожидание ВК.
       //
       // Брони от этого не разъезжаются: поллер отбирает новые комментарии по
-      // собственному курсору commentPollingLastCommentId, а комментарий
+      // собственному курсору (comment-pollers.js), а комментарий
       // привязывается к лоту по КОДУ (findCommentTarget). Лотовый
       // lastCommentId, который заполнялся из publicationCommentId, ни на что
       // не влиял — он нигде не читается.
@@ -3460,8 +3183,8 @@ export function attachWsServer(httpServer, config, services = {}) {
         transcript: confirmedLot.transcript,
         source: confirmedLot.source,
       });
-      startCommentPolling();
-      startChatPolling();
+      commentPollers.startVk();
+      commentPollers.startChat();
 
       voicePipeline.resetTriggerWindow("confirmed_detection_completed");
 
@@ -3479,7 +3202,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         reservationState.lastCommentId = Math.max(reservationState.lastCommentId, publicationCommentId);
         emitState();
       }).catch((error) => {
-        // Отравление лота теперь происходит ПОСЛЕ startCommentPolling, поэтому
+        // Отравление лота теперь происходит ПОСЛЕ старта поллеров, поэтому
         // поднятый generation гасит уже запущенный цикл. Раньше было наоборот:
         // отравляли до старта, и опрос всё равно поднимался заново.
         handleVkPublishError(confirmedLot, error);
