@@ -104,6 +104,11 @@ export function createReservationReconciler({ moysklad, journal } = {}) {
   //      если фильтр по syncId недоступен.
   // Пустой ответ первого слоя сам по себе ничего не доказывает, поэтому
   // «не применилось» произносит только второй.
+  //
+  // Второй слой — подстраховка, а не необходимость: МойСклад трактует syncId
+  // как ключ upsert (проверено 2026-08-05, см. buildPurchaseOrderSyncId),
+  // поэтому даже ошибочный повтор с тем же syncId обновит существующий заказ,
+  // а не создаст дубль.
   async function resolvePurchaseOrder(args, entry) {
     const agentId = args?.agentId || entry?.meta?.agentId || null;
     const positions = Array.isArray(args?.positions) ? args.positions : [];

@@ -105,11 +105,16 @@ A write is retried only when the outcome is known to be `not_applied`. For
      applied; more than one match, or more than five same-description
      candidates, is `inconclusive`. Only this layer may say `not_applied`.
 
-  Whether MoySklad also treats `syncId` as an upsert key — making a duplicate
-  impossible server-side — is **unverified**: `api.moysklad.ru` is unreachable
-  from the Windows dev machine (see [[project-conventions]]). Nothing depends
-  on it; run `node scripts/probe-moysklad-syncid.mjs` where MoySklad is
-  reachable to settle it. If confirmed, it is a bonus, not a redesign.
+  MoySklad also treats `syncId` as an **upsert key** — verified against the
+  live account on 2026-08-05 with `scripts/probe-moysklad-syncid.mjs`: a second
+  POST carrying the same `syncId` returned the *first* order's id and name, and
+  `filter=syncId=` then found exactly one order. So a duplicate purchase order
+  is impossible server-side as long as the write carries `syncId`, and the
+  fingerprint layer is belt-and-braces rather than load-bearing.
+
+  Two API requirements bit during that check and are easy to hit again:
+  `Accept-Encoding: gzip` is mandatory (nginx answers `415` without it), and
+  the request body must be sent verbatim (a reformatted body gets error 2001).
 
 Any other difference returns `inconclusive`, and so does a failed
 reconciliation or a missing counterparty. `inconclusive` never retries and
