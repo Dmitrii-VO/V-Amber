@@ -3912,12 +3912,21 @@ async function sendWishlistPurchaseOrder(groups) {
 
     const created = data.purchaseOrders || [];
     const failed = data.failedGroups || [];
+    const unknown = data.unknownGroups || [];
     const blocked = data.blockedGroupHashes || [];
     let msg = `Создано: ${created.length}.`;
     if (failed.length) msg += ` Не удалось: ${failed.length}.`;
     if (blocked.length) msg += ` Блокировано safe mode: ${blocked.length}.`;
     if (created.length > 0) {
       msg += " " + created.map((po) => `🔗 ${po.name || po.id}`).join(", ");
+    }
+    // Исход неизвестен: связь с МойСкладом оборвалась, и сверка не смогла
+    // ответить, доехал заказ или нет. Молча показать это как ошибку нельзя —
+    // оператор создаст заказ руками поверх уже существующего.
+    if (unknown.length) {
+      msg += ` ⚠️ Не удалось выяснить судьбу групп: ${unknown.length}.`
+        + " Заказ мог создаться в МойСкладе — проверьте закупки у этих поставщиков"
+        + " перед повторной отправкой. Повторная отправка из V-Amber дубль не создаст.";
     }
     setWishlistStatus(msg, data.status === "complete" ? "ok" : "error");
 

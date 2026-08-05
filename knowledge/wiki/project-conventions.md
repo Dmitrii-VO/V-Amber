@@ -15,6 +15,16 @@ and follow the current JavaScript style unless the user asks for a refactor.
 - Before changing article, discount, or price parsing, check rule-based parsing
   and MoySklad product-code cache behavior.
 
+## Dev machine limits
+
+`api.moysklad.ru`, `online.moysklad.ru`, and `dev.moysklad.ru` are **unreachable
+from the Windows dev machine** — TCP connect times out, while the rest of the
+internet works. So MoySklad API behavior cannot be verified from the repo
+machine, no matter how the request is made; assumptions about the API have to
+be settled on the operator's Mac or left explicitly marked as unverified. This
+is why the `syncId` upsert question in [[runtime-stores]] stayed open across
+two separate attempts.
+
 ## Documentation conventions
 
 `Amberry_Voice_Technical_Specification.md`, `README.md`, `AGENTS.md`,

@@ -1,4 +1,5 @@
 import { logger } from "./logger.js";
+import { buildPurchaseOrderSyncId } from "./moysklad-helpers.js";
 
 // Сверка оборвавшейся записи в МойСклад.
 //
@@ -9,8 +10,9 @@ import { logger } from "./logger.js";
 // Ничего специально в МойСклад для этого не пишется. Create-путь опознаётся по
 // маркеру commentId, который createCustomerOrderReservation и так кладёт в
 // description. Append-путь — сравнением числа позиций до записи и после
-// неизвестного исхода. Закупочный заказ — по отпечатку группы (поставщик,
-// склад, описание, состав позиций), из которого и так считается groupHash.
+// неизвестного исхода. Закупочный заказ — по syncId (внешний код группы,
+// который createPurchaseOrder кладёт в сам заказ), с запасным слоем по
+// отпечатку группы (поставщик, склад, описание, состав позиций).
 //
 // Ответ "inconclusive" — законный и намеренный: лучше оставить бронь оператору
 // с громкой записью в логе, чем угадать и создать дубль или потерять бронь.
@@ -91,14 +93,39 @@ export function createReservationReconciler({ moysklad, journal } = {}) {
   }
 
   // Закупочный заказ. args приходят от того же обработчика отправки, что и в
-  // первой попытке (группа детерминирована groupHash), поэтому отпечаток можно
-  // собрать прямо из них; meta — фоллбэк для полей, которые в args могут
-  // отсутствовать.
+  // первой попытке (группа детерминирована groupHash), поэтому и syncId, и
+  // отпечаток можно собрать прямо из них; meta — фоллбэк для полей, которые в
+  // args могут отсутствовать.
+  //
+  // Два слоя, именно в этом порядке:
+  //   1. syncId — точный внешний код группы. Нашли — вопрос закрыт.
+  //   2. отпечаток — для заказов, отправленных ДО появления syncId (например,
+  //      попытка осталась в журнале с прошлой версии приложения), и на случай,
+  //      если фильтр по syncId недоступен.
+  // Пустой ответ первого слоя сам по себе ничего не доказывает, поэтому
+  // «не применилось» произносит только второй.
   async function resolvePurchaseOrder(args, entry) {
     const agentId = args?.agentId || entry?.meta?.agentId || null;
     const positions = Array.isArray(args?.positions) ? args.positions : [];
     if (!agentId || positions.length === 0) {
       return { status: "inconclusive", reason: "purchase_order_args_missing" };
+    }
+
+    const syncId = buildPurchaseOrderSyncId({
+      draftId: args?.draftId || entry?.meta?.draftId || null,
+      groupHash: args?.groupHash || entry?.meta?.groupHash || null,
+    });
+    if (syncId && typeof moysklad.findPurchaseOrdersBySyncId === "function") {
+      const bySyncId = await moysklad.findPurchaseOrdersBySyncId({ syncId, source: "write_reconcile" });
+      const rows = Array.isArray(bySyncId?.rows) ? bySyncId.rows : [];
+      if (rows.length === 1) {
+        return { status: "applied", result: { id: rows[0].id, name: rows[0].name, agentId, syncId } };
+      }
+      // Больше одного заказа с одним внешним кодом быть не должно. Если это
+      // случилось, догадываться, какой из них наш, мы не будем.
+      if (rows.length > 1) {
+        return { status: "inconclusive", reason: "sync_id_ambiguous" };
+      }
     }
 
     const found = await moysklad.findPurchaseOrdersByFingerprint({
