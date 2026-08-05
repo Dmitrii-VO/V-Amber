@@ -231,26 +231,27 @@ for (const e of latePriceChanges.slice(0, 10)) p(`       ⚠ ${e.ts} ${e.kind} l
 if (latePriceChanges.length) flag(`правок цены/скидки после создания позиции: ${latePriceChanges.length} — в МойСклад они не попали`);
 
 // ─── §5/§6 Waitlist & wishlist ─────────────────────────────────────────────
-const wlPending = by(events, "reservation_waitlist_pending").length;
 const waitlistPendingEvents = by(events, "reservation_waitlist_pending");
 const waitlistPromotedEvents = by(events, "waitlist_promoted");
-const wlPromoted = waitlistPromotedEvents.length;
 const waitlistMigrations = by(events, "waitlist_migrated_to_wishlist");
-const wlMigrated = waitlistMigrations.reduce((sum, event) => sum + (Number(event.count) || 0), 0);
 const waitlistKey = (event, parent = event) => [
   parent.lotSessionId || `code:${parent.lotCode || event.lotCode || ""}`,
   event.commentId ?? `viewer:${event.viewerId ?? ""}`,
 ].join("|");
 const pendingKeys = new Set(waitlistPendingEvents.map((event) => waitlistKey(event)));
-const resolvedKeys = new Set(waitlistPromotedEvents.map((event) => waitlistKey(event)));
-let migrationsWithEntries = 0;
+const promotedKeys = new Set(waitlistPromotedEvents.map((event) => waitlistKey(event)));
+const migrationKeys = new Set();
+let legacyMigrationCount = 0;
 for (const migration of waitlistMigrations) {
   const entries = Array.isArray(migration.entries) ? migration.entries : [];
-  if (entries.length > 0) migrationsWithEntries += Number(migration.count) || entries.length;
-  for (const entry of entries) resolvedKeys.add(waitlistKey(entry, migration));
+  if (entries.length === 0) legacyMigrationCount += Number(migration.count) || 0;
+  for (const entry of entries) migrationKeys.add(waitlistKey(entry, migration));
 }
+const wlPending = pendingKeys.size;
+const wlPromoted = promotedKeys.size;
+const wlMigrated = migrationKeys.size + legacyMigrationCount;
+const resolvedKeys = new Set([...promotedKeys, ...migrationKeys]);
 const identityUnresolved = [...pendingKeys].filter((key) => !resolvedKeys.has(key)).length;
-const legacyMigrationCount = Math.max(0, wlMigrated - migrationsWithEntries);
 const wlUnresolved = Math.max(0, identityUnresolved - legacyMigrationCount);
 const orphanWaitlistEvents = by(events, "orphan_waitlist");
 const orphanWaitlistEntries = new Map();
@@ -268,6 +269,7 @@ const wishNoSupplier = wishAdded.filter((e) => !e.supplierName);
 
 p(`\n[5] Waitlist`);
 p(`    pending=${wlPending}  promoted=${wlPromoted}  migrated_at_close=${wlMigrated}  unresolved=${wlUnresolved}   ${wlUnresolved === 0 ? "✓" : "⚠"}`);
+if (legacyMigrationCount > 0) p(`    legacy migrations without buyer identity: ${legacyMigrationCount}`);
 if (wlUnresolved > 0) flag(`waitlist: ${wlUnresolved} заявок без promotion или миграции`);
 p(`    orphan_waitlist: unique=${orphanWaitlist}, audit_events=${orphanWaitlistEvents.length}${orphanWaitlist ? " ✗ очередь без финала" : ""}`);
 if (orphanWaitlist) flag(`${orphanWaitlist} уникальных orphan waitlist-заявок`);
@@ -308,7 +310,7 @@ if (asJson) {
     cancels: { byComment: commentCancels.length, declined: commentCancelsDeclined.length, voice: voiceCancels.length, done: cancelled.length, noPosition: cancelNoPos.length, failed: cancelFailed.length, unmatched: unmatchedCancels },
     noOpenLot: { logged: noOpenLot.length, suppressed, attentionCreated: attention.length },
     pricing: { zero: zeroPrice.length, mismatched: mismatches.length, discountApplied: discApplied, discountSkipped: discSkipped.length, backfilled: backfillUpdated, backfillFailed, invalidDiscount: invalidDiscount.length, latePriceChanges: latePriceChanges.length },
-    waitlist: { pending: wlPending, promoted: wlPromoted, migrated: wlMigrated, unresolved: wlUnresolved, orphan: orphanWaitlist, orphanEvents: orphanWaitlistEvents.length },
+    waitlist: { pending: wlPending, promoted: wlPromoted, migrated: wlMigrated, legacyMigrated: legacyMigrationCount, unresolved: wlUnresolved, orphan: orphanWaitlist, orphanEvents: orphanWaitlistEvents.length },
     wishlist: { outOfStock: oos.length, added: wishAdded.length, fromOrderFailed: wishFromFailure.length },
     stock: { lotsUnknown: lotsUnknownStock.length, reservationsUnknown: stockUnknown.length },
     flags,

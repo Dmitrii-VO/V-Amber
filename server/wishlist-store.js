@@ -34,6 +34,7 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
   if (typeof onChange === "function") subscribers.add(onChange);
 
   let writeChain = Promise.resolve();
+  let mutationChain = Promise.resolve();
   let loaded = false;
 
   function notify() {
@@ -176,6 +177,12 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
     for (const record of records) notifyEvent(record);
   }
 
+  function serializeMutation(callback) {
+    const operation = mutationChain.then(callback);
+    mutationChain = operation.catch(() => {});
+    return operation;
+  }
+
   function buildProductMeta(productMetaInput) {
     const meta = productMetaInput || {};
     return {
@@ -260,6 +267,7 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
     },
 
     async addFromOutOfStock({ event, lot, productMeta, trigger = "out_of_stock" }) {
+      return serializeMutation(async () => {
       if (!event || !lot) return null;
       const productCode = lot.code || productMeta?.productCode || "";
       const viewerId = event.viewerId;
@@ -317,9 +325,11 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
       };
       await write([record]);
       return byId.get(record.id) || null;
+      });
     },
 
     async addFromWaitlistOnClose({ events, lot, reason, productMetaResolver }) {
+      return serializeMutation(async () => {
       if (!Array.isArray(events) || events.length === 0) return [];
       const records = [];
       const ts = new Date().toISOString();
@@ -374,6 +384,7 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
 
       await write(records);
       return records;
+      });
     },
 
     async addManual({ viewerName, viewerId, productCode, quantity, supplierId, supplierName, buyPrice, productId, productName, lotCode }) {

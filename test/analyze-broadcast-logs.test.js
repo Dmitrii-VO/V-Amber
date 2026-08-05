@@ -38,6 +38,7 @@ test("analyzer deduplicates orphan audit events and reports close migrations", a
       pending: 2,
       promoted: 0,
       migrated: 1,
+      legacyMigrated: 0,
       unresolved: 1,
       orphan: 1,
       orphanEvents: 2,

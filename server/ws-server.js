@@ -310,6 +310,8 @@ export function attachWsServer(httpServer, config, services = {}) {
     // покупателя. Тот же приём, что у appendReservationQuantity (appendInFlight).
     const attentionReservationsInFlight = new Set();
     let allLotsClosePromise = null;
+    const reservationWorkByLotSessionId = new Map();
+    const closingLotsBySessionId = new Map();
 
     function isLotPoisoned(lotSessionId) {
       return Boolean(lotSessionId) && poisonedLotSessionIds.has(lotSessionId);
@@ -410,6 +412,8 @@ export function attachWsServer(httpServer, config, services = {}) {
       activeLot = null;
       openLotsBySessionId.clear();
       allLotsClosePromise = null;
+      reservationWorkByLotSessionId.clear();
+      closingLotsBySessionId.clear();
       lastDetection = null;
       activeDetectionActionId = null;
       // Токены строк внимания привязаны к комментариям прошлого эфира: после
@@ -527,15 +531,18 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       allLotsClosePromise = (async () => {
         const lots = getOpenLots();
+        const alreadyClosing = [...closingLotsBySessionId.values()];
         // Detach first: promoted waitlist work may already be queued in a
         // microtask. It must observe a closed lot before any MoySklad write.
         openLotsBySessionId.clear();
         activeLot = null;
+        await Promise.allSettled(alreadyClosing);
         // Последовательно, чтобы при «video not found» на конце эфира можно
         // было записать ровно один warning и пропустить публикацию закрытия
         // оставшихся лотов вместо серии error publish failures в логе.
         let vkStreamUnavailable = false;
         for (const lot of lots) {
+          await settleReservationWorkAtClose(lot, reason);
           await flushOrphanWaitlist(lot, reason);
           logLotClosedOnce(lot, reason);
           if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
@@ -1604,7 +1611,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           commentId: nextWaitlistEvent.commentId,
           previousPrimaryStatus: event.status,
         });
-        void processReservationEvent(lot, nextWaitlistEvent).catch((error) => {
+        void runReservationProcessing(lot, nextWaitlistEvent).catch((error) => {
           logger.error("vk", "reservation_processing_unhandled", {
             connectionId,
             lotSessionId: lot.lotSessionId,
@@ -1630,6 +1637,63 @@ export function attachWsServer(httpServer, config, services = {}) {
     // («012005» vs «01205») НЕ матчатся — такие уходят оператору на разбор.
     // Неоднозначность (несколько открытых лотов после нормализации) ловит
     // правило «ровно один матч» в findCommentTarget.
+    function runReservationProcessing(lot, event) {
+      const key = lot?.lotSessionId;
+      const work = processReservationEvent(lot, event);
+      if (!key) return work;
+
+      let pending = reservationWorkByLotSessionId.get(key);
+      if (!pending) {
+        pending = new Set();
+        reservationWorkByLotSessionId.set(key, pending);
+      }
+      pending.add(work);
+      const cleanup = () => {
+        pending.delete(work);
+        if (pending.size === 0) reservationWorkByLotSessionId.delete(key);
+      };
+      work.then(cleanup, cleanup);
+      return work;
+    }
+
+    async function settleReservationWorkAtClose(lot, reason) {
+      const key = lot?.lotSessionId;
+      if (!key) return;
+
+      const timeoutMs = Math.max(1000, Number(config.reservationCloseSettleTimeoutMs) || 15_000);
+      const deadline = Date.now() + timeoutMs;
+      while (reservationWorkByLotSessionId.get(key)?.size > 0) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        const current = [...reservationWorkByLotSessionId.get(key)];
+        let timeoutId;
+        const settled = await Promise.race([
+          Promise.allSettled(current).then(() => true),
+          new Promise((resolve) => {
+            timeoutId = setTimeout(resolve, remainingMs, false);
+          }),
+        ]);
+        clearTimeout(timeoutId);
+        if (!settled) break;
+      }
+
+      if (reservationWorkByLotSessionId.get(key)?.size > 0) {
+        const uncertain = (lot.reservations?.events || []).filter((entry) => entry.status === "creating_order");
+        if (uncertain.length > 0) {
+          sessionLog.logOrphanWaitlist({
+            lotCode: lot.code,
+            lotSessionId: lot.lotSessionId,
+            reason: `${reason}_creating_order_timeout`,
+            entries: uncertain,
+          });
+          sendJson(websocket, {
+            type: "warning",
+            message: `${lot.code}: ${uncertain.length} заявок ещё записываются в МойСклад — проверьте их вручную`,
+          });
+        }
+      }
+    }
+
     function codesEquivalent(buyerCode, lotCode) {
       if (!buyerCode || !lotCode) return false;
       if (buyerCode === lotCode) return true;
@@ -2332,7 +2396,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         matchedReservation,
       }));
       emitState();
-      void processReservationEvent(currentLot, event).catch((error) => {
+      void runReservationProcessing(currentLot, event).catch((error) => {
         logger.error("vk", "reservation_processing_unhandled", {
           connectionId,
           lotSessionId: currentLot.lotSessionId,
@@ -2736,25 +2800,37 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
-      // Сначала зафиксировать «брошенные» брони в логе, ПОТОМ закрывать
-      // VK-публикацию.
-      await flushOrphanWaitlist(lot, reason);
-      logLotClosedOnce(lot, reason);
+      const existingClose = closingLotsBySessionId.get(lot.lotSessionId);
+      if (existingClose) return existingClose;
 
-      if (isLotPoisoned(lot.lotSessionId)) {
-        return;
-      }
+      const closePromise = (async () => {
+        await settleReservationWorkAtClose(lot, reason);
+        // Сначала зафиксировать «брошенные» брони в логе, ПОТОМ закрывать
+        // VK-публикацию.
+        await flushOrphanWaitlist(lot, reason);
+        logLotClosedOnce(lot, reason);
 
-      void vk.publishLotClosed(lot).catch((error) => {
-        handleVkPublishError(lot, error);
-        logger.error("vk", "lot_close_publish_failed", {
-          connectionId,
-          code: lot.code,
-          lotSessionId: lot.lotSessionId,
-          reason,
-          error,
+        if (isLotPoisoned(lot.lotSessionId)) {
+          return;
+        }
+
+        await vk.publishLotClosed(lot).catch((error) => {
+          handleVkPublishError(lot, error);
+          logger.error("vk", "lot_close_publish_failed", {
+            connectionId,
+            code: lot.code,
+            lotSessionId: lot.lotSessionId,
+            reason,
+            error,
+          });
         });
+      })().finally(() => {
+        if (closingLotsBySessionId.get(lot.lotSessionId) === closePromise) {
+          closingLotsBySessionId.delete(lot.lotSessionId);
+        }
       });
+      closingLotsBySessionId.set(lot.lotSessionId, closePromise);
+      return closePromise;
     }
 
     // Отмена одной подтверждённой брони: адресный DELETE позиции в МойСкладе +
@@ -4329,7 +4405,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               // Дальше — обычный денежный путь: стоковый гейт, очередь,
               // committedReservationCount, запись в МойСклад, строка с кнопкой
               // «× отменить» в дашборде и публичный ответ покупателю.
-              await processReservationEvent(openLot, lotEvent);
+              await runReservationProcessing(openLot, lotEvent);
 
               const settled = {
                 reserved: `${pending.code} забронирован для ${pending.viewerName || `id${pending.viewerId}`} — строка в списке лота`,

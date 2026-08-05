@@ -69,3 +69,32 @@ test("repeated wishlist demand adds requested quantity", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("concurrent wishlist additions deduplicate atomically", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "v-amber-wishlist-concurrent-"));
+  const filePath = join(dir, "events.jsonl");
+  const store = createWishlistStore({ filePath });
+
+  try {
+    const lot = { code: "03820", lotSessionId: "lot-concurrent", product: {} };
+    await Promise.all([
+      store.addFromOutOfStock({
+        event: { viewerId: 77, viewerName: "Оля", commentId: 11, quantity: 2 },
+        lot,
+        productMeta: {},
+      }),
+      store.addFromOutOfStock({
+        event: { viewerId: 77, viewerName: "Оля", commentId: 12, quantity: 3 },
+        lot,
+        productMeta: {},
+      }),
+    ]);
+
+    assert.equal(store.getActiveCount(), 1);
+    assert.equal(store.listActive()[0].quantity, 5);
+    const records = (await readFile(filePath, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(records.map((record) => record.kind), ["added", "seen_again"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
