@@ -48,6 +48,13 @@ session is running. Important broadcast events include:
 
 - `session_started` and `session_ended`;
 - `transcript_final`;
+- `transcript_partial` — the interim SpeechKit hypotheses that precede a final,
+  with `seq` counting them within one utterance (reset on the final). Repeats of
+  an unchanged text are dropped before logging, since SpeechKit re-sends a
+  partial even when nothing changed. Until 2026-08-05 partials only ever reached
+  the operator's screen, so any question about what STT saw *before* the final —
+  including "should a lot open on an interim result?" — was unanswerable even in
+  hindsight: six эфир bundles contained 19 393 events and not one partial;
 - `lot_opened`, `lot_closed`, and `lot_price_changed`;
 - `manual_code_submitted`;
 - `vk_comment`;

@@ -3577,6 +3577,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           const ERROR_RECONNECT_MAX = ERROR_RECONNECT_DELAYS_MS.length;
           let errorReconnectAttempts = 0;
 
+          // Дедуп и нумерация промежуточных распознаваний (см. onPartial).
+          let lastPartialText = null;
+          let partialSeq = 0;
+
           // Очередь обработки финальных транскриптов этого эфира: детекция,
           // цена и скидка применяются строго в порядке произнесения (см.
           // комментарий у enqueue в onFinal). Ошибки гасятся в .catch каждого
@@ -3645,6 +3649,14 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               errorReconnectAttempts = 0;
+              // Партиалы теперь попадают в JSONL. SpeechKit шлёт их и когда
+              // текст не изменился, поэтому повтор того же текста отбрасываем:
+              // без этого лента раздувается, ничего не добавляя.
+              if (text !== lastPartialText) {
+                lastPartialText = text;
+                partialSeq += 1;
+                sessionLog.logTranscriptPartial({ text, latencyMs, seq: partialSeq });
+              }
               sendJson(websocket, { type: "partial", text, latencyMs });
             },
             onFinal: ({ text, latencyMs, confidence = null }) => {
@@ -3653,6 +3665,9 @@ export function attachWsServer(httpServer, config, services = {}) {
               }
 
               errorReconnectAttempts = 0;
+              // Реплика закончилась — нумерация партиалов начинается заново.
+              lastPartialText = null;
+              partialSeq = 0;
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs, confidence });
               sessionLog.logTranscriptFinal({ text, latencyMs, confidence });
               sendJson(websocket, { type: "final", text, latencyMs });

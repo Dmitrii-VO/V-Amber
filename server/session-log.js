@@ -258,6 +258,18 @@ export function createSessionLog() {
       jsonlEvent("transcript_final", { text, latencyMs, confidence: confidence ?? null });
     },
 
+    // Промежуточное распознавание. До этого партиалы жили только на экране
+    // оператора и никуда не сохранялись, поэтому любую гипотезу вида «а если
+    // открывать лот по партиалу» невозможно было проверить даже задним числом:
+    // в бандлах логов их просто нет.
+    //
+    // seq — номер партиала внутри реплики (сбрасывается на финале), так что по
+    // логу видно, как гипотеза уточнялась. Повторы того же текста отбрасывает
+    // вызывающий: SpeechKit шлёт партиал и когда текст не изменился.
+    logTranscriptPartial({ text, latencyMs, seq } = {}) {
+      jsonlEvent("transcript_partial", { text, latencyMs, seq: seq ?? null });
+    },
+
     logVkComment({ commentId, viewerId, viewerName, text, createdAt, lotCode } = {}) {
       jsonlEvent("vk_comment", { commentId, viewerId, viewerName, text, createdAt, lotCode });
     },
