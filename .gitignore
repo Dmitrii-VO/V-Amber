@@ -1,15 +1,16 @@
 .env
 node_modules/
 logs/
+V-Amber.zip
+
+# Личные заметки и рабочие черновики — не для публичного репозитория
 Amberry_Voice_Technical_Specification.md
 todo.md
 PLAN.md
-AGENTS.md
-CLAUDE.md
-V-Amber.zip
-.claude/settings.local.json
-/.claude
-.claude/settings.local.json
 DECISIONS.md
 EVIDENCE.md
 HANDOFF.md
+.obsidian/
+
+# Локальные настройки агентов
+/.claude

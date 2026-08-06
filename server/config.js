@@ -1,26 +1,15 @@
 import "dotenv/config";
 import { resolveVkConfig } from "./vk.js";
 
-function parseCsvEnv(value, fallback = []) {
+// Разделитель по умолчанию — запятая; «|» передают там, где запятая является
+// частью самой фразы (см. CROSS_PROMO_*_VARIANTS).
+function parseListEnv(value, fallback = [], separator = ",") {
   if (!value?.trim()) {
     return fallback;
   }
 
   return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-// Как parseCsvEnv, но разделитель «|» — для текстов, внутри которых запятая
-// является частью самой фразы.
-function parsePipeEnv(value, fallback = []) {
-  if (!value?.trim()) {
-    return fallback;
-  }
-
-  return value
-    .split("|")
+    .split(separator)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -31,7 +20,7 @@ function parseIntEnv(value, fallback) {
 }
 
 function parseArticleTriggers(value) {
-  const configured = parseCsvEnv(value, ["код товара"])
+  const configured = parseListEnv(value, ["код товара"])
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
   const triggers = new Set(configured);
@@ -73,7 +62,7 @@ export const config = {
     preferredStoreName: process.env.MOYSKLAD_PREFERRED_STORE_NAME?.trim() || "Основной склад",
     // Склады, которые исключаются из суммарного остатка для stock guard и UI.
     // По умолчанию исключаем «Брак» — товар там физически непродаваем.
-    excludedStoreNames: parseCsvEnv(process.env.MOYSKLAD_EXCLUDED_STORE_NAMES, ["Брак"]),
+    excludedStoreNames: parseListEnv(process.env.MOYSKLAD_EXCLUDED_STORE_NAMES, ["Брак"]),
     customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
     salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
     vkIdAttributeId: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_ID?.trim() || "",
@@ -121,7 +110,7 @@ export const config = {
     },
   },
   discount: {
-    triggers: parseCsvEnv(process.env.VOICE_DISCOUNT_TRIGGERS, ["скидка", "скидку", "скидки"]),
+    triggers: parseListEnv(process.env.VOICE_DISCOUNT_TRIGGERS, ["скидка", "скидку", "скидки"]),
   },
   // Периодическая инструкция зрителям: как бронировать и как отменять.
   // Зрители подключаются к эфиру в разное время, и объяснять формат голосом
@@ -133,7 +122,7 @@ export const config = {
     // Первая инструкция — вскоре после старта, а не через полчаса: зрители
     // первой половины часа иначе не увидят её вообще.
     firstDelayMinutes: parseIntEnv(process.env.VIEWER_INSTRUCTIONS_FIRST_DELAY_MIN, 2),
-    variants: parseCsvEnv(process.env.VIEWER_INSTRUCTIONS_VARIANTS, [
+    variants: parseListEnv(process.env.VIEWER_INSTRUCTIONS_VARIANTS, [
       "Как забронировать: напишите в комментариях номер артикула — просто цифры, например 03204. Передумали — напишите «отмена 03204».",
       "Бронь — это номер артикула отдельным комментарием, например 03204. Нужно несколько — «03204 2 шт». Отказ — «отмена 03204».",
       "Напоминаем: бронируем номером артикула в комментариях (03204). Отменить бронь — «отмена 03204». Нет в наличии — напишите «список 03204».",
@@ -158,17 +147,17 @@ export const config = {
     // появляться и гаснуть вслед за ВК-эфиром, а не раз в 25 минут.
     probeIntervalMinutes: parseIntEnv(process.env.CROSS_PROMO_PROBE_INTERVAL_MIN, 5),
     // {url} → ссылка на свою площадку (STREAM_VIEWER_URL).
-    vkVariants: parsePipeEnv(process.env.CROSS_PROMO_VK_VARIANTS, [
+    vkVariants: parseListEnv(process.env.CROSS_PROMO_VK_VARIANTS, [
       "Плохо идёт видео или пропадает звук? Тот же эфир у нас на сайте: {url}",
       "Если картинка подвисает — тот же эфир идёт здесь: {url}",
-    ]),
+    ], "|"),
     // В чате ссылку не даём текстом: страница рисует сообщения textContent'ом,
     // и URL был бы некликабельным. Кликабельная ссылка живёт в плашке под
     // плеером, сообщение лишь показывает на неё.
-    chatVariants: parsePipeEnv(process.env.CROSS_PROMO_CHAT_VARIANTS, [
+    chatVariants: parseListEnv(process.env.CROSS_PROMO_CHAT_VARIANTS, [
       "Тормозит видео или нет звука? Тот же эфир идёт в ВК — ссылка под плеером.",
       "Если картинка подвисает, эфир можно смотреть в ВК — ссылка под плеером.",
-    ]),
+    ], "|"),
   },
   // Wish list / лист предзаказов. Эти значения — fallback по умолчанию,
   // settings.json в logs/ перекрывает их. Не клади сюда секреты — файл попадает
@@ -270,8 +259,8 @@ export const config = {
     // Подстроки (регистронезависимо), по которым в списке устройств macOS
     // ищем нужный вход. Айфон по кабелю/Continuity Camera отдаёт устройства
     // вида «iPhone Романа» и «Микрофон iPhone».
-    cameraDeviceMatch: parseCsvEnv(process.env.OBS_CAMERA_DEVICE_MATCH, ["iphone", "айфон"]),
-    micDeviceMatch: parseCsvEnv(process.env.OBS_MIC_DEVICE_MATCH, ["iphone", "айфон"]),
+    cameraDeviceMatch: parseListEnv(process.env.OBS_CAMERA_DEVICE_MATCH, ["iphone", "айфон"]),
+    micDeviceMatch: parseListEnv(process.env.OBS_MIC_DEVICE_MATCH, ["iphone", "айфон"]),
   },
   speechkit: {
     apiKey: getRequiredEnv("YANDEX_SPEECHKIT_API_KEY"),
