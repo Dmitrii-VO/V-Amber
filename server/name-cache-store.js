@@ -13,13 +13,11 @@
 // sendLogs-бандл (см. server/log-bundle.js). См. knowledge/wiki/
 // operator-feedback.md (W3).
 
-import { appendFile, mkdir } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { dirname, join } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { logger } from "./logger.js";
+import { appendJsonlLines, readJsonlRecords } from "./jsonl-store.js";
 import { normalizeName } from "./name-matcher.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,11 +29,6 @@ export function createNameCacheStore({ filePath = DEFAULT_FILE } = {}) {
   const byViewerId = new Map();
   let writeChain = Promise.resolve();
   let loaded = false;
-
-  async function appendLine(record) {
-    await mkdir(dirname(filePath), { recursive: true });
-    await appendFile(filePath, JSON.stringify(record) + "\n", "utf8");
-  }
 
   function applyRecord(record) {
     if (!record || record.kind !== "name" || record.viewerId == null) return;
@@ -58,22 +51,7 @@ export function createNameCacheStore({ filePath = DEFAULT_FILE } = {}) {
     async load() {
       if (loaded) return;
       loaded = true;
-      if (!existsSync(filePath)) return;
-      try {
-        const stream = createReadStream(filePath, { encoding: "utf8" });
-        const rl = createInterface({ input: stream, crlfDelay: Infinity });
-        for await (const line of rl) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            applyRecord(JSON.parse(trimmed));
-          } catch (err) {
-            logger.warn("name-cache-store", "skip_bad_line", { error: err?.message || String(err) });
-          }
-        }
-      } catch (error) {
-        logger.warn("name-cache-store", "load_failed", { error });
-      }
+      await readJsonlRecords(filePath, "name-cache-store", applyRecord);
     },
 
     // Запоминаем имя зрителя. No-op, если имя пустое или не изменилось —
@@ -95,7 +73,7 @@ export function createNameCacheStore({ filePath = DEFAULT_FILE } = {}) {
       };
       applyRecord(record);
       writeChain = writeChain
-        .then(() => appendLine(record))
+        .then(() => appendJsonlLines(filePath, record))
         .catch((error) => logger.warn("name-cache-store", "append_failed", { error }));
     },
 
