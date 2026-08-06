@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { logger } from "./logger.js";
 import { createSessionLog } from "./session-log.js";
@@ -37,6 +36,7 @@ import {
 import { createVoicePipeline } from "./domain/voice-pipeline.js";
 import { createCommentPollers } from "./domain/comment-pollers.js";
 import { createViewerInstructions } from "./domain/viewer-instructions.js";
+import { createPendingActions } from "./domain/pending-actions.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -292,8 +292,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // клиент не может произвольным WS-сообщением добавить позицию любой
     // брони (HIGH из opencode review 2026-06-01). TTL 60 сек — за это время
     // оператор либо кликает, либо команда устаревает.
-    const pendingQuantityActions = new Map();
-    const PENDING_QUANTITY_TTL_MS = 60_000;
+    const pendingQuantityActions = createPendingActions({ ttlMs: 60_000 });
 
     // Те же однократные токены для «забронировать из строки внимания»: покупатель
     // написал код, под который открытого лота нет (лот закрыт час назад или это
@@ -304,9 +303,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     //
     // TTL заметно больше, чем у «+N штук»: строка внимания живёт в баннере до
     // разбора, оператор доходит до неё между лотами, а не в ту же секунду.
-    const pendingAttentionReservations = new Map();
-    const PENDING_ATTENTION_TTL_MS = 30 * 60_000;
-    const PENDING_ATTENTION_MAX = 200;
+    const pendingAttentionReservations = createPendingActions({
+      ttlMs: 30 * 60_000,
+      max: 200,
+    });
     // Токен намеренно НЕ тратится до успешной записи (чтобы сбой МойСклада можно
     // было повторить тем же кликом), поэтому от двойного клика он не защищает:
     // обработчик сообщений не сериализован, и два кадра успевают пройти peek до
@@ -848,13 +848,11 @@ export function attachWsServer(httpServer, config, services = {}) {
       // Однократный токен, который вернётся в appendReservationQuantity.
       // Без него любой WS-клиент мог бы прислать произвольные
       // viewerId/commentId/quantity и создать чужую позицию в МойСкладе.
-      const actionId = randomUUID();
-      pendingQuantityActions.set(actionId, {
+      const actionId = pendingQuantityActions.issue({
         lotSessionId: lot.lotSessionId,
         viewerId: best.viewerId,
         commentId: best.commentId,
         quantity,
-        expiresAt: Date.now() + PENDING_QUANTITY_TTL_MS,
       });
 
       sendJson(websocket, {
@@ -877,14 +875,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // МойСклада «попробуйте ещё раз» было невозможно: токен уже потрачен, а
     // кнопка в UI висела на «…». Истёкший токен подчищаем здесь же.
     function peekPendingQuantityAction(actionId) {
-      if (!actionId) return null;
-      const pending = pendingQuantityActions.get(actionId);
-      if (!pending) return null;
-      if (pending.expiresAt < Date.now()) {
-        pendingQuantityActions.delete(actionId);
-        return null;
-      }
-      return pending;
+      return pendingQuantityActions.peek(actionId);
     }
 
     // Регистрирует строку внимания как выполнимое действие «забронировать».
@@ -895,45 +886,20 @@ export function attachWsServer(httpServer, config, services = {}) {
         return null;
       }
 
-      const actionId = randomUUID();
-      pendingAttentionReservations.set(actionId, {
+      return pendingAttentionReservations.issue({
         code: String(code),
         viewerId,
         viewerName: viewerName || "",
         commentId: commentId ?? null,
         quantity: Math.min(10, Math.max(1, Number(quantity) || 1)),
         source: source === "chat" ? "chat" : "vk",
-        expiresAt: Date.now() + PENDING_ATTENTION_TTL_MS,
       });
-
-      // Баннер копит строки весь эфир; без подрезки map растёт до конца сессии.
-      // Чистим просроченные, затем самые старые.
-      if (pendingAttentionReservations.size > PENDING_ATTENTION_MAX) {
-        const now = Date.now();
-        for (const [key, value] of pendingAttentionReservations) {
-          if (value.expiresAt < now) pendingAttentionReservations.delete(key);
-        }
-        while (pendingAttentionReservations.size > PENDING_ATTENTION_MAX) {
-          const oldest = pendingAttentionReservations.keys().next().value;
-          if (oldest === undefined) break;
-          pendingAttentionReservations.delete(oldest);
-        }
-      }
-
-      return actionId;
     }
 
     // Как peekPendingQuantityAction: токен не тратится до успешной записи,
     // чтобы при сбое МойСклада оператор мог повторить тем же кликом.
     function peekPendingAttentionReservation(actionId) {
-      if (!actionId) return null;
-      const pending = pendingAttentionReservations.get(actionId);
-      if (!pending) return null;
-      if (pending.expiresAt < Date.now()) {
-        pendingAttentionReservations.delete(actionId);
-        return null;
-      }
-      return pending;
+      return pendingAttentionReservations.peek(actionId);
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
