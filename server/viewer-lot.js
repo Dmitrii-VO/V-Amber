@@ -28,7 +28,7 @@ export const MAX_LOT_PHOTO_BYTES = 1_500_000;
 // V-Amber упал или ноутбук закрыли, не остановив эфир, зритель не должен до
 // следующего эфира смотреть на лот со старой ценой. Дедуп по сигнатуре тут не
 // поможет — он как раз про «ничего не изменилось».
-export const LOT_HEARTBEAT_MS = 5 * 60_000;
+const LOT_HEARTBEAT_MS = 5 * 60_000;
 
 function positiveNumber(value) {
   const number = Number(value);
@@ -64,7 +64,7 @@ export function buildViewerLot(lot, { status = "open" } = {}) {
   };
 }
 
-export function viewerLotSignature(snapshot) {
+function viewerLotSignature(snapshot) {
   return snapshot ? JSON.stringify(snapshot) : "";
 }
 
