@@ -53,7 +53,7 @@ export const config = {
   host: process.env.HOST?.trim() || "0.0.0.0",
   vk: resolveVkConfig(process.env),
   moysklad: {
-    baseUrl: process.env.MOYSKLAD_BASE_URL?.trim() || "https://api.moysklad.ru/api/remap/1.2/",
+    baseUrl: "https://api.moysklad.ru/api/remap/1.2/",
     login: process.env.MOYSKLAD_LOGIN?.trim() || "",
     password: process.env.MOYSKLAD_PASSWORD?.trim() || "",
     organizationId: process.env.MOYSKLAD_ORGANIZATION_ID?.trim() || "",
@@ -66,8 +66,9 @@ export const config = {
     customerOrderStateId: process.env.MOYSKLAD_CUSTOMER_ORDER_STATE_ID?.trim() || "",
     salesChannelId: process.env.MOYSKLAD_SALES_CHANNEL_ID?.trim() || "",
     vkIdAttributeId: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_ID?.trim() || "",
-    vkIdAttributeName: process.env.MOYSKLAD_VK_ID_ATTRIBUTE_NAME?.trim() || "VK ID",
-    imageDownloadTimeoutMs: parseIntEnv(process.env.MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS, 10000),
+    // Запасной поиск атрибута по имени, когда MOYSKLAD_VK_ID_ATTRIBUTE_ID пуст.
+    vkIdAttributeName: "VK ID",
+    imageDownloadTimeoutMs: 10000,
     requestTimeoutMs: parseIntEnv(process.env.MOYSKLAD_REQUEST_TIMEOUT_MS, 8000),
     // Повтор ЗАПИСЕЙ брони (журнал write-journal.js). Держим низким намеренно:
     // повтор идёт по горячему пути брони, покупатель ждёт ответа в эфире, а
@@ -96,8 +97,8 @@ export const config = {
     triggers: parseArticleTriggers(process.env.VOICE_ARTICLE_TRIGGERS),
     minLength: parseIntEnv(process.env.VOICE_ARTICLE_MIN_LENGTH, 1),
     maxLength: parseIntEnv(process.env.VOICE_ARTICLE_MAX_LENGTH, 10),
-    finalBufferSize: parseIntEnv(process.env.VOICE_ARTICLE_FINAL_BUFFER_SIZE, 3),
-    triggerWindowMs: parseIntEnv(process.env.VOICE_ARTICLE_TRIGGER_WINDOW_MS, 8000),
+    finalBufferSize: 3,
+    triggerWindowMs: 8000,
     // YandexGPT fallback: вызывается ТОЛЬКО когда regex ничего не вернул,
     // триггер найден и каталог продуктов загружен. Кандидаты от LLM
     // обязательно проходят валидацию через knownCodes — выдуманный артикул
@@ -110,7 +111,7 @@ export const config = {
     },
   },
   discount: {
-    triggers: parseListEnv(process.env.VOICE_DISCOUNT_TRIGGERS, ["скидка", "скидку", "скидки"]),
+    triggers: ["скидка", "скидку", "скидки"],
   },
   // Периодическая инструкция зрителям: как бронировать и как отменять.
   // Зрители подключаются к эфиру в разное время, и объяснять формат голосом
@@ -159,16 +160,16 @@ export const config = {
       "Если картинка подвисает, эфир можно смотреть в ВК — ссылка под плеером.",
     ], "|"),
   },
-  // Wish list / лист предзаказов. Эти значения — fallback по умолчанию,
-  // settings.json в logs/ перекрывает их. Не клади сюда секреты — файл попадает
-  // в диагностический ZIP.
+  // Wish list / лист предзаказов. Это стартовые значения на первый запуск:
+  // settings.json в logs/ перекрывает их, и именно его правит оператор через
+  // панель настроек. Отдельного env-слоя здесь нет — он был третьим способом
+  // задать то же самое, и его никто не использовал.
   wishlist: {
-    notifyVkOnAdd: process.env.WISHLIST_NOTIFY_VK === "1",
-    oldDaysThreshold: parseIntEnv(process.env.WISHLIST_OLD_DAYS_THRESHOLD, 7),
-    defaultSupplierId: process.env.MOYSKLAD_DEFAULT_SUPPLIER_ID?.trim() || "",
-    defaultStoreId: process.env.MOYSKLAD_DEFAULT_PURCHASE_STORE_ID?.trim() || "",
-    descriptionTemplate: process.env.WISHLIST_DESCRIPTION_TEMPLATE?.trim()
-      || "Предзаказ из эфира {date}. Артикулы: {codes}",
+    notifyVkOnAdd: false,
+    oldDaysThreshold: 7,
+    defaultSupplierId: "",
+    defaultStoreId: "",
+    descriptionTemplate: "Предзаказ из эфира {date}. Артикулы: {codes}",
   },
   // Собственный RTMP/HLS-стрим (MediaMTX) как альтернатива VK Live.
   // Опционально: без STREAM_MEDIAMTX_API_URL панель "Стрим" в дашборде скрыта.
