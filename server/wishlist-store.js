@@ -1,11 +1,10 @@
-import { appendFile, readFile, mkdir } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
-import { createInterface } from "node:readline";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import { logger } from "./logger.js";
+import { appendJsonlLines, readJsonlRecords } from "./jsonl-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_FILE = join(__dirname, "..", "logs", "wishlist.jsonl");
@@ -16,12 +15,6 @@ const TERMINAL_NON_MIGRATE = new Set(["reserved", "reserved_appended", "safe_mod
 
 function dedupKey(viewerId, productCode) {
   return `${viewerId}::${productCode}`;
-}
-
-async function appendLines(filePath, lines) {
-  if (!lines.length) return;
-  await mkdir(dirname(filePath), { recursive: true });
-  await appendFile(filePath, lines.join("\n") + "\n", "utf8");
 }
 
 export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) {
@@ -156,13 +149,12 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
 
   async function write(records) {
     if (!records || records.length === 0) return;
-    const lines = records.map((r) => JSON.stringify(r));
     // Сериализуем И мутацию state, И append на диск через одну writeChain.
     // Раньше applyEvent выполнялся синхронно ДО постановки в очередь —
     // при параллельных add/edit/consume in-memory state мог опередить файл,
     // и порядок применения событий не совпадал с порядком записей в JSONL.
     const operation = writeChain.then(async () => {
-      await appendLines(filePath, lines);
+      await appendJsonlLines(filePath, records);
       records.forEach(applyEvent);
     });
     // Keep the shared queue usable after failure, but reject this operation to
@@ -198,23 +190,7 @@ export function createWishlistStore({ onChange, filePath = DEFAULT_FILE } = {}) 
     async load() {
       if (loaded) return;
       loaded = true;
-      if (!existsSync(filePath)) return;
-      try {
-        const stream = createReadStream(filePath, { encoding: "utf8" });
-        const rl = createInterface({ input: stream, crlfDelay: Infinity });
-        for await (const line of rl) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            const record = JSON.parse(trimmed);
-            applyEvent(record);
-          } catch (err) {
-            logger.warn("wishlist-store", "skip_bad_line", { error: err?.message || String(err) });
-          }
-        }
-      } catch (error) {
-        logger.warn("wishlist-store", "load_failed", { error });
-      }
+      await readJsonlRecords(filePath, "wishlist-store", applyEvent);
     },
 
     subscribe(listener) {

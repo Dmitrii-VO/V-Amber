@@ -19,13 +19,11 @@
 // содержит имена зрителей и НЕ включается в sendLogs-бандл — см.
 // server/log-bundle.js.
 
-import { appendFile, mkdir } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createInterface } from "node:readline";
 
 import { logger } from "./logger.js";
+import { appendJsonlLines, readJsonlRecords } from "./jsonl-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_FILE = join(__dirname, "..", "logs", "blocked-viewers.jsonl");
@@ -36,11 +34,6 @@ export function createBlockedViewersStore({ filePath = DEFAULT_FILE } = {}) {
   const blocked = new Map();
   let writeChain = Promise.resolve();
   let loaded = false;
-
-  async function appendLine(record) {
-    await mkdir(dirname(filePath), { recursive: true });
-    await appendFile(filePath, JSON.stringify(record) + "\n", "utf8");
-  }
 
   function applyRecord(record) {
     if (!record || record.viewerId == null) return;
@@ -63,7 +56,7 @@ export function createBlockedViewersStore({ filePath = DEFAULT_FILE } = {}) {
   function persist(record) {
     applyRecord(record);
     writeChain = writeChain
-      .then(() => appendLine(record))
+      .then(() => appendJsonlLines(filePath, record))
       .catch((error) => logger.warn("blocked-viewers-store", "append_failed", { error }));
   }
 
@@ -71,22 +64,7 @@ export function createBlockedViewersStore({ filePath = DEFAULT_FILE } = {}) {
     async load() {
       if (loaded) return;
       loaded = true;
-      if (!existsSync(filePath)) return;
-      try {
-        const stream = createReadStream(filePath, { encoding: "utf8" });
-        const rl = createInterface({ input: stream, crlfDelay: Infinity });
-        for await (const line of rl) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            applyRecord(JSON.parse(trimmed));
-          } catch (err) {
-            logger.warn("blocked-viewers-store", "skip_bad_line", { error: err?.message || String(err) });
-          }
-        }
-      } catch (error) {
-        logger.warn("blocked-viewers-store", "load_failed", { error });
-      }
+      await readJsonlRecords(filePath, "blocked-viewers-store", applyRecord);
       if (blocked.size > 0) {
         logger.info("blocked-viewers-store", "loaded", { count: blocked.size });
       }
