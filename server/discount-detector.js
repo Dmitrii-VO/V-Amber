@@ -115,14 +115,23 @@ function detectAbsolute(tokens) {
   return null;
 }
 
+// Настроенный триггер скидки отдельным словом в тексте. Вынесено, потому что
+// ws-server.js повторял ровно эту регулярку, чтобы отличить «оператор хотел
+// скидку, но сумма не извлеклась» от «про скидку речи не было».
+export function matchesDiscountTrigger(text, triggers) {
+  const normalized = String(text || "").toLowerCase().replace(/ё/g, "е");
+  return triggers.some((t) => {
+    const nt = String(t || "").toLowerCase().replace(/ё/g, "е");
+    return Boolean(nt) && new RegExp(`(?:^|\\s)${nt}(?:$|\\s)`).test(normalized);
+  });
+}
+
 export function detectDiscount(text, triggers) {
   const normalized = text.toLowerCase().replace(/ё/g, "е");
   const tokens = tokenize(normalized);
 
-  const hasTrigger = triggers.some((t) => {
-    const nt = t.toLowerCase().replace(/ё/g, "е");
-    return new RegExp(`(?:^|\\s)${nt}(?:$|\\s)`).test(normalized);
-  }) || tokens.some((token, index) => isDiscountToken(token) && tokens[index - 1] !== "без");
+  const hasTrigger = matchesDiscountTrigger(normalized, triggers)
+    || tokens.some((token, index) => isDiscountToken(token) && tokens[index - 1] !== "без");
 
   const percent = detectPercent(tokens);
   if (percent) return percent;

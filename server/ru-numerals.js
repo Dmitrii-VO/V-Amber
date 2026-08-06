@@ -74,8 +74,16 @@ function readSmallNumber(norm, i) {
   return value > 0 ? { value, next: j } : null;
 }
 
-function normalizeWord(word) {
+// Приведение одного слова: нижний регистр + ё→е. Копии этой строчки жили в
+// price-detector.js и discount-detector.js — здесь единственный источник.
+export function normalizeWord(word) {
   return word.toLowerCase().replace(/ё/g, "е");
+}
+
+// То же для целой фразы: плюс схлопывание пробелов и обрезка краёв. Копии
+// жили в cancel-command-parser.js и quantity-command-parser.js.
+export function normalizeText(text) {
+  return String(text || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
 }
 
 // Денежное числительное из последовательности слов: «две тысячи пятьсот
