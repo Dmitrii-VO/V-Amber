@@ -1,4 +1,4 @@
-import { UNIT_WORDS, parseMonetaryWords } from "./ru-numerals.js";
+import { UNIT_WORDS, normalizeWord, parseMonetaryWords } from "./ru-numerals.js";
 
 // Ноль обрабатывается отдельно от UNIT_WORDS: при посимвольном чтении цифр
 // «ноль» даёт «0», но в parseMonetaryWords нулём числительное не наращивают.
@@ -37,10 +37,6 @@ const BACKWARD_SKIP = new Set(["по", "за", "всего", "итого"]);
 // Маркеры денег: только с ними обратный проход принимает «голый» цифровой
 // токен. Без этого «артикул 03116 по стоимости» дало бы цену 3116 ₽.
 const MONEY_WORDS = new Set(["рублей", "рубля", "рубль", "руб", "рублика", "рубликов"]);
-
-function normalizeWord(word) {
-  return word.toLowerCase().replace(/ё/g, "е");
-}
 
 function tokenize(text) {
   return String(text || "").toLowerCase().replace(/ё/g, "е").match(/[a-zа-я0-9]+/gi) || [];

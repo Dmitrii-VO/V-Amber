@@ -13,7 +13,7 @@
 // ждёт явного подтверждения оператора. Это сознательно: ошибка
 // распознавания → лишняя позиция в МойСкладе = реальные деньги.
 
-import { UNIT_WORDS as UNIT_WORDS_BASE } from "./ru-numerals.js";
+import { UNIT_WORDS as UNIT_WORDS_BASE, normalizeText as normalize } from "./ru-numerals.js";
 
 const CYR = "а-яё";
 
@@ -98,10 +98,6 @@ const FILLER = new Set([
   "так", "давай", "давайте", "значит", "ну", "вот", "это", "так-то",
   "пожалуйста", "итак", "и", "а",
 ]);
-
-function normalize(text) {
-  return String(text || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
-}
 
 export function parseQuantityCommand(text) {
   const normalized = normalize(text);

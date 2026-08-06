@@ -10,7 +10,7 @@
 // вызывающий код — здесь только разбор фразы. См. knowledge/wiki/
 // operator-feedback.md (W3).
 
-import { UNIT_WORDS as UNIT_WORDS_BASE } from "./ru-numerals.js";
+import { UNIT_WORDS as UNIT_WORDS_BASE, normalizeText as normalize } from "./ru-numerals.js";
 
 const CYR = "а-яё";
 
@@ -27,10 +27,6 @@ const DIGIT_WORDS = new Map(
     ["ноль", 0], ["ноля", 0], ["нуль", 0],
   ].map(([word, value]) => [word, String(value)]),
 );
-
-function normalize(text) {
-  return String(text || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
-}
 
 // Триггер команды: «отмен|сним|убер|удал» + «лот|брон». Порядок этих двух
 // слов может быть любым («отмена лота», «лот отменить», «снять бронь»).

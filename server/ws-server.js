@@ -4,7 +4,7 @@ import { logger } from "./logger.js";
 import { createSessionLog } from "./session-log.js";
 import { SpeechKitStreamingSession } from "./speechkit-stream.js";
 import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
-import { detectDiscount } from "./discount-detector.js";
+import { detectDiscount, matchesDiscountTrigger } from "./discount-detector.js";
 import { detectPrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
@@ -3460,12 +3460,7 @@ export function attachWsServer(httpServer, config, services = {}) {
                   // не извлёк сумму. Без этого лога мы видели бы тишину и не
                   // понимали, что оператор хотел скидку (как в случае
                   // «скидка процентов тридцать» — порядок слов ломает regex).
-                  const normalizedForDiscount = String(text || "").toLowerCase().replace(/ё/g, "е");
-                  const matchedDiscountTrigger = config.discount.triggers.some((trigger) => {
-                    const nt = String(trigger || "").toLowerCase().replace(/ё/g, "е");
-                    return nt && new RegExp(`(?:^|\\s)${nt}(?:$|\\s)`).test(normalizedForDiscount);
-                  });
-                  if (matchedDiscountTrigger) {
+                  if (matchesDiscountTrigger(text, config.discount.triggers)) {
                     logger.warn("discount", "discount_skipped", {
                       connectionId,
                       text,
