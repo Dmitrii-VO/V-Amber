@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { logger } from "./logger.js";
 import { createSessionLog } from "./session-log.js";
@@ -36,6 +35,8 @@ import {
 } from "./ws-helpers.js";
 import { createVoicePipeline } from "./domain/voice-pipeline.js";
 import { createCommentPollers } from "./domain/comment-pollers.js";
+import { createViewerInstructions } from "./domain/viewer-instructions.js";
+import { createPendingActions } from "./domain/pending-actions.js";
 
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
@@ -291,8 +292,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // клиент не может произвольным WS-сообщением добавить позицию любой
     // брони (HIGH из opencode review 2026-06-01). TTL 60 сек — за это время
     // оператор либо кликает, либо команда устаревает.
-    const pendingQuantityActions = new Map();
-    const PENDING_QUANTITY_TTL_MS = 60_000;
+    const pendingQuantityActions = createPendingActions({ ttlMs: 60_000 });
 
     // Те же однократные токены для «забронировать из строки внимания»: покупатель
     // написал код, под который открытого лота нет (лот закрыт час назад или это
@@ -303,9 +303,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     //
     // TTL заметно больше, чем у «+N штук»: строка внимания живёт в баннере до
     // разбора, оператор доходит до неё между лотами, а не в ту же секунду.
-    const pendingAttentionReservations = new Map();
-    const PENDING_ATTENTION_TTL_MS = 30 * 60_000;
-    const PENDING_ATTENTION_MAX = 200;
+    const pendingAttentionReservations = createPendingActions({
+      ttlMs: 30 * 60_000,
+      max: 200,
+    });
     // Токен намеренно НЕ тратится до успешной записи (чтобы сбой МойСклада можно
     // было повторить тем же кликом), поэтому от двойного клика он не защищает:
     // обработчик сообщений не сериализован, и два кадра успевают пройти peek до
@@ -404,7 +405,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     stateSnapshotInterval.unref();
 
     function resetDetectionState() {
-      stopViewerInstructions();
+      viewerInstructions.stop();
+      // Плашка запасной площадки гаснет вместе с инструкциями — иначе зритель
+      // остался бы со ссылкой на уже закончившийся эфир.
+      crossPromo.stop();
       commentPollers.reset();
       activeLot = null;
       openLotsBySessionId.clear();
@@ -844,13 +848,11 @@ export function attachWsServer(httpServer, config, services = {}) {
       // Однократный токен, который вернётся в appendReservationQuantity.
       // Без него любой WS-клиент мог бы прислать произвольные
       // viewerId/commentId/quantity и создать чужую позицию в МойСкладе.
-      const actionId = randomUUID();
-      pendingQuantityActions.set(actionId, {
+      const actionId = pendingQuantityActions.issue({
         lotSessionId: lot.lotSessionId,
         viewerId: best.viewerId,
         commentId: best.commentId,
         quantity,
-        expiresAt: Date.now() + PENDING_QUANTITY_TTL_MS,
       });
 
       sendJson(websocket, {
@@ -873,14 +875,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // МойСклада «попробуйте ещё раз» было невозможно: токен уже потрачен, а
     // кнопка в UI висела на «…». Истёкший токен подчищаем здесь же.
     function peekPendingQuantityAction(actionId) {
-      if (!actionId) return null;
-      const pending = pendingQuantityActions.get(actionId);
-      if (!pending) return null;
-      if (pending.expiresAt < Date.now()) {
-        pendingQuantityActions.delete(actionId);
-        return null;
-      }
-      return pending;
+      return pendingQuantityActions.peek(actionId);
     }
 
     // Регистрирует строку внимания как выполнимое действие «забронировать».
@@ -891,45 +886,20 @@ export function attachWsServer(httpServer, config, services = {}) {
         return null;
       }
 
-      const actionId = randomUUID();
-      pendingAttentionReservations.set(actionId, {
+      return pendingAttentionReservations.issue({
         code: String(code),
         viewerId,
         viewerName: viewerName || "",
         commentId: commentId ?? null,
         quantity: Math.min(10, Math.max(1, Number(quantity) || 1)),
         source: source === "chat" ? "chat" : "vk",
-        expiresAt: Date.now() + PENDING_ATTENTION_TTL_MS,
       });
-
-      // Баннер копит строки весь эфир; без подрезки map растёт до конца сессии.
-      // Чистим просроченные, затем самые старые.
-      if (pendingAttentionReservations.size > PENDING_ATTENTION_MAX) {
-        const now = Date.now();
-        for (const [key, value] of pendingAttentionReservations) {
-          if (value.expiresAt < now) pendingAttentionReservations.delete(key);
-        }
-        while (pendingAttentionReservations.size > PENDING_ATTENTION_MAX) {
-          const oldest = pendingAttentionReservations.keys().next().value;
-          if (oldest === undefined) break;
-          pendingAttentionReservations.delete(oldest);
-        }
-      }
-
-      return actionId;
     }
 
     // Как peekPendingQuantityAction: токен не тратится до успешной записи,
     // чтобы при сбое МойСклада оператор мог повторить тем же кликом.
     function peekPendingAttentionReservation(actionId) {
-      if (!actionId) return null;
-      const pending = pendingAttentionReservations.get(actionId);
-      if (!pending) return null;
-      if (pending.expiresAt < Date.now()) {
-        pendingAttentionReservations.delete(actionId);
-        return null;
-      }
-      return pending;
+      return pendingAttentionReservations.peek(actionId);
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
@@ -1767,84 +1737,17 @@ export function attachWsServer(httpServer, config, services = {}) {
       notify: (payload) => sendJson(websocket, payload),
     });
 
-    // Периодическая инструкция зрителям. Зрители подключаются к эфиру в разное
-    // время, и формат брони («номер артикула отдельным комментарием») половина
-    // зала не видела. Идёт в VK-комментарии и в чат /efir/ одновременно —
-    // это две разные аудитории.
-    let instructionTimer = null;
-    let instructionVariantIndex = 0;
-
-    function stopViewerInstructions() {
-      if (instructionTimer) {
-        clearTimeout(instructionTimer);
-        instructionTimer = null;
-      }
-      // Перекрёстные подсказки живут тем же циклом эфира: старт вместе с
-      // инструкциями, остановка — здесь же, включая снятие плашки у зрителей.
-      crossPromo.stop();
-    }
-
-    async function publishViewerInstruction() {
-      const variants = config.viewerInstructions?.variants || [];
-      if (variants.length === 0) return;
-      // Варианты чередуются: VK режет подряд идущие одинаковые комментарии
-      // под одним видео, и одинаковый текст каждые полчаса читается как спам.
-      const message = variants[instructionVariantIndex % variants.length];
-      instructionVariantIndex += 1;
-
-      const results = await Promise.allSettled([
-        vk.publishViewerInstruction(message),
-        chatClient?.postServiceMessage?.(message),
-      ]);
-      const vkResult = results[0].status === "fulfilled" ? results[0].value : null;
-      const chatResult = results[1].status === "fulfilled" ? results[1].value : null;
-      logger.info("vk", "viewer_instruction_published", {
-        connectionId,
-        variantIndex: (instructionVariantIndex - 1) % variants.length,
-        vk: vkResult?.ok === true,
-        vkSkipped: Boolean(vkResult?.skipped),
-        chat: chatResult?.ok === true,
-      });
-    }
-
-    // Планировщик на setTimeout, а не setInterval: публикация может занять
-    // секунды (ретраи VK), и следующая пауза должна отсчитываться от конца
-    // предыдущей — иначе при затыке VK инструкции пойдут очередью подряд.
-    function scheduleViewerInstruction(delayMs) {
-      stopViewerInstructions();
-      instructionTimer = setTimeout(() => {
-        instructionTimer = null;
-        // Эфир мог кончиться, пока таймер тикал.
-        if (!activeRunId) return;
-        void publishViewerInstruction()
-          .catch((error) => {
-            logger.error("vk", "viewer_instruction_failed", { connectionId, error });
-          })
-          .finally(() => {
-            if (activeRunId) {
-              scheduleViewerInstruction(viewerInstructionIntervalMs());
-            }
-          });
-      }, delayMs);
-      instructionTimer.unref?.();
-    }
-
-    // Нижняя граница — в миллисекундах, а не в минутах: из окружения интервал
-    // приходит целым числом минут (parseIntEnv), а тесты гоняют доли минуты.
-    function viewerInstructionIntervalMs() {
-      const minutes = Number(config.viewerInstructions?.intervalMinutes);
-      return Math.max(1000, (Number.isFinite(minutes) && minutes > 0 ? minutes : 30) * 60_000);
-    }
-
-    function startViewerInstructions() {
-      // Подсказки про запасную площадку заводятся вместе с инструкциями, но
-      // своим флагом: их можно выключить отдельно (CROSS_PROMO_ENABLED=0).
-      crossPromo.start();
-      if (config.viewerInstructions?.enabled === false) return;
-      if (instructionTimer) return;
-      const firstDelayMin = Number(config.viewerInstructions?.firstDelayMinutes);
-      scheduleViewerInstruction(Math.max(0, Number.isFinite(firstDelayMin) ? firstDelayMin : 2) * 60_000);
-    }
+    // Периодическая инструкция зрителям живёт в domain/viewer-instructions.js.
+    // Перекрёстные подсказки заводятся и гасятся тем же циклом эфира, но
+    // своим флагом (CROSS_PROMO_ENABLED=0) — поэтому crossPromo дёргается
+    // рядом с ними в точках старта и остановки, а не внутри модуля.
+    const viewerInstructions = createViewerInstructions({
+      config,
+      vk,
+      chatClient,
+      connectionId,
+      isLive: () => Boolean(activeRunId),
+    });
 
     // Комментарии-отмены обрабатываются один раз: поллер VK может отдать один и
     // тот же комментарий повторно, а второй проход искал бы позицию, которой уже
@@ -3580,7 +3483,8 @@ export function attachWsServer(httpServer, config, services = {}) {
           // Строго ПОСЛЕ resetDetectionState: тот гасит таймер инструкций
           // вместе с остальным состоянием эфира, и запуск до него был бы
           // немедленно отменён.
-          startViewerInstructions();
+          crossPromo.start();
+          viewerInstructions.start();
           emitState();
           return;
         }
