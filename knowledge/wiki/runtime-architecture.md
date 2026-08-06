@@ -53,6 +53,20 @@ together**, not what reads tidily:
   open lots and the catalog and reports to the operator; it never touches lot
   state. The flood guard for giveaway spam lives with it, since that is its
   only caller.
+- `server/domain/viewer-instructions.js` — the periodic «how to reserve»
+  message, published to VK comments and the `/efir/` chat at once. Outward it
+  knows `vk`/`chatClient`, `isLive()` and `connectionId`. Cross-promo is
+  **not** inside it: the two start and stop together but have separate flags,
+  so `crossPromo.start()/stop()` sit next to the instruction calls in
+  `ws-server.js`. Before the split this coupling was hidden — `stopViewerInstructions()`
+  silently stopped cross-promo too.
+- `server/domain/pending-actions.js` — the single-use action tokens behind
+  `appendReservationQuantity` and «забронировать из строки внимания». Both are
+  direct writes to MoySklad, so the server issues an `actionId` and keeps the
+  verified payload itself; the client returns only the token. `peek()`
+  deliberately does **not** spend the token — after a MoySklad failure the
+  operator must be able to retry with the same click. It therefore gives no
+  protection against a double click; that lives in the write journal.
 
 **The reservation branch of `ingestViewerComment` deliberately stays put.** The
 function splits into four parts, and only the last is entangled:

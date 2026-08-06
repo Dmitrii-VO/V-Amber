@@ -17,6 +17,16 @@ to the active lot before publication or reservation.
   (previously silently wrong: `1000` and `2 ₽`). `parseMonetaryWords` now
   lives in `server/ru-numerals.js` and is shared by price and discount
   detectors (it was duplicated).
+- Text normalization lives there too: `normalizeWord` (lowercase + `ё`→`е`) and
+  `normalizeText` (same plus whitespace collapse and trim). `price-detector`,
+  `cancel-command-parser` and `quantity-command-parser` had their own identical
+  copies. Two parsers deliberately keep their own: `reservation-parser.js` and
+  `moysklad.js` normalize **without** collapsing whitespace, and the reservation
+  path is not worth a two-line saving.
+- Trigger matching for discounts is exported as `matchesDiscountTrigger` from
+  `server/discount-detector.js`. `ws-server.js` repeated that regex inline to
+  tell «the operator wanted a discount but no amount was extracted» apart from
+  «no discount was mentioned»; changing a trigger form now means one edit.
 - Declined trigger forms are accepted: `по цене 990`, `стоимостью 1200`.
 - The amount may stand **to the left** of the trigger: `тысяча четыреста рублей
   по стоимости` → `1400`. The detector scanned forward only, so this ordering

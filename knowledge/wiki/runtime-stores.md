@@ -20,6 +20,21 @@ updates preserve existing values.
 Wishlist settings include default store, default supplier, old-entry threshold,
 VK notification flag, and purchase-order description template.
 
+## Shared JSONL engine
+
+`server/jsonl-store.js` holds the read/append machinery every append-only store
+uses: `readJsonlRecords(filePath, component, applyRecord)` and
+`appendJsonlLines(filePath, records)`. Three stores share it — wishlist, name
+cache, blocked viewers.
+
+Two behaviours are deliberate and now live in one place instead of three
+copies. A malformed line is a `skip_bad_line` warning and the read continues: a
+single torn record (process killed mid-append) must not cost the operator the
+whole history. A missing file is a first run, not an error.
+
+Folding records into state (`applyRecord` / `applyEvent`) stays in each store —
+that part differs everywhere and is the whole point of each of them.
+
 ## Wishlist events
 
 `server/wishlist-store.js` writes append-only JSONL to `logs/wishlist.jsonl`.

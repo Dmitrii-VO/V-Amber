@@ -100,4 +100,5 @@ change.
   review at `0.1.54`: 291/291 tests green, no CI test gate before releases,
   axios audit finding, auth-off-by-default on `0.0.0.0`, god-module growth,
   and the open variant-lookup risk. CI gate, axios, LAN-auth warning, and
-  README drift fixed same day; god-module split and variant lookup remain.
+  README drift fixed same day; variant lookup remains. The god-module split is
+  under way — see the 2026-08-06 progress note in [[documentation-drift]].
