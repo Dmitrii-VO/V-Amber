@@ -164,6 +164,22 @@ Relevant durable changes:
   integration tests (they move money / send messages).
 - Deeper split of `ws-server.js` and `moysklad.js` per domain.
 
+**Progress on the deeper split (as of 2026-08-06).** `server/domain/` now holds
+five modules — `voice-pipeline`, `comment-pollers`, `reservation-attention`,
+`viewer-instructions`, `pending-actions` — and `ws-server.js` is at 4314 LOC.
+The scaffolding the 2026-06-11 audit asked for exists: `test/helpers/ws-harness.js`
+plus the `ws-server.*.test.js` suite, 550 tests total.
+
+Still inside the closure and entangled with live lot state (`activeLot`,
+`openLotsBySessionId`, `ensureReservationState`): `processReservationEvent`
+(~420 LOC), `ingestViewerComment` (~240), the operator voice commands (~200).
+These come out one module per PR, not in a batch.
+
+`web-ui/app.js` (4116 LOC, 185 top-level declarations, one `<script>`) is the
+remaining god module with **no** test coverage at all, and MoySklad is
+unreachable from the Windows dev machine — so a split there has to be verified
+on the operator's Mac. See [[moysklad-integration]].
+
 ## Operator-audit pass (2026-05-29)
 
 Full audit from the live-commerce operator perspective produced 20

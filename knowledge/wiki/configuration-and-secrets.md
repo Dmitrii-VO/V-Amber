@@ -133,6 +133,34 @@ redirected to `GET /login` — a tiny self-contained HTML form (no
 external assets) that accepts the token via POST and sets the cookie.
 See [[http-api#Authentication]].
 
+## What is deliberately not configurable (2026-08-06)
+
+Eleven variables were removed from `server/config.js` and inlined as constants.
+They were readable only in that file — absent from both `.env.example` and this
+page — so there was no way to learn they existed. The object keys in `config`
+did not change; only the `process.env` layer under them is gone.
+
+`MOYSKLAD_BASE_URL`, `MOYSKLAD_VK_ID_ATTRIBUTE_NAME`,
+`MOYSKLAD_IMAGE_DOWNLOAD_TIMEOUT_MS`, `MOYSKLAD_DEFAULT_SUPPLIER_ID`,
+`MOYSKLAD_DEFAULT_PURCHASE_STORE_ID`, `VOICE_ARTICLE_FINAL_BUFFER_SIZE`,
+`VOICE_ARTICLE_TRIGGER_WINDOW_MS`, `VOICE_DISCOUNT_TRIGGERS`,
+`WISHLIST_NOTIFY_VK`, `WISHLIST_OLD_DAYS_THRESHOLD`,
+`WISHLIST_DESCRIPTION_TEMPLATE`.
+
+The `WISHLIST_*` three were a third layer under `logs/settings.json`, which is
+what the operator actually edits through the settings panel — see
+[[runtime-stores#Settings]]. Wishlist defaults now live as constants in
+`config.wishlist` and remain overridable by `settings.json` exactly as before.
+
+Two undocumented knobs were **kept** and written into `.env.example` instead,
+because they are per-installation and removing them would take away a real
+capability: `MOYSKLAD_PREFERRED_ORGANIZATION_NAME` (organization identity when
+the UUID is unset) and `YANDEX_SPEECHKIT_SEND_FOLDER_HEADER` (authorization
+path).
+
+If you are looking for a variable that used to be here and is not, check this
+list before adding it back — it was removed on purpose.
+
 ## Optional integrations
 
 VK and MoySklad are optional at code level: without configuration, related

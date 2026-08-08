@@ -26,6 +26,13 @@ a replacement for code search, but it gives agents the right entry points.
 - `server/article-extractor.js` extracts spoken product codes.
 - `server/reservation-parser.js` parses VK buyer comments into reservation
   and wishlist intents. See [[reservation-flow#Accepted comment formats]].
+- `server/ru-numerals.js` is the single source for Russian numeral dictionaries
+  and text normalization (`normalizeWord`, `normalizeText`) used by the
+  parsers. See [[voice-price-parsing]].
+- `server/domain/` holds what has been split out of `ws-server.js`:
+  `voice-pipeline.js`, `comment-pollers.js`, `reservation-attention.js`,
+  `viewer-instructions.js`, `pending-actions.js`. See
+  [[runtime-architecture#What has been split out of ws-server.js]].
 - `server/discount-detector.js` and `server/price-detector.js` detect spoken
   discounts and prices.
 - `server/moysklad.js` is the MoySklad API client.
@@ -35,6 +42,9 @@ a replacement for code search, but it gives agents the right entry points.
 - `server/state-store.js`, `server/settings-store.js`, and
   `server/wishlist-store.js` store runtime state, UI settings, and wishlist
   entries.
+- `server/jsonl-store.js` holds the shared read/append machinery for the
+  append-only stores (wishlist, name cache, blocked viewers). See
+  [[runtime-stores#Shared JSONL engine]].
 - `server/wishlist-submissions.js` stores wishlist submission drafts and
   results.
 - `server/blocked-viewers-store.js` stores blocked viewers; their comments are
