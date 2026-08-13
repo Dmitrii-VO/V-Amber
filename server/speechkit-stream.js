@@ -61,9 +61,47 @@ const {
   DefaultEouClassifier_EouSensitivity,
 } = await import("@yandex-cloud/nodejs-sdk/ai-stt-v3/stt");
 
+// Задержка распознавания = сколько прошло с предыдущего события этой реплики.
+// Для финала это ровно «оператор договорил → Yandex прислал текст» (пауза EOU
+// + обработка), для партиала — промежуток с прошлого нового текста.
+//
+// Отсчитываем от партиала с ИЗМЕНИВШИМСЯ текстом: SpeechKit повторяет тот же
+// партиал и во время паузы EOU, так что от повтора хвост финала выходил бы
+// нулевым.
+//
+// Раньше здесь было `Date.now() - lastAudioAt` — время с последнего чанка
+// аудио. Аудио льётся непрерывно кусками по 100 мс, поэтому в логи шли 3–90 мс
+// независимо от того, как быстро отвечал Yandex, и по бандлам логов скорость
+// распознавания было не измерить вообще.
+export function createLatencyTracker() {
+  let lastAt = null;
+  let lastText = null;
+
+  const since = (now) => (lastAt === null ? null : Math.max(0, now - lastAt));
+
+  return {
+    partial(text, now = Date.now()) {
+      const latencyMs = since(now);
+      if (text !== lastText) {
+        lastText = text;
+        lastAt = now;
+      }
+      return latencyMs;
+    },
+    // Реплика закончилась — следующая считается с нуля (null у первого партиала).
+    final(now = Date.now()) {
+      const latencyMs = since(now);
+      lastAt = null;
+      lastText = null;
+      return latencyMs;
+    },
+  };
+}
+
 export class SpeechKitStreamingSession {
   #grpcStream;
   #closed = false;
+  #latency = createLatencyTracker();
 
   constructor(config, handlers, context = {}) {
     this.config = config;
@@ -77,8 +115,6 @@ export class SpeechKitStreamingSession {
 
     this.client = new RecognizerClient(config.endpoint, channelCredentials);
     this.#grpcStream = this.client.recognizeStreaming();
-    this.startedAt = Date.now();
-    this.lastAudioAt = this.startedAt;
 
     logger.info("speechkit", "stream_opened", {
       connectionId: this.context.connectionId,
@@ -111,7 +147,6 @@ export class SpeechKitStreamingSession {
       return;
     }
 
-    this.lastAudioAt = Date.now();
     this.#grpcStream.write({ chunk: { data: chunkBuffer } });
   }
 
@@ -129,16 +164,16 @@ export class SpeechKitStreamingSession {
   }
 
   #handleData(response) {
-    const latencyMs = Math.max(0, Date.now() - this.lastAudioAt);
-
     const partialText = response.partial?.alternatives?.[0]?.text?.trim();
     if (partialText) {
-      this.handlers.onPartial({ text: partialText, latencyMs });
+      this.handlers.onPartial({ text: partialText, latencyMs: this.#latency.partial(partialText) });
     }
 
     const finalAlt = response.final?.alternatives?.[0];
     const finalText = finalAlt?.text?.trim();
     if (finalText) {
+      // Закрываем реплику до гейта: отброшенный финал её всё равно завершает.
+      const latencyMs = this.#latency.final();
       const confidence = typeof finalAlt.confidence === "number" ? finalAlt.confidence : null;
       const minConfidence = this.config.minConfidence || 0;
 

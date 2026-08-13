@@ -88,6 +88,20 @@ See [[live-commerce-flow]].
   `Alternative` type), so the gate is dormant today — the plumbing and lever
   are in place for when the field starts being populated.
 
+- **`latencyMs` теперь мерит задержку распознавания (2026-08-13)** — было
+  `Date.now() - lastAudioAt`, то есть время с последнего чанка аудио. Аудио
+  идёт непрерывно кусками по 100 мс, поэтому поле всегда показывало 3–90 мс
+  независимо от Yandex, и скорость распознавания по логам не измерялась вообще.
+  Стало: время с предыдущего события реплики (`createLatencyTracker` в
+  `speechkit-stream.js`). Для финала это ровно «оператор договорил → пришёл
+  текст» = пауза EOU + обработка; для партиала — промежуток с прошлого нового
+  текста. Первое событие реплики даёт `null` (в UI — «—»), повтор того же
+  партиала точку отсчёта не сдвигает: SpeechKit шлёт его и во время паузы EOU,
+  а от повтора хвост финала вышел бы нулевым. Покрыто
+  `test/speechkit-latency-tracker.test.js`.
+  **Во всех бандлах логов до 0.1.99 значения `latencyMs` смысла не имеют** —
+  сравнивать эфиры по этому полю через границу версии нельзя.
+
 ## Backlog / TODO
 
 Findings from the 2026-05-31 speech-recognition review, deferred for a later
