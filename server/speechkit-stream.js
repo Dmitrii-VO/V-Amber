@@ -88,12 +88,13 @@ export function createLatencyTracker() {
       }
       return latencyMs;
     },
-    // Реплика закончилась — следующая считается с нуля (null у первого партиала).
     final(now = Date.now()) {
-      const latencyMs = since(now);
+      return since(now);
+    },
+    // Реплика заканчивается по EOU: до него SpeechKit может прислать несколько final.
+    endUtterance() {
       lastAt = null;
       lastText = null;
-      return latencyMs;
     },
   };
 }
@@ -172,7 +173,6 @@ export class SpeechKitStreamingSession {
     const finalAlt = response.final?.alternatives?.[0];
     const finalText = finalAlt?.text?.trim();
     if (finalText) {
-      // Закрываем реплику до гейта: отброшенный финал её всё равно завершает.
       const latencyMs = this.#latency.final();
       const confidence = typeof finalAlt.confidence === "number" ? finalAlt.confidence : null;
       const minConfidence = this.config.minConfidence || 0;
@@ -191,6 +191,10 @@ export class SpeechKitStreamingSession {
       } else {
         this.handlers.onFinal({ text: finalText, latencyMs, confidence });
       }
+    }
+
+    if (response.eouUpdate) {
+      this.#latency.endUtterance();
     }
 
     const status = response.statusCode;

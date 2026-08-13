@@ -39,8 +39,18 @@ test("следующая реплика считается с нуля", () => {
   const tracker = createLatencyTracker();
   tracker.partial("первая", 1000);
   tracker.final(1700);
+  tracker.endUtterance();
   assert.equal(tracker.partial("вторая", 5000), null);
   assert.equal(tracker.final(5800), 800);
+});
+
+test("несколько финалов сохраняют отсчёт до EOU", () => {
+  const tracker = createLatencyTracker();
+  tracker.partial("артикул ноль три", 1000);
+  assert.equal(tracker.final(1700), 700);
+  assert.equal(tracker.final(1750), 750);
+  tracker.endUtterance();
+  assert.equal(tracker.partial("следующая", 5000), null);
 });
 
 test("часы назад не уводят latency в минус", () => {

@@ -1415,3 +1415,11 @@ the former W6 silent-overflow rule in [[wishlist]], [[vk-comments]], and
 `test/ws-server.waitlist-close.test.js`, `test/ws-server.chat-source.test.js`,
 `test/wishlist-store.test.js`, `test/state-store.test.js`, and
 `test/analyze-broadcast-logs.test.js`.
+
+## [2026-08-13] reliability | Исправлена метрика задержки SpeechKit
+
+`latencyMs` теперь отсчитывается от предыдущего нового партиала реплики, а не
+от последнего аудиочанка. Граница реплики определяется событием EOU: SpeechKit
+может прислать несколько `final` до одного EOU, и каждый сохраняет корректный
+отсчёт. Логи версии 0.1.99 и старше содержат прежнюю неинформативную метрику.
+Подробности: [[speechkit-integration]].
