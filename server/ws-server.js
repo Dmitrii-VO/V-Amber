@@ -978,8 +978,18 @@ export function attachWsServer(httpServer, config, services = {}) {
     let pendingAmbiguity = null;
 
     function registerAmbiguousDetection(detection, { priceResult = null, discountResult = null } = {}) {
+      // Требование «кандидат подтверждён каталогом» имеет смысл ровно пока
+      // каталог есть. Если он не поднялся (ночь 15.08: девять подряд
+      // ENOTFOUND api.moysklad.ru), подтверждённых нет ни одного — и фильтр
+      // оставлял пустой список принимаемых кодов, а кнопки в панели всё равно
+      // рисовались из lastDetection. Оператор жал и получал «Выбор устарел»:
+      // кнопка есть, работать не может, причина врёт — ровно та болезнь, от
+      // которой лечили баннер броней. Без каталога пропускаем всех, как это
+      // уже делает каталожный гейт в handleConfirmedDetection.
+      const knownCodes = productCodeCache?.getCodes?.() || null;
+      const hasCatalog = Boolean(knownCodes && knownCodes.size > 0);
       const candidates = (detection.candidates || [])
-        .filter((candidate) => candidate?.knownCode === true && candidate.code)
+        .filter((candidate) => candidate?.code && (!hasCatalog || candidate.knownCode === true))
         .slice(0, 3);
       pendingAmbiguity = {
         detectionId: detection.detectionId,
@@ -988,8 +998,12 @@ export function attachWsServer(httpServer, config, services = {}) {
         priceResult,
         discountResult,
       };
+      // Тот же отфильтрованный список уезжает в lastDetection: панель
+      // распознавания рисует кнопки именно из него, и она не должна
+      // предлагать код, который сервер потом не примет.
       lastDetection = {
         ...detection,
+        candidates,
         heldPrice: priceResult?.value ?? null,
       };
       logger.warn("article", "article_ambiguous", {
