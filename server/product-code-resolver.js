@@ -39,6 +39,11 @@ function isNumericCode(code) {
 // а цена ошибки — чужая карточка в публичном эфире.
 const MIN_SIGNIFICANT_DIGITS_FOR_ZERO_TRIM = 3;
 
+// Минимальная длина кода, до которой можно дорезать префикс. Только для
+// размытого восстановления — точное совпадение и нормализация нулей работают
+// на любой длине. Подробности у места использования.
+const MIN_PREFIX_FALLBACK_LENGTH = 4;
+
 function isSafeZeroNormalization(rawCode, knownCode) {
   if (rawCode.length <= knownCode.length) {
     return true;
@@ -93,8 +98,19 @@ export function resolveKnownCodePrefix(code, knownCodesValue, options = {}) {
     return { status: "no_catalog", code: rawCode, candidates: [] };
   }
 
+  // Пол размытого восстановления. Раньше префикс резался до любой длины,
+  // до которой каталог что-нибудь подтвердит: «ноль пять восемь восемь» →
+  // 0588 → 058 (нет) → 05 (есть) — и в эфир уходила «Заколка», а не браслет.
+  // Так же появились 07, 02 и 03 из «ноль три семь один ноль».
+  //
+  // Ограничение стоит именно на ДОГАДКЕ, а не на каталоге: короткие коды —
+  // законные данные (спецификация использует 402, тесты фиксируют 02, 03,
+  // 017), и точное разрешение (resolveKnownCode) их по-прежнему открывает.
+  // Границы длин из каталога тут не помощник: deriveCodeLengthBounds снимает
+  // ведущие нули, поэтому их пол и так равен 1.
   const minLength = Math.max(1, Number(options?.minLength || 1));
-  for (let length = rawCode.length - 1; length >= minLength; length -= 1) {
+  const prefixFloor = Math.max(MIN_PREFIX_FALLBACK_LENGTH, minLength);
+  for (let length = rawCode.length - 1; length >= prefixFloor; length -= 1) {
     const prefix = rawCode.slice(0, length);
     if (knownCodes.has(prefix)) {
       return {
@@ -117,7 +133,14 @@ export function resolveKnownCodePrefix(code, knownCodesValue, options = {}) {
     .filter((knownCode) => {
       if (!isNumericCode(knownCode)) return false;
       const significantKnownCode = stripLeadingZeros(knownCode);
-      return significantKnownCode.length >= minLength
+      // Пол по сырой длине — тот же, что у обрезки префикса, иначе размытое
+      // восстановление просто переезжает в эту ветку. Плюс пол по ЗНАЧИМОЙ
+      // части, тот же порог, что у нормализации нулей: «ноль ноль ноль
+      // пятнадцать» (00015, реальный код 015) значимой частью «15» цеплялось
+      // за «00001» со значимой «1» и открывало посторонний товар. Одна
+      // значимая цифра — это уже не восстановление, а угадывание.
+      return knownCode.length >= prefixFloor
+        && significantKnownCode.length >= Math.max(minLength, MIN_SIGNIFICANT_DIGITS_FOR_ZERO_TRIM)
         && significantCode.startsWith(significantKnownCode)
         // Тот же предохранитель, что в resolveKnownCode: обрывок «002» не должен
         // дотягиваться до постороннего короткого кода «02» (инцидент 26.07).

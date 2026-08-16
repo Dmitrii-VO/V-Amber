@@ -1087,3 +1087,12 @@ a { color: inherit; }
   white-space: nowrap;
   font-size: var(--fs-xs);
 }
+
+/* Кандидат, по которому можно кликнуть: спорный артикул выбирает оператор. */
+.candidate--pick {
+  cursor: pointer;
+  border-color: var(--amber-border);
+  background: var(--amber-bg);
+  color: var(--text);
+}
+.candidate--pick:disabled { opacity: 0.5; cursor: default; }

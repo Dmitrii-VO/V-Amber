@@ -1042,7 +1042,52 @@ function connectSocket() {
   });
 }
 
+// Каталог подтвердил несколько прочтений одной фразы — например «ноль три» и
+// «ноль три сто двадцать четыре». Раньше сервер молча брал короткое и
+// открывал чужой лот; теперь выбор за оператором, и он должен быть виден
+// прямо в панели распознавания, а не только в логе.
+//
+// Кнопка несёт detectionId: сервер примет её, только если это распознавание
+// всё ещё последнее и всё ещё спорное. Старый клик отвергается с warning'ом.
+function renderArticleAmbiguity(payload) {
+  const wrap = elements.detectionCandidatesWrap;
+  if (!wrap) return;
+  elements.detectionInset.hidden = false;
+  elements.detectionCode.textContent = "?";
+  elements.detectionSourceLine.textContent = payload.heldPrice
+    ? `спорный артикул · цена ${payload.heldPrice} ₽ ждёт выбора`
+    : "спорный артикул · выберите код";
+
+  clearChildren(wrap);
+  for (const candidate of payload.candidates || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn candidate candidate--pick";
+    button.textContent = candidate.code;
+    button.title = `Открыть лот ${candidate.code} по фразе «${payload.transcript || ""}»`;
+    button.addEventListener("click", () => {
+      if (!(state.websocket && state.websocket.readyState === 1)) {
+        logEvent("Связь с сервером не установлена — выбор не отправлен", "warn");
+        return;
+      }
+      for (const sibling of wrap.querySelectorAll("button")) sibling.disabled = true;
+      state.websocket.send(JSON.stringify({
+        type: "confirmArticleCandidate",
+        detectionId: payload.detectionId,
+        code: candidate.code,
+      }));
+    });
+    wrap.append(button);
+  }
+  logEvent(`Спорный артикул: ${(payload.candidates || []).map((c) => c.code).join(" / ")} — выберите код`, "warn");
+}
+
 function handleServerMessage(payload) {
+  if (payload.type === "articleAmbiguous") {
+    renderArticleAmbiguity(payload);
+    return;
+  }
+
   if (payload.type === "partial") {
     setTranscriptStatus("partial");
     elements.partialLatency.textContent = formatLatency(payload.latencyMs);

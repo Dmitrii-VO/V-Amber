@@ -418,6 +418,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       closingLotsBySessionId.clear();
       closingReservationAdmission.clear();
       lastDetection = null;
+      // Карантин цены/скидки живёт ровно столько же, сколько распознавание,
+      // которое его породило: после остановки эфира выбирать уже не из чего.
+      pendingAmbiguity = null;
       activeDetectionActionId = null;
       // Токены строк внимания привязаны к комментариям прошлого эфира: после
       // перезапуска поллер перечитает комментарии и выдаст новые.
@@ -961,6 +964,47 @@ export function attachWsServer(httpServer, config, services = {}) {
       });
       emitState();
       return entry;
+    }
+
+    // Неоднозначный артикул: каталог подтвердил несколько прочтений одной
+    // фразы. Спецификация 4.1 пункт 4 требует не открывать лот автоматически,
+    // а показать выбор оператору. Держим ОДНУ такую запись — фраза старше
+    // следующей неоднозначности оператору уже не нужна.
+    //
+    // Цена и скидка из того же транскрипта лежат здесь же, в карантине:
+    // применить их к предыдущему лоту нельзя (фраза про другой товар), а
+    // выбросить жалко — в реальных фразах цена звучит в том же предложении.
+    let pendingAmbiguity = null;
+
+    function registerAmbiguousDetection(detection, { priceResult = null, discountResult = null } = {}) {
+      const candidates = (detection.candidates || [])
+        .filter((candidate) => candidate?.knownCode === true && candidate.code)
+        .slice(0, 3);
+      pendingAmbiguity = {
+        detectionId: detection.detectionId,
+        transcript: detection.transcript,
+        candidateCodes: candidates.map((candidate) => candidate.code),
+        priceResult,
+        discountResult,
+      };
+      logger.warn("article", "article_ambiguous", {
+        connectionId,
+        detectionId: detection.detectionId,
+        transcript: detection.transcript,
+        candidates: pendingAmbiguity.candidateCodes,
+        heldPrice: priceResult?.value ?? null,
+        heldDiscount: discountResult ? `${discountResult.kind}:${discountResult.value}` : null,
+      });
+      sendJson(websocket, {
+        type: "articleAmbiguous",
+        detectionId: detection.detectionId,
+        transcript: detection.transcript,
+        candidates: candidates.map((candidate) => ({
+          code: candidate.code,
+          source: candidate.source || null,
+        })),
+        heldPrice: priceResult?.value ?? null,
+      });
     }
 
     async function applyVoicePrice(priceResult, transcript = null) {
@@ -3552,14 +3596,16 @@ export function attachWsServer(httpServer, config, services = {}) {
                       voicePrice: priceResult,
                     },
                   );
+                } else if (detectionWithId.status === "ambiguous") {
+                  // Ветка стоит ВЫШЕ priceResult намеренно. Раньше цена из
+                  // неоднозначного транскрипта успевала уехать на предыдущий
+                  // лот: «стальные покороче артикул ноль три сто двадцать
+                  // четыре» — код спорный, а цена уже применена к чужому лоту.
+                  // Теперь цена и скидка из этой фразы кладутся в карантин и
+                  // привязываются к тому лоту, который создаст подтверждение.
+                  registerAmbiguousDetection(detectionWithId, { priceResult, discountResult });
                 } else if (priceResult) {
                   await applyVoicePrice(priceResult, text);
-                } else if (detectionWithId.status === "ambiguous") {
-                  logger.warn("article", "article_ambiguous", {
-                    connectionId,
-                    transcript: detectionWithId.transcript,
-                    candidates: detectionWithId.candidates,
-                  });
                 } else if (detectionWithId.status === "awaiting_continuation") {
                   logger.info("article", "article_awaiting_continuation", {
                     connectionId,
@@ -3579,7 +3625,9 @@ export function attachWsServer(httpServer, config, services = {}) {
                   });
                 }
 
-                if (discountResult) {
+                // Скидка из неоднозначного транскрипта тоже в карантине —
+                // она уже лежит в pendingAmbiguity и ждёт подтверждения кода.
+                if (discountResult && detectionWithId.status !== "ambiguous") {
                   // detectDiscount возвращает { kind, value }. Полный
                   // дескриптор нужен, чтобы процентная скидка масштабировалась
                   // от текущего salePrice (фикс «скидка 30 процентов → 30₽»).
@@ -3765,6 +3813,81 @@ export function attachWsServer(httpServer, config, services = {}) {
             });
           } else {
             await applyDiscount(suggestion.descriptor, suggestion.transcript || null, { fromVoice: false });
+          }
+          return;
+        }
+
+        // Оператор выбрал один из спорных кодов. Сообщение привязано к
+        // detectionId, а не к коду: кнопка живёт в UI и может пережить более
+        // свежий транскрипт, другой лот или перезапуск эфира. Переиспользовать
+        // manualCode здесь нельзя — он намеренно не привязан ни к какому
+        // распознаванию, и старый клик открыл бы посторонний лот.
+        if (payload.type === "confirmArticleCandidate") {
+          const detectionId = String(payload.detectionId || "");
+          const code = String(payload.code || "").trim();
+          const held = pendingAmbiguity;
+          const stale = !held
+            || held.detectionId !== detectionId
+            || lastDetection?.detectionId !== detectionId
+            || lastDetection?.status !== "ambiguous"
+            || !held.candidateCodes.includes(code);
+          if (stale) {
+            logger.warn("article", "article_candidate_confirm_stale", {
+              connectionId,
+              detectionId,
+              code,
+              pendingDetectionId: held?.detectionId || null,
+              lastDetectionId: lastDetection?.detectionId || null,
+              lastDetectionStatus: lastDetection?.status || null,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: "Выбор устарел — распознавание уже сменилось, назовите артикул ещё раз",
+            });
+            return;
+          }
+
+          pendingAmbiguity = null;
+          logger.info("article", "article_candidate_confirmed", {
+            connectionId,
+            detectionId,
+            code,
+            candidates: held.candidateCodes,
+            transcript: held.transcript,
+          });
+
+          const previousLotSessionId = activeLot?.lotSessionId || null;
+          const confirmed = {
+            ...lastDetection,
+            status: "confirmed",
+            chosen: { code, source: "operator_choice", fragment: held.transcript, confidence: 1 },
+          };
+          activeDetectionActionId = detectionId;
+          await handleConfirmedDetection(confirmed, code, "operator_choice", {
+            runId: activeRunId,
+            enforceActiveRun: true,
+            expectedDetectionId: detectionId,
+            // Цена из карантина уезжает внутрь создания лота, то есть
+            // привязывается к созданному lotSessionId, а не к глобальному
+            // activeLot: между вызовами есть await'ы на МойСклад и VK.
+            voicePrice: held.priceResult,
+          });
+
+          const createdLot = activeLot?.lotSessionId !== previousLotSessionId ? activeLot : null;
+          if (held.discountResult) {
+            if (createdLot && createdLot.code === code) {
+              await applyDiscount(held.discountResult, held.transcript).catch((error) => {
+                logger.error("discount", "apply_failed", { connectionId, text: held.transcript, error });
+              });
+            } else {
+              logger.warn("discount", "held_discount_discarded", {
+                connectionId, detectionId, code, reason: "lot_not_created",
+              });
+              sendJson(websocket, {
+                type: "warning",
+                message: `Скидка из фразы про ${code} отброшена — лот не открылся`,
+              });
+            }
           }
           return;
         }
