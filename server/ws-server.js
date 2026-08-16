@@ -1102,8 +1102,27 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       emitState();
+      await replayPendingReservations(lot);
     }
 
+    // Брони, которые ждали цену (см. reservation_held_no_price). Проигрываем
+    // строго ПО ОДНОЙ: параллельный запуск сломал бы гейт склада и инвариант
+    // «один primary + очередь ожидания».
+    async function replayPendingReservations(lot) {
+      const state = ensureReservationState(lot);
+      const held = (state.events || []).filter((event) => event.status === "pending_reservation");
+      if (held.length === 0) return;
+      logger.info("vk", "reservations_replayed_after_price", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        code: lot.code,
+        count: held.length,
+      });
+      for (const event of held) {
+        if (openLotsBySessionId.get(lot.lotSessionId) !== lot) return;
+        await runReservationProcessing(lot, event);
+      }
+    }
 
     function getRemainingAvailableStock(lot, state) {
       const availableStock = lot?.product?.availableStock;
@@ -1365,6 +1384,39 @@ export function attachWsServer(httpServer, config, services = {}) {
         logReservationFinalized(lot, event, { reason: "product_missing" });
         emitState();
         await notifyReservationStatus(lot, event);
+        return;
+      }
+
+      // Позиция с ценой 0 — это не бронь, а потерянные деньги: в бандле
+      // 2026-08-15 таких заказов 62 из 962. Раньше бронь уходила в МойСклад
+      // независимо от цены, в расчёте что цена прозвучит через пару секунд;
+      // если она не звучала, покупатель оставался в заказе с нулём.
+      //
+      // Держим бронь в pending_reservation и проигрываем её, когда цена
+      // появится (commitLotPrice → replayPendingReservations). Гейт склада при
+      // этом не занимаем: все брони лота ждут одинаково и проигрываются в
+      // порядке поступления. Если цена так и не прозвучит, закрытие лота
+      // уводит такие брони в хотелки через flushOrphanWaitlist — не теряются.
+      const effectivePrice = Math.max(
+        0,
+        Number(getLotEffectivePrice(lot) || 0) - Number(lot.discountAmount || 0),
+      );
+      if (!(effectivePrice > 0)) {
+        event.status = "pending_reservation";
+        logger.warn("vk", "reservation_held_no_price", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          salePrice: Number(getLotEffectivePrice(lot) || 0),
+          discountAmount: Number(lot.discountAmount || 0),
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Бронь ${lot.code} от ${event.viewerName || event.viewerId} ждёт цену — назовите или введите цену лота`,
+        });
+        emitState();
         return;
       }
 
