@@ -202,6 +202,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     let session = null;
     let activeLot = null;
     const openLotsBySessionId = new Map();
+    const priceCommitQueues = new Map();
     let lastDetection = null;
     const voicePipeline = createVoicePipeline({
       connectionId,
@@ -973,56 +974,69 @@ export function attachWsServer(httpServer, config, services = {}) {
     // только скидка. Поэтому правка цены после первых броней оставляла позиции
     // в заказах по старой цене, и оператор правил заказы руками.
     async function commitLotPrice(lot, { value, source, trigger = null, transcript = null } = {}) {
-      lot.product.voicePrice = value;
-      lot.product.priceSource = source;
-      // Ручная правка — явное намерение оператора, поэтому перекрываем и
-      // salePrice: иначе склад-гейт и суммы броней продолжают считаться по
-      // старой (неверной) цене из МойСклада.
-      if (source === "manual") {
-        lot.product.salePrice = value;
-      }
+      const queueKey = lot.lotSessionId;
+      const previous = priceCommitQueues.get(queueKey) || Promise.resolve();
+      const current = previous.catch(() => {}).then(async () => {
+        lot.product.voicePrice = value;
+        lot.product.priceSource = source;
+        // Ручная правка — явное намерение оператора, поэтому перекрываем и
+        // salePrice: иначе склад-гейт и суммы броней продолжают считаться по
+        // старой (неверной) цене из МойСклада.
+        if (source === "manual") {
+          lot.product.salePrice = value;
+        }
 
-      recomputeLotDiscountAmount(lot);
+        recomputeLotDiscountAmount(lot);
 
-      logger.info("price", source === "manual" ? "manual_price_applied" : "voice_price_applied", {
-        connectionId,
-        value,
-        voicePrice: value,
-        source,
-        trigger,
-        code: lot.code,
-        lotSessionId: lot.lotSessionId,
-        discountAmount: Number(lot.discountAmount || 0),
-        transcript,
-      });
-      sessionLog.logPriceChanged({
-        code: lot.code,
-        lotSessionId: lot.lotSessionId,
-        source,
-        value,
-        trigger,
-        transcript,
-      });
-
-      await backfillLotPositionPricing(lot, { reason: "price_changed" });
-
-      if (lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
-        await vk.publishPriceUpdate(lot).catch((error) => {
-          handleVkPublishError(lot, error);
-          logger.warn("vk", "price_update_publish_failed", {
-            connectionId,
-            lotSessionId: lot?.lotSessionId,
-            source,
-            error,
-          });
-          sendJson(websocket, {
-            type: "warning",
-            message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${lot?.code || ""}`.trim(),
-          });
+        logger.info("price", source === "manual" ? "manual_price_applied" : "voice_price_applied", {
+          connectionId,
+          value,
+          voicePrice: value,
+          source,
+          trigger,
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          discountAmount: Number(lot.discountAmount || 0),
+          transcript,
         });
-      }
+        sessionLog.logPriceChanged({
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          source,
+          value,
+          trigger,
+          transcript,
+        });
 
-      emitState();
+        await backfillLotPositionPricing(lot, { reason: "price_changed" });
+
+        if (lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+          await vk.publishPriceUpdate(lot).catch((error) => {
+            handleVkPublishError(lot, error);
+            logger.warn("vk", "price_update_publish_failed", {
+              connectionId,
+              lotSessionId: lot?.lotSessionId,
+              source,
+              error,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${lot?.code || ""}`.trim(),
+            });
+          });
+        }
+
+        emitState();
+      });
+      priceCommitQueues.set(queueKey, current);
+
+      try {
+        return await current;
+      } finally {
+        if (priceCommitQueues.get(queueKey) === current) {
+          priceCommitQueues.delete(queueKey);
+        }
+      }
     }
 
 
