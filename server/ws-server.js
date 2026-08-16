@@ -41,6 +41,7 @@ import { createPendingActions } from "./domain/pending-actions.js";
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
 let nextDetectionId = 1;
+let nextVoiceSuggestionId = 1;
 
 // Сброс модульных счётчиков id между тестами: иначе порядок прогона течёт
 // в lotSessionId/detectionId и снапшоты становятся хрупкими. Прод-код это
@@ -202,6 +203,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     let session = null;
     let activeLot = null;
     const openLotsBySessionId = new Map();
+    const priceCommitQueues = new Map();
     let lastDetection = null;
     const voicePipeline = createVoicePipeline({
       connectionId,
@@ -417,6 +419,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       closingLotsBySessionId.clear();
       closingReservationAdmission.clear();
       lastDetection = null;
+      // Карантин цены/скидки живёт ровно столько же, сколько распознавание,
+      // которое его породило: после остановки эфира выбирать уже не из чего.
+      pendingAmbiguity = null;
       activeDetectionActionId = null;
       // Токены строк внимания привязаны к комментариям прошлого эфира: после
       // перезапуска поллер перечитает комментарии и выдаст новые.
@@ -902,6 +907,125 @@ export function attachWsServer(httpServer, config, services = {}) {
       return pendingAttentionReservations.peek(actionId);
     }
 
+    // Окно голосовой правки. Любой ценовой триггер с числом в пределах 8
+    // токенов переписывал цену активного лота без всякой проверки, что фраза
+    // вообще про товар: 2026-08-15 лот 03048 за девять минут получил цены 28 ₽
+    // («жара стоит сегодня двадцать восемь»), 1200 ₽ («крем тысяча двести»),
+    // 644 ₽ и 650 ₽ (цены Озона) — и каждая уехала комментарием в VK.
+    //
+    // Правило: голос меняет цену только пока окно лота открыто. Дальше он
+    // предлагает, а решает оператор. 90 секунд покрывают 99 % реальных цен
+    // (медиана 6 с, p90 22 с) и 95 % скидок; цена и скидка держат
+    // ОТДЕЛЬНЫЕ гейты, потому что в 52 из 58 лотов скидка называется ПОСЛЕ
+    // цены, и общий флаг отправил бы их все в подсказки.
+    //
+    // Сброс — только по новому lotSessionId. Повторное называние того же
+    // артикула окно не открывает: 302 переобнаружения в бандле против 4
+    // полезных цен, то есть это была бы лазейка, а не удобство.
+    const VOICE_CHANGE_WINDOW_MS = Number(config?.voiceChangeWindowMs) > 0
+      ? Number(config.voiceChangeWindowMs)
+      : 90_000;
+    const MAX_VOICE_SUGGESTIONS = 5;
+
+    function isVoiceGateOpen(lot, kind) {
+      if (!lot) return false;
+      // Строго !== false: лот, восстановленный из снимка без этих полей,
+      // считается закрытым в обе стороны. Молча пустить голос в цену
+      // после рестарта — ровно тот случай, ради которого окно и вводится.
+      const closed = kind === "price" ? lot.voicePriceAutoClosed : lot.voiceDiscountAutoClosed;
+      if (closed !== false) return false;
+      const openedAt = Number(lot.voiceWindowOpenedAt);
+      if (!Number.isFinite(openedAt)) return false;
+      return Date.now() - openedAt <= VOICE_CHANGE_WINDOW_MS;
+    }
+
+    // Подсказка живёт НА ЛОТЕ, а не в отдельной коллекции: так она физически
+    // не может примениться к другому лоту, уезжает вместе с ним в снимок
+    // состояния и умирает вместе с ним при закрытии.
+    function addVoiceSuggestion(lot, suggestion) {
+      if (!lot) return;
+      if (!Array.isArray(lot.voiceSuggestions)) lot.voiceSuggestions = [];
+      const entry = {
+        id: `sg-${lot.lotSessionId}-${nextVoiceSuggestionId++}`,
+        lotSessionId: lot.lotSessionId,
+        createdAt: new Date().toISOString(),
+        ...suggestion,
+      };
+      lot.voiceSuggestions.push(entry);
+      if (lot.voiceSuggestions.length > MAX_VOICE_SUGGESTIONS) {
+        lot.voiceSuggestions.splice(0, lot.voiceSuggestions.length - MAX_VOICE_SUGGESTIONS);
+      }
+      logger.info("price", "voice_change_suggested", {
+        connectionId,
+        kind: entry.kind,
+        value: entry.value,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        transcript: entry.transcript || null,
+      });
+      emitState();
+      return entry;
+    }
+
+    // Неоднозначный артикул: каталог подтвердил несколько прочтений одной
+    // фразы. Спецификация 4.1 пункт 4 требует не открывать лот автоматически,
+    // а показать выбор оператору. Держим ОДНУ такую запись — фраза старше
+    // следующей неоднозначности оператору уже не нужна.
+    //
+    // Цена и скидка из того же транскрипта лежат здесь же, в карантине:
+    // применить их к предыдущему лоту нельзя (фраза про другой товар), а
+    // выбросить жалко — в реальных фразах цена звучит в том же предложении.
+    let pendingAmbiguity = null;
+
+    function registerAmbiguousDetection(detection, { priceResult = null, discountResult = null } = {}) {
+      // Требование «кандидат подтверждён каталогом» имеет смысл ровно пока
+      // каталог есть. Если он не поднялся (ночь 15.08: девять подряд
+      // ENOTFOUND api.moysklad.ru), подтверждённых нет ни одного — и фильтр
+      // оставлял пустой список принимаемых кодов, а кнопки в панели всё равно
+      // рисовались из lastDetection. Оператор жал и получал «Выбор устарел»:
+      // кнопка есть, работать не может, причина врёт — ровно та болезнь, от
+      // которой лечили баннер броней. Без каталога пропускаем всех, как это
+      // уже делает каталожный гейт в handleConfirmedDetection.
+      const knownCodes = productCodeCache?.getCodes?.() || null;
+      const hasCatalog = Boolean(knownCodes && knownCodes.size > 0);
+      const candidates = (detection.candidates || [])
+        .filter((candidate) => candidate?.code && (!hasCatalog || candidate.knownCode === true))
+        .slice(0, 3);
+      pendingAmbiguity = {
+        detectionId: detection.detectionId,
+        transcript: detection.transcript,
+        candidateCodes: candidates.map((candidate) => candidate.code),
+        priceResult,
+        discountResult,
+      };
+      // Тот же отфильтрованный список уезжает в lastDetection: панель
+      // распознавания рисует кнопки именно из него, и она не должна
+      // предлагать код, который сервер потом не примет.
+      lastDetection = {
+        ...detection,
+        candidates,
+        heldPrice: priceResult?.value ?? null,
+      };
+      logger.warn("article", "article_ambiguous", {
+        connectionId,
+        detectionId: detection.detectionId,
+        transcript: detection.transcript,
+        candidates: pendingAmbiguity.candidateCodes,
+        heldPrice: priceResult?.value ?? null,
+        heldDiscount: discountResult ? `${discountResult.kind}:${discountResult.value}` : null,
+      });
+      sendJson(websocket, {
+        type: "articleAmbiguous",
+        detectionId: detection.detectionId,
+        transcript: detection.transcript,
+        candidates: candidates.map((candidate) => ({
+          code: candidate.code,
+          source: candidate.source || null,
+        })),
+        heldPrice: priceResult?.value ?? null,
+      });
+    }
+
     async function applyVoicePrice(priceResult, transcript = null) {
       if (!priceResult?.value) {
         return false;
@@ -933,45 +1057,154 @@ export function attachWsServer(httpServer, config, services = {}) {
         return false;
       }
 
-      activeLot.product.voicePrice = priceResult.value;
-      activeLot.product.priceSource = "voice";
-
-      logger.info("price", "voice_price_applied", {
-        connectionId,
-        voicePrice: priceResult.value,
-        trigger: priceResult.trigger || null,
-        code: activeLot.code,
-        lotSessionId: activeLot.lotSessionId,
-        transcript,
-      });
-      sessionLog.logPriceChanged({
-        code: activeLot.code,
-        lotSessionId: activeLot.lotSessionId,
-        source: "voice",
-        value: priceResult.value,
-        trigger: priceResult.trigger || null,
-        transcript,
-      });
-
-      if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
-        await vk.publishPriceUpdate(activeLot).catch((error) => {
-          handleVkPublishError(activeLot, error);
-          logger.warn("vk", "price_update_publish_failed", {
-            connectionId,
-            lotSessionId: activeLot?.lotSessionId,
-            error,
-          });
-          sendJson(websocket, {
-            type: "warning",
-            message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${activeLot?.code || ""}`.trim(),
-          });
+      if (!isVoiceGateOpen(activeLot, "price")) {
+        addVoiceSuggestion(activeLot, {
+          kind: "price",
+          value: priceResult.value,
+          trigger: priceResult.trigger || null,
+          transcript,
         });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Услышал цену ${priceResult.value} ₽ для лота ${activeLot.code}, но цена уже задана — предложил вместо замены`,
+        });
+        return false;
       }
 
-      emitState();
+      await commitLotPrice(activeLot, {
+        value: priceResult.value,
+        source: "voice",
+        trigger: priceResult.trigger || null,
+        transcript,
+      });
       return true;
     }
 
+    // Скидка хранится абсолютной суммой (discountAmount), потому что её читают
+    // ~12 мест — от построения позиции в МойСкладе до карточки VK. Дескриптор
+    // хранит ИСХОДНОЕ намерение оператора рядом с суммой, и после смены цены
+    // процентная скидка пересчитывается вместо того, чтобы остаться рублями от
+    // старой цены (эфир 2026-08-15, лот 03048: цена вернулась на 8800 ₽, а лот
+    // остался 8768 ₽ — 32 ₽ это 5 % от ложных 650 ₽).
+    //
+    // Лот без дескриптора трактуется как абсолютная скидка и не трогается:
+    // это и миграция сохранённого состояния, и поведение по умолчанию.
+    function recomputeLotDiscountAmount(lot) {
+      if (lot?.discountDescriptor?.kind !== "percent") {
+        return;
+      }
+      const percent = Number(lot.discountDescriptor.value);
+      // getLotEffectivePrice — цена ДО скидки (её же берёт applyDiscount).
+      const salePrice = Number(getLotEffectivePrice(lot) || 0);
+      if (!Number.isFinite(percent) || percent <= 0 || !Number.isFinite(salePrice) || salePrice <= 0) {
+        return;
+      }
+      const amount = Math.floor((salePrice * percent) / 100);
+      lot.discountAmount = amount > 0 && amount < salePrice ? amount : 0;
+    }
+
+    // Единая точка изменения цены лота: состояние → пересчёт скидки →
+    // переоценка уже созданных позиций в МойСкладе → карточка VK → лог.
+    //
+    // Раньше путей было два — applyVoicePrice (голос) и setLotPrice (клик
+    // оператора), — и backfillLotPositionPricing не звал ни один: его звала
+    // только скидка. Поэтому правка цены после первых броней оставляла позиции
+    // в заказах по старой цене, и оператор правил заказы руками.
+    async function commitLotPrice(lot, {
+      value,
+      source,
+      trigger = null,
+      transcript = null,
+      publishVkUpdate = true,
+    } = {}) {
+      const queueKey = lot.lotSessionId;
+      const previous = priceCommitQueues.get(queueKey) || Promise.resolve();
+      const current = previous.catch(() => {}).then(async () => {
+        lot.product.voicePrice = value;
+        lot.product.priceSource = source;
+        // Ручная правка — явное намерение оператора, поэтому перекрываем и
+        // salePrice: иначе склад-гейт и суммы броней продолжают считаться по
+        // старой (неверной) цене из МойСклада.
+        if (source === "manual") {
+          lot.product.salePrice = value;
+        }
+        // Цена у лота теперь есть — голос дальше только предлагает. Ручная
+        // правка закрывает гейт по той же причине: перебивать голосом то, что
+        // оператор ввёл руками, нельзя.
+        lot.voicePriceAutoClosed = true;
+
+        recomputeLotDiscountAmount(lot);
+
+        logger.info("price", source === "manual" ? "manual_price_applied" : "voice_price_applied", {
+          connectionId,
+          value,
+          voicePrice: value,
+          source,
+          trigger,
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          discountAmount: Number(lot.discountAmount || 0),
+          transcript,
+        });
+        sessionLog.logPriceChanged({
+          code: lot.code,
+          lotSessionId: lot.lotSessionId,
+          source,
+          value,
+          trigger,
+          transcript,
+        });
+
+        await backfillLotPositionPricing(lot, { reason: "price_changed" });
+
+        if (publishVkUpdate && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+          await vk.publishPriceUpdate(lot).catch((error) => {
+            handleVkPublishError(lot, error);
+            logger.warn("vk", "price_update_publish_failed", {
+              connectionId,
+              lotSessionId: lot?.lotSessionId,
+              source,
+              error,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${lot?.code || ""}`.trim(),
+            });
+          });
+        }
+
+        emitState();
+        await replayPendingReservations(lot);
+      });
+      priceCommitQueues.set(queueKey, current);
+
+      try {
+        return await current;
+      } finally {
+        if (priceCommitQueues.get(queueKey) === current) {
+          priceCommitQueues.delete(queueKey);
+        }
+      }
+    }
+
+    // Брони, которые ждали цену (см. reservation_held_no_price). Проигрываем
+    // строго ПО ОДНОЙ: параллельный запуск сломал бы гейт склада и инвариант
+    // «один primary + очередь ожидания».
+    async function replayPendingReservations(lot) {
+      const state = ensureReservationState(lot);
+      const held = (state.events || []).filter((event) => event.status === "pending_reservation");
+      if (held.length === 0) return;
+      logger.info("vk", "reservations_replayed_after_price", {
+        connectionId,
+        lotSessionId: lot.lotSessionId,
+        code: lot.code,
+        count: held.length,
+      });
+      for (const event of held) {
+        if (openLotsBySessionId.get(lot.lotSessionId) !== lot) return;
+        await runReservationProcessing(lot, event);
+      }
+    }
 
     function getRemainingAvailableStock(lot, state) {
       const availableStock = lot?.product?.availableStock;
@@ -1233,6 +1466,39 @@ export function attachWsServer(httpServer, config, services = {}) {
         logReservationFinalized(lot, event, { reason: "product_missing" });
         emitState();
         await notifyReservationStatus(lot, event);
+        return;
+      }
+
+      // Позиция с ценой 0 — это не бронь, а потерянные деньги: в бандле
+      // 2026-08-15 таких заказов 62 из 962. Раньше бронь уходила в МойСклад
+      // независимо от цены, в расчёте что цена прозвучит через пару секунд;
+      // если она не звучала, покупатель оставался в заказе с нулём.
+      //
+      // Держим бронь в pending_reservation и проигрываем её, когда цена
+      // появится (commitLotPrice → replayPendingReservations). Гейт склада при
+      // этом не занимаем: все брони лота ждут одинаково и проигрываются в
+      // порядке поступления. Если цена так и не прозвучит, закрытие лота
+      // уводит такие брони в хотелки через flushOrphanWaitlist — не теряются.
+      const effectivePrice = Math.max(
+        0,
+        Number(getLotEffectivePrice(lot) || 0) - Number(lot.discountAmount || 0),
+      );
+      if (!(effectivePrice > 0)) {
+        event.status = "pending_reservation";
+        logger.warn("vk", "reservation_held_no_price", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          commentId: event.commentId,
+          viewerId: event.viewerId,
+          salePrice: Number(getLotEffectivePrice(lot) || 0),
+          discountAmount: Number(lot.discountAmount || 0),
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Бронь ${lot.code} от ${event.viewerName || event.viewerId} ждёт цену — назовите или введите цену лота`,
+        });
+        emitState();
         return;
       }
 
@@ -1734,6 +2000,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       nameCacheStore,
       getOpenLots: () => getOpenLots(),
       registerPendingReservation: (payload) => registerPendingAttentionReservation(payload),
+      pendingReservationTtlMs: pendingAttentionReservations.ttlMs,
       notify: (payload) => sendJson(websocket, payload),
     });
 
@@ -2518,7 +2785,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             positionId: event.customerOrder.positionId,
             salePrice,
             discountAmount,
-            source: "discount_backfill",
+            source: reason === "price_changed" ? "price_backfill" : "discount_backfill",
           });
           if (result?.skipped === true && result?.safeMode === true) {
             return { updated, failed, skipped: targets.length - updated - failed };
@@ -2560,15 +2827,16 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
       }
       if (failed > 0) {
+        const what = reason === "price_changed" ? "Цена изменена" : "Скидка применена";
         sendJson(websocket, {
           type: "warning",
-          message: `Скидка применена, но ${failed} уже созданн${failed === 1 ? "ая бронь" : "ых броней"} по лоту ${lot.code} не пересчитал${failed === 1 ? "ась" : "ись"} — проверьте цены в МойСкладе`,
+          message: `${what}, но ${failed} уже созданн${failed === 1 ? "ая бронь" : "ых броней"} по лоту ${lot.code} не пересчитал${failed === 1 ? "ась" : "ись"} — проверьте цены в МойСкладе`,
         });
       }
       return { updated, failed, skipped: 0 };
     }
 
-    async function applyDiscount(input, transcript = null) {
+    async function applyDiscount(input, transcript = null, { fromVoice = true } = {}) {
       // Раньше здесь требовался vkPublication.commentId — это блокировало
       // применение скидки в safe mode и при любых сбоях публикации в VK
       // (например, видео недоступно). Скидку считаем по внутреннему лоту
@@ -2633,8 +2901,32 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      // Скидка держит собственный гейт: в 52 из 58 лотов бандла она названа
+      // ПОСЛЕ цены (медиана +6 с), поэтому закрытие ценового гейта её
+      // трогать не должно. Общие объявления вида «все браслетики по тридцать
+      // процентов» с длинным хвостом до 18 минут окно уже не пускает.
+      if (fromVoice && !isVoiceGateOpen(activeLot, "discount")) {
+        addVoiceSuggestion(activeLot, {
+          kind: "discount",
+          value: amount,
+          descriptor,
+          transcript,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Услышал скидку для лота ${activeLot.code}, но окно правки закрыто — предложил вместо применения`,
+        });
+        return;
+      }
+
       const originalPrice = salePrice;
+      activeLot.voiceDiscountAutoClosed = true;
       activeLot.discountAmount = amount;
+      // Дескриптор рядом с суммой, а не вместо неё: сумма остаётся
+      // производной и пересчитывается в commitLotPrice при смене цены.
+      activeLot.discountDescriptor = descriptor?.kind === "percent"
+        ? { kind: "percent", value: Number(descriptor.value) }
+        : { kind: "absolute", value: amount };
       const newPrice = originalPrice - amount;
 
       logger.info("discount", "discount_applied", {
@@ -2719,6 +3011,13 @@ export function attachWsServer(httpServer, config, services = {}) {
           hasPhoto: Boolean(productCard.photo),
         } : null,
         discountAmount: 0,
+        // Окно голосовой правки открывается вместе с лотом и сбрасывается
+        // только новым lotSessionId. Если лот открылся фразой, в которой уже
+        // была цена, ценовой гейт закрыт сразу — эта цена и есть первая.
+        voiceWindowOpenedAt: Date.now(),
+        voicePriceAutoClosed: Boolean(productCard?.voicePrice),
+        voiceDiscountAutoClosed: false,
+        voiceSuggestions: [],
         vkPublication: null,
         reservations: {
           lastCommentId: 0,
@@ -2823,14 +3122,6 @@ export function attachWsServer(httpServer, config, services = {}) {
       // объекте и выстрелим price-update в VK по уже закрытому лоту.
       if (activeLot !== lot || !isDetectionStillActive(gate)) return;
 
-      let priceChanged = false;
-      if (voicePrice?.value && lot.product
-          && lot.product.voicePrice !== voicePrice.value) {
-        lot.product.voicePrice = voicePrice.value;
-        lot.product.priceSource = "voice";
-        priceChanged = true;
-      }
-
       lot.transcript = detection.transcript;
       lastDetection = {
         ...detection,
@@ -2838,6 +3129,31 @@ export function attachWsServer(httpServer, config, services = {}) {
         chosen: { code: lot.code, source, fragment: detection.transcript, confidence: 1 },
         redetection: true,
       };
+
+      const acceptedReservationCount = lot.reservations?.events?.length || 0;
+      let priceChanged = false;
+      if (voicePrice?.value && lot.product
+          && lot.product.voicePrice !== voicePrice.value) {
+        // Переобнаружение того же кода окно НЕ открывает — иначе «назови
+        // артикул ещё раз» становится способом перебить цену чем угодно.
+        if (isVoiceGateOpen(lot, "price")) {
+          await commitLotPrice(lot, {
+            value: voicePrice.value,
+            source: "voice",
+            trigger: voicePrice.trigger || null,
+            transcript: detection.transcript,
+            publishVkUpdate: acceptedReservationCount === 0,
+          });
+          priceChanged = true;
+        } else {
+          addVoiceSuggestion(lot, {
+            kind: "price",
+            value: voicePrice.value,
+            trigger: voicePrice.trigger || null,
+            transcript: detection.transcript,
+          });
+        }
+      }
 
       logger.info("article", "article_redetection_same_code", {
         connectionId,
@@ -2850,40 +3166,20 @@ export function attachWsServer(httpServer, config, services = {}) {
         reservationsKept: lot.reservations?.events?.length || 0,
       });
 
-      const acceptedReservationCount = lot.reservations?.events?.length || 0;
-      if (priceChanged && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+      if (priceChanged && acceptedReservationCount > 0
+          && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
         // Если в лоте уже есть принятые брони — не рискуем зачумить лот
         // ошибкой VK (например, vkErrorCode=801 «комментарии закрыты»
         // через handleVkPublishError → markLotPoisoned). Цена в локальном
         // состоянии уже обновлена, операторский UI её увидит; для
         // покупателей карточка останется со старой ценой — это меньшее
-        // зло, чем потеря sticky-лота со всеми броньями. Если броней
-        // ещё нет, риск приемлем: терять нечего.
-        if (acceptedReservationCount > 0) {
-          logger.info("vk", "redetection_price_update_skipped_due_to_reservations", {
-            connectionId,
-            lotSessionId: lot.lotSessionId,
-            code: lot.code,
-            acceptedReservationCount,
-          });
-        } else {
-          // Повторная проверка: между предыдущей проверкой и публикацией
-          // ничего не было await'нуто, но это самая дорогая операция —
-          // выстрелить нерелевантным update'ом в VK хуже, чем пропустить
-          // обновление цены.
-          if (activeLot !== lot || !isDetectionStillActive(gate)) {
-            emitState();
-            return;
-          }
-          try {
-            await vk.publishPriceUpdate(lot);
-          } catch (error) {
-            handleVkPublishError(lot, error);
-            logger.warn("vk", "redetection_price_update_failed", {
-              connectionId, lotSessionId: lot.lotSessionId, error,
-            });
-          }
-        }
+        // зло, чем потеря sticky-лота со всеми броньями.
+        logger.info("vk", "redetection_price_update_skipped_due_to_reservations", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          acceptedReservationCount,
+        });
       }
 
       voicePipeline.resetTriggerWindow("redetection_merged");
@@ -3324,14 +3620,16 @@ export function attachWsServer(httpServer, config, services = {}) {
                       voicePrice: priceResult,
                     },
                   );
+                } else if (detectionWithId.status === "ambiguous") {
+                  // Ветка стоит ВЫШЕ priceResult намеренно. Раньше цена из
+                  // неоднозначного транскрипта успевала уехать на предыдущий
+                  // лот: «стальные покороче артикул ноль три сто двадцать
+                  // четыре» — код спорный, а цена уже применена к чужому лоту.
+                  // Теперь цена и скидка из этой фразы кладутся в карантин и
+                  // привязываются к тому лоту, который создаст подтверждение.
+                  registerAmbiguousDetection(detectionWithId, { priceResult, discountResult });
                 } else if (priceResult) {
                   await applyVoicePrice(priceResult, text);
-                } else if (detectionWithId.status === "ambiguous") {
-                  logger.warn("article", "article_ambiguous", {
-                    connectionId,
-                    transcript: detectionWithId.transcript,
-                    candidates: detectionWithId.candidates,
-                  });
                 } else if (detectionWithId.status === "awaiting_continuation") {
                   logger.info("article", "article_awaiting_continuation", {
                     connectionId,
@@ -3351,7 +3649,9 @@ export function attachWsServer(httpServer, config, services = {}) {
                   });
                 }
 
-                if (discountResult) {
+                // Скидка из неоднозначного транскрипта тоже в карантине —
+                // она уже лежит в pendingAmbiguity и ждёт подтверждения кода.
+                if (discountResult && detectionWithId.status !== "ambiguous") {
                   // detectDiscount возвращает { kind, value }. Полный
                   // дескриптор нужен, чтобы процентная скидка масштабировалась
                   // от текущего salePrice (фикс «скидка 30 процентов → 30₽»).
@@ -3499,35 +3799,124 @@ export function attachWsServer(httpServer, config, services = {}) {
             sendJson(websocket, { type: "warning", message: "Не удалось применить цену: лот неактивен или значение неверно" });
             return;
           }
-          activeLot.product.voicePrice = value;
-          activeLot.product.priceSource = "manual";
-          // For manual override we treat the value as the operator-confirmed
-          // sale price too — otherwise stock guard and reservation totals
-          // still use the (wrong) salePrice from MoySklad.
-          activeLot.product.salePrice = value;
-          logger.info("price", "manual_price_applied", {
-            connectionId,
-            value,
-            code: activeLot.code,
-            lotSessionId: activeLot.lotSessionId,
-          });
-          sessionLog.logPriceChanged({
-            code: activeLot.code,
-            lotSessionId: activeLot.lotSessionId,
-            source: "manual",
-            value,
-          });
-          if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
-            await vk.publishPriceUpdate(activeLot).catch((error) => {
-              handleVkPublishError(activeLot, error);
-              logger.warn("vk", "manual_price_publish_failed", {
-                connectionId,
-                lotSessionId: activeLot?.lotSessionId,
-                error,
-              });
-            });
+          await commitLotPrice(activeLot, { value, source: "manual" });
+          return;
+        }
+
+        // Подсказка из закрытого окна: оператор либо принимает её одним
+        // кликом, либо отклоняет. Ищем строго в текущем активном лоте —
+        // подсказка от прошлого лота физически недостижима, потому что
+        // хранится на нём самом.
+        if (payload.type === "applyVoiceSuggestion" || payload.type === "dismissVoiceSuggestion") {
+          const suggestionId = String(payload.suggestionId || "");
+          const list = Array.isArray(activeLot?.voiceSuggestions) ? activeLot.voiceSuggestions : [];
+          const index = list.findIndex((item) => item.id === suggestionId);
+          if (index === -1) {
+            sendJson(websocket, { type: "warning", message: "Подсказка устарела — лот уже закрыт или изменён" });
+            return;
           }
-          emitState();
+          const [suggestion] = list.splice(index, 1);
+          const dismissed = payload.type === "dismissVoiceSuggestion";
+          logger.info("price", dismissed ? "voice_change_suggestion_dismissed" : "voice_change_suggestion_applied", {
+            connectionId,
+            kind: suggestion.kind,
+            value: suggestion.value,
+            code: activeLot.code,
+            lotSessionId: activeLot.lotSessionId,
+            transcript: suggestion.transcript || null,
+          });
+          if (dismissed) {
+            emitState();
+            return;
+          }
+          if (suggestion.kind === "price") {
+            await commitLotPrice(activeLot, {
+              value: suggestion.value,
+              source: "manual",
+              transcript: suggestion.transcript || null,
+            });
+          } else {
+            await applyDiscount(suggestion.descriptor, suggestion.transcript || null, { fromVoice: false });
+          }
+          return;
+        }
+
+        // Оператор выбрал один из спорных кодов. Сообщение привязано к
+        // detectionId, а не к коду: кнопка живёт в UI и может пережить более
+        // свежий транскрипт, другой лот или перезапуск эфира. Переиспользовать
+        // manualCode здесь нельзя — он намеренно не привязан ни к какому
+        // распознаванию, и старый клик открыл бы посторонний лот.
+        if (payload.type === "confirmArticleCandidate") {
+          const detectionId = String(payload.detectionId || "");
+          const code = String(payload.code || "").trim();
+          const held = pendingAmbiguity;
+          const stale = !held
+            || held.detectionId !== detectionId
+            || lastDetection?.detectionId !== detectionId
+            || lastDetection?.status !== "ambiguous"
+            || !held.candidateCodes.includes(code);
+          if (stale) {
+            logger.warn("article", "article_candidate_confirm_stale", {
+              connectionId,
+              detectionId,
+              code,
+              pendingDetectionId: held?.detectionId || null,
+              lastDetectionId: lastDetection?.detectionId || null,
+              lastDetectionStatus: lastDetection?.status || null,
+            });
+            sendJson(websocket, {
+              type: "warning",
+              message: "Выбор устарел — распознавание уже сменилось, назовите артикул ещё раз",
+            });
+            return;
+          }
+
+          pendingAmbiguity = null;
+          logger.info("article", "article_candidate_confirmed", {
+            connectionId,
+            detectionId,
+            code,
+            candidates: held.candidateCodes,
+            transcript: held.transcript,
+          });
+
+          const confirmed = {
+            ...lastDetection,
+            status: "confirmed",
+            chosen: { code, source: "operator_choice", fragment: held.transcript, confidence: 1 },
+          };
+          activeDetectionActionId = detectionId;
+          await handleConfirmedDetection(confirmed, code, "operator_choice", {
+            runId: activeRunId,
+            enforceActiveRun: true,
+            expectedDetectionId: detectionId,
+            // Цена из карантина уезжает внутрь создания лота, то есть
+            // привязывается к созданному lotSessionId, а не к глобальному
+            // activeLot: между вызовами есть await'ы на МойСклад и VK.
+            voicePrice: held.priceResult,
+          });
+
+          const confirmedLot = activeLot?.code === code
+            && lastDetection?.detectionId === detectionId
+            && lastDetection?.status === "confirmed"
+            && lastDetection?.chosen?.code === code
+            ? activeLot
+            : null;
+          if (held.discountResult) {
+            if (confirmedLot) {
+              await applyDiscount(held.discountResult, held.transcript, { fromVoice: false }).catch((error) => {
+                logger.error("discount", "apply_failed", { connectionId, text: held.transcript, error });
+              });
+            } else {
+              logger.warn("discount", "held_discount_discarded", {
+                connectionId, detectionId, code, reason: "lot_not_confirmed",
+              });
+              sendJson(websocket, {
+                type: "warning",
+                message: `Скидка из фразы про ${code} отброшена — лот не открылся`,
+              });
+            }
+          }
           return;
         }
 
@@ -3879,16 +4268,45 @@ export function attachWsServer(httpServer, config, services = {}) {
           // Лота нет, поэтому нет и стокового гейта лота: цену, остаток и товар
           // берём прямо из карточки МойСклада. Позиция дописывается в тот же
           // заказ кампании, что и обычная бронь (findBroadcastCustomerOrderForCounterparty).
-          const ackFail = (message, status = "failed") => {
-            sendJson(websocket, { type: "warning", message });
+          // Единственная точка ответа на клик — и единственное место, где
+          // пишется исход. Раньше отказы уходили в UI и НЕ писались никуда:
+          // в логах эфира «не кликали» и «кликнул, но не получилось» выглядели
+          // одинаково, поэтому на жалобу «не работает твоя бронь ручная»
+          // ответить было нечем — по шести строкам 15.08 до сих пор неизвестно,
+          // что произошло. Любой новый исход обязан идти через эту функцию.
+          const ackResult = ({ ok, status, message, auditStatus, ...extra }) => {
+            // Именно замыкание на pending, а не повторный peek: успешные
+            // ветки тратят токен ДО ответа, и peek вернул бы null.
+            const pendingForLog = pending;
+            logger.info("ws", "attention_reservation_outcome", {
+              connectionId,
+              actionId: payload.actionId,
+              runId: activeRunId,
+              // В аудите исход детальнее, чем в ответе клиенту: UI различает
+              // только успех и отказ, а разбор эфира — «создан заказ» и
+              // «дописан в существующий».
+              status: auditStatus || status,
+              ok,
+              code: pendingForLog?.code ?? extra.code ?? null,
+              viewerId: pendingForLog?.viewerId ?? null,
+              viewerName: pendingForLog?.viewerName ?? null,
+              commentId: pendingForLog?.commentId ?? null,
+              quantity: pendingForLog?.quantity ?? null,
+              tokenAgeMs: pendingForLog?.issuedAt ? Date.now() - pendingForLog.issuedAt : null,
+              orderId: extra.orderId ?? null,
+              positionId: extra.positionId ?? null,
+              message,
+            });
+            if (!ok) sendJson(websocket, { type: "warning", message });
             sendJson(websocket, {
               type: "attentionReservationResult",
               actionId: payload.actionId,
-              ok: false,
+              ok,
               status,
               message,
             });
           };
+          const ackFail = (message, status = "failed") => ackResult({ ok: false, status, message });
 
           const pending = peekPendingAttentionReservation(payload.actionId);
           if (!pending) {
@@ -3935,9 +4353,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               const lotState = ensureReservationState(openLot);
               if (lotState.acceptedUserIds.has(pending.viewerId)) {
                 pendingAttentionReservations.delete(payload.actionId);
-                sendJson(websocket, {
-                  type: "attentionReservationResult",
-                  actionId: payload.actionId,
+                ackResult({
                   ok: true,
                   status: "already_reserved",
                   message: `${pending.code}: бронь для ${pending.viewerName || `id${pending.viewerId}`} уже есть в списке лота`,
@@ -3983,12 +4399,12 @@ export function attachWsServer(httpServer, config, services = {}) {
               };
               if (settled[lotEvent.status]) {
                 pendingAttentionReservations.delete(payload.actionId);
-                sendJson(websocket, {
-                  type: "attentionReservationResult",
-                  actionId: payload.actionId,
+                ackResult({
                   ok: true,
                   status: lotEvent.status === "out_of_stock" ? "wishlist" : lotEvent.status,
                   message: settled[lotEvent.status],
+                  orderId: lotEvent.customerOrder?.id || null,
+                  positionId: lotEvent.customerOrder?.positionId || null,
                 });
                 return;
               }
@@ -4082,9 +4498,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               pendingAttentionReservations.delete(payload.actionId);
               // Без имени зрителя wishlistStore запись не создаёт — не выдаём это
               // за успех, иначе покупатель тихо потеряется во второй раз.
-              sendJson(websocket, {
-                type: "attentionReservationResult",
-                actionId: payload.actionId,
+              ackResult({
                 ok: Boolean(entry),
                 status: entry ? "wishlist" : "wishlist_failed",
                 message: entry
@@ -4158,12 +4572,11 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
               if (already?.present) {
                 pendingAttentionReservations.delete(payload.actionId);
-                sendJson(websocket, {
-                  type: "attentionReservationResult",
-                  actionId: payload.actionId,
+                ackResult({
                   ok: true,
                   status: "already_reserved",
                   message: `${pending.code} уже есть в заказе ${existingOrder.name || existingOrder.id} — повторно не добавляю`,
+                  orderId: existingOrder.id,
                 });
                 return;
               }
@@ -4232,13 +4645,14 @@ export function attachWsServer(httpServer, config, services = {}) {
             // Номер заказа в ответе — не украшение: у этой брони нет строки в
             // списке лота, поэтому отменить её кнопкой нельзя, и единственный
             // способ откатить ошибочный клик — открыть заказ в МойСкладе.
-            sendJson(websocket, {
-              type: "attentionReservationResult",
-              actionId: payload.actionId,
+            ackResult({
               ok: true,
               status: "reserved",
+              auditStatus: existingOrder?.id ? "reserved_appended" : "reserved",
               message: `${pending.code} забронирован для ${pending.viewerName || `id${pending.viewerId}`}`
                 + ` — заказ ${existingOrder?.name || writeResult?.name || orderId}`,
+              orderId,
+              positionId: writeResult?.positionId || null,
             });
           } catch (error) {
             logger.error("ws", "attention_reservation_failed", {

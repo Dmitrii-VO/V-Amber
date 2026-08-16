@@ -195,18 +195,20 @@ function applyKnownCodeHints(candidates, config) {
     return hinted;
   }
 
-  // Хвостовой кандидат (см. buildHundredsTailCandidate) — догадка «а вдруг это
-  // сотенный блок кода». Если каталог подтвердил и обычного кандидата, и
-  // хвостового, побеждает обычный: «артикул ноль два сто пятьдесят рублей» при
-  // каталоге с 02 и 02150 иначе давал бы ambiguous и не открывал лот вовсе.
-  // Понижением confidence это не решается — applyKnownCodeHints поднимает
-  // подтверждённые до 0.99, и оба кандидата доезжают до вызывающей стороны.
-  const withoutTailGuesses = knownMatches.filter((candidate) => candidate.exactCatalogMatchOnly !== true);
-  const winners = withoutTailGuesses.length > 0 ? withoutTailGuesses : knownMatches;
-
+  // Раньше здесь хвостовой кандидат (см. buildHundredsTailCandidate) молча
+  // удалялся, если каталог подтвердил и его, и базовый: «ноль три сто двадцать
+  // четыре» при каталоге с 03 и 03124 открывал 03. Это и есть корень
+  // проблемы 2 — из двух подтверждённых каталогом прочтений система молча
+  // выбирала одно, хотя спецификация 4.1 пункт 4 требует сообщить о
+  // неоднозначности и не открывать лот автоматически.
+  //
+  // Теперь возвращаем оба: выше по стеку это станет status "ambiguous", и
+  // выбор сделает оператор одним кликом. Цена такого решения — лишний клик на
+  // «ноль два сто пятьдесят рублей»; цена прежнего — чужая карточка в эфире.
+  //
   // Служебный флаг наружу не отдаём: он утекал в article_detected.allCandidates
   // и в WS-состояние.
-  return winners.map(({ exactCatalogMatchOnly, ...candidate }) => candidate);
+  return knownMatches.map(({ exactCatalogMatchOnly, ...candidate }) => candidate);
 }
 
 function isCodeLengthAllowed(code, config) {
@@ -452,6 +454,48 @@ function buildHundredsTailCandidate(baseCandidate, words, startIdx, config) {
   };
 }
 
+// SpeechKit вставляет союз внутрь цифрового ряда: «артикул ноль три И шесть
+// три ноль». Разбор обрывался на союзе и оставлял «03» — короткий, но реально
+// существующий в каталоге код, поэтому в эфир уходила чужая карточка (три
+// случая в бандле 2026-08-16).
+//
+// Склеенное прочтение добавляем ВТОРЫМ кандидатом и только с точным
+// совпадением по каталогу — тем же приёмом, что и сотенный хвост.
+// Подтвердилась только склейка — открывается она; подтвердились обе — это
+// ambiguous и решает оператор; не подтвердилась ни одна — ничего не склеено.
+const CONNECTIVE_WORDS = new Set(["и", "а"]);
+
+function buildConnectiveJoinCandidate(baseCandidate, words, startIdx, config) {
+  const knownCodes = normalizeKnownCodes(config?.knownCodes);
+  if (!knownCodes || knownCodes.size === 0) {
+    return null;
+  }
+
+  if (!CONNECTIVE_WORDS.has(words[startIdx])) {
+    return null;
+  }
+
+  // Сразу за союзом должен идти цифровой ряд, а не продолжение фразы:
+  // «ноль три шесть четыре один и я вам её забронирую» склеивать нечего.
+  const tail = parseDigitSequenceWords(words.slice(startIdx + 1));
+  if (!tail) {
+    return null;
+  }
+
+  const code = `${baseCandidate.code}${tail.value}`;
+  if (!isCodeLengthAllowed(code, config)) {
+    return null;
+  }
+
+  return {
+    code,
+    source: `${baseCandidate.source}_connective_join`,
+    fragment: words.slice(0, startIdx + 1 + tail.consumed).join(" "),
+    confidence: 0.96,
+    exactCatalogMatchOnly: true,
+  };
+}
+
 function extractLeadingCandidatesFromSuffix(suffix, config) {
   const words = splitWords(suffix);
   let index = 0;
@@ -519,6 +563,16 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
     );
     if (hundreds) {
       digitCandidates.push(hundreds);
+    }
+
+    const joined = buildConnectiveJoinCandidate(
+      digitCandidates[0],
+      remainingWords,
+      digitSequence.consumed + extended.consumed,
+      config,
+    );
+    if (joined) {
+      digitCandidates.push(joined);
     }
 
     return digitCandidates;

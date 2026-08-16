@@ -399,18 +399,22 @@ test("detectArticle: обрывок не подгоняется под пост�
   assert.equal(catalogConfig.knownCodes.has(result.chosen?.code), false);
 });
 
-test("detectArticle: хвостовая догадка не спорит с обычным кандидатом", async () => {
-  // Каталог содержит и «02», и «02150». До фикса каталог подтверждал обоих,
-  // applyKnownCodeHints поднимал обоих до 0.99 → ambiguous → лот не открывался
-  // вовсе, хотя раньше открывался «02».
+test("detectArticle: база и сотенный хвост вместе — это неоднозначность", async () => {
+  // Правило перевёрнуто намеренно (knowledge/wiki/voice-price-window-plan.md,
+  // проблема 2). Раньше при двух подтверждённых каталогом прочтениях молча
+  // побеждало базовое, и «ноль три сто двадцать четыре» открывало лот 03 —
+  // чужую карточку в прямом эфире, 15 раз за три месяца. Спецификация 4.1
+  // пункт 4 требует обратного: сообщить о неоднозначности и не открывать лот.
+  // Плата — лишний клик оператора на таких фразах.
   const config = {
     ...baseConfig,
     triggers: ["артикул"],
     knownCodes: new Set(["02", "02150", "00212"]),
   };
   const result = await detectArticle("артикул ноль два сто пятьдесят рублей", config);
-  assert.equal(result.status, "confirmed");
-  assert.equal(result.chosen?.code, "02");
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.chosen, null);
+  assert.deepEqual(result.candidates.map((candidate) => candidate.code).sort(), ["02", "02150"]);
 });
 
 test("detectArticle: служебный флаг не утекает в кандидатов", async () => {

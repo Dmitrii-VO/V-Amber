@@ -53,6 +53,9 @@ change.
 - [[voice-control-hardening-plan]] — Reliability plan for STT segmentation,
   catalog gating, voice price/discount safety, benchmarking, and module splits.
 - [[voice-price-parsing]] — Spoken price extraction and compact digit phrases.
+- [[voice-price-window-plan]] — Decisions from the 2026-08-15 bundle review:
+  false price binding (voice change window, discount semantics, zero-price
+  position ban) and article truncation to junk short catalog codes.
 - [[stock-synchronization]] — Visible stock refresh and known unknown-stock
   risks.
 - [[vk-comments]] — Buyer command channel, service replies, and comment noise.

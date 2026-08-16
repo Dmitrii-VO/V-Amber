@@ -31,6 +31,8 @@ const elements = {
   lotStock: $("lotStock"),
   openLotsWrap: $("openLotsWrap"),
   openLotsList: $("openLotsList"),
+  voiceSuggestionsWrap: $("voiceSuggestionsWrap"),
+  voiceSuggestionsList: $("voiceSuggestionsList"),
 
   detectionInset: $("detectionInset"),
   detectionCode: $("detectionCode"),
@@ -326,11 +328,16 @@ function setSocketState(value) {
   elements.socketDot.className = "dot";
   if (value === "connected") elements.socketDot.classList.add("dot--live");
   else if (value === "error") elements.socketDot.classList.add("dot--err");
+  // Связь и есть одно из двух условий доступности «✓ забронировать».
+  if (typeof refreshAttentionRows === "function") refreshAttentionRows();
 }
 
 function setLifecycle(next) {
   const previous = state.lifecycle;
   state.lifecycle = next;
+  // Остановка эфира гасит серверные токены строк внимания — кнопки в баннере
+  // должны погаснуть вместе с ними, а не притворяться живыми.
+  if (typeof refreshAttentionRows === "function") refreshAttentionRows();
   const isActive = next === "starting" || next === "streaming" || next === "stopping";
 
   // Stream just ended after a session with at least one reservation —
@@ -416,12 +423,20 @@ function renderDetection(detection) {
   }
 
   elements.detectionInset.hidden = false;
+  const ambiguous = detection.status === "ambiguous";
   const chosen = detection.chosen || {};
-  elements.detectionCode.textContent = chosen.code || "—";
+  elements.detectionCode.textContent = ambiguous ? "?" : (chosen.code || "—");
 
   const parts = [];
-  if (chosen.source) parts.push(chosen.source);
-  if (detection.status) parts.push(detection.status);
+  if (ambiguous) {
+    parts.push("спорный артикул");
+    parts.push(detection.heldPrice
+      ? `цена ${detection.heldPrice} ₽ ждёт выбора`
+      : "выберите код");
+  } else {
+    if (chosen.source) parts.push(chosen.source);
+    if (detection.status) parts.push(detection.status);
+  }
   elements.detectionSourceLine.textContent = parts.join(" · ");
 
   clearChildren(elements.detectionCandidatesWrap);
@@ -429,6 +444,29 @@ function renderDetection(detection) {
   for (const c of candidates) {
     const code = c && (c.code || c);
     if (!code) continue;
+    if (ambiguous) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn candidate candidate--pick";
+      button.textContent = code;
+      button.title = `Открыть лот ${code} по фразе «${detection.transcript || ""}»`;
+      button.addEventListener("click", () => {
+        if (!(state.websocket && state.websocket.readyState === 1)) {
+          logEvent("Связь с сервером не установлена — выбор не отправлен", "warn");
+          return;
+        }
+        for (const sibling of elements.detectionCandidatesWrap.querySelectorAll("button")) {
+          sibling.disabled = true;
+        }
+        state.websocket.send(JSON.stringify({
+          type: "confirmArticleCandidate",
+          detectionId: detection.detectionId,
+          code,
+        }));
+      });
+      elements.detectionCandidatesWrap.append(button);
+      continue;
+    }
     const span = document.createElement("span");
     span.className = "candidate";
     span.textContent = code;
@@ -523,6 +561,7 @@ function renderActiveLot(lot) {
     elements.lotArticle.textContent = "";
     clearChildren(elements.lotStockPill);
     renderReservationsForLots([]);
+    renderVoiceSuggestions(null);
     renderOpenLots([], null);
     state.activeLotOpenedAt = null;
     updateLotAge();
@@ -592,7 +631,71 @@ function renderActiveLot(lot) {
     elements.lotStockPill.append(pill);
   }
 
+  renderVoiceSuggestions(lot);
   renderOpenLots(state.openLots, lot);
+}
+
+// Цена/скидка, услышанные после закрытия окна правки лота. Сервер их не
+// применяет (см. knowledge/wiki/voice-price-window-plan.md), а показывает
+// здесь: одна кнопка — принять, вторая — отклонить. Список приходит внутри
+// лота, поэтому подсказка прошлого лота тут физически не появится.
+function renderVoiceSuggestions(lot) {
+  const wrap = elements.voiceSuggestionsWrap;
+  const list = elements.voiceSuggestionsList;
+  if (!wrap || !list) return;
+
+  const items = Array.isArray(lot?.voiceSuggestions) ? lot.voiceSuggestions : [];
+  clearChildren(list);
+  wrap.hidden = items.length === 0;
+  if (items.length === 0) return;
+
+  const send = (type, suggestionId) => {
+    if (!(state.websocket && state.websocket.readyState === 1)) {
+      logEvent("Связь с сервером не установлена — подсказку не применить", "warn");
+      return;
+    }
+    state.websocket.send(JSON.stringify({ type, suggestionId }));
+  };
+
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "voice-suggestion";
+
+    const body = document.createElement("div");
+    body.className = "voice-suggestion__body";
+    const head = document.createElement("div");
+    head.className = "voice-suggestion__head";
+    head.textContent = item.kind === "discount"
+      ? `скидка ${item.descriptor?.kind === "percent" ? `${item.descriptor.value} %` : formatPrice(item.value)}`
+      : formatPrice(item.value);
+    const sub = document.createElement("div");
+    sub.className = "voice-suggestion__sub dim";
+    sub.textContent = item.transcript || "";
+    sub.title = item.transcript || "";
+    body.append(head, sub);
+
+    const apply = document.createElement("button");
+    apply.className = "btn";
+    apply.type = "button";
+    apply.textContent = "✓ применить";
+    apply.addEventListener("click", () => {
+      apply.disabled = true;
+      send("applyVoiceSuggestion", item.id);
+    });
+
+    const dismiss = document.createElement("button");
+    dismiss.className = "btn btn--ghost";
+    dismiss.type = "button";
+    dismiss.textContent = "✕";
+    dismiss.title = "Отклонить подсказку";
+    dismiss.addEventListener("click", () => {
+      dismiss.disabled = true;
+      send("dismissVoiceSuggestion", item.id);
+    });
+
+    row.append(body, apply, dismiss);
+    list.append(row);
+  }
 }
 
 function renderOpenLots(lots, activeLot) {
@@ -975,7 +1078,24 @@ function connectSocket() {
   });
 }
 
+// Каталог подтвердил несколько прочтений одной фразы — например «ноль три» и
+// «ноль три сто двадцать четыре». Раньше сервер молча брал короткое и
+// открывал чужой лот; теперь выбор за оператором, и он должен быть виден
+// прямо в панели распознавания, а не только в логе.
+//
+// Кнопка несёт detectionId: сервер примет её, только если это распознавание
+// всё ещё последнее и всё ещё спорное. Старый клик отвергается с warning'ом.
+function renderArticleAmbiguity(payload) {
+  renderDetection({ ...payload, status: "ambiguous" });
+  logEvent(`Спорный артикул: ${(payload.candidates || []).map((c) => c.code).join(" / ")} — выберите код`, "warn");
+}
+
 function handleServerMessage(payload) {
+  if (payload.type === "articleAmbiguous") {
+    renderArticleAmbiguity(payload);
+    return;
+  }
+
   if (payload.type === "partial") {
     setTranscriptStatus("partial");
     elements.partialLatency.textContent = formatLatency(payload.latencyMs);
@@ -1263,6 +1383,42 @@ document.getElementById("digestPromptOpen")?.addEventListener("click", () => {
 
 document.getElementById("digestPromptDismiss")?.addEventListener("click", hideDigestPromptBanner);
 
+// Кнопка «✓ забронировать» жила в DOM вечно, а токен под ней умирал: через 30
+// минут по TTL, на остановке эфира и на закрытии сокета. Оператор видел
+// одинаковые кнопки — рабочую и мёртвую, — жал и получал «Строка устарела».
+// Именно так родилась жалоба «не работает твоя бронь ручная» (15.08, 01:15:
+// эфир кончился в 22:51). Теперь недоступность видна ДО клика и с причиной.
+function attentionActionDisabledReason() {
+  if (!(state.websocket && state.websocket.readyState === 1)) {
+    return "нет связи — состояние неизвестно";
+  }
+  if (!(state.lifecycle === "streaming" || state.lifecycle === "starting")) {
+    return "эфир остановлен";
+  }
+  return null;
+}
+
+function refreshAttentionRows() {
+  const list = document.getElementById("reservationAttentionList");
+  if (!list) return;
+  const reason = attentionActionDisabledReason();
+  const now = Date.now();
+  for (const row of list.children) {
+    const button = row.querySelector(".attention-row__reserve");
+    if (!button || button.dataset.awaiting === "1") continue;
+    const expiresAt = Number(row.dataset.expiresAt || 0);
+    const why = (expiresAt > 0 && expiresAt < now)
+      ? "строка устарела — попросите покупателя повторить код"
+      : reason;
+    button.disabled = Boolean(why);
+    button.title = why ? `Бронь недоступна: ${why}` : (button.dataset.titleOk || "");
+    row.classList.toggle("attention-row--stale", Boolean(why));
+  }
+}
+
+// Таймер только рисует: авторитет по сроку действия у сервера.
+setInterval(refreshAttentionRows, 5000);
+
 // Брони, требующие ручного разбора оператором (нет однозначного открытого лота).
 const reservationAttentionSeen = new Set();
 // actionId → строка баннера, ждущая ответа сервера на «✓ забронировать».
@@ -1273,8 +1429,12 @@ function addReservationAttention(payload) {
   const list = document.getElementById("reservationAttentionList");
   if (!banner || !list) return;
 
-  // Один и тот же коммент не дублируем (поллер может прислать его повторно).
-  const dedupeKey = String(payload.commentId ?? `${payload.viewerId}:${payload.code}:${payload.text}`);
+  // Ключ строки — actionId, а не commentId. Сервер может выдать НОВОЕ
+  // действие по тому же комментарию (прошлое протухло, эфир перезапущен), и
+  // дедуп по комментарию молча съедал бы живую строку, оставляя мёртвую.
+  const dedupeKey = String(
+    payload.actionId ?? payload.commentId ?? `${payload.viewerId}:${payload.code}:${payload.text}`,
+  );
   if (reservationAttentionSeen.has(dedupeKey)) return;
   reservationAttentionSeen.add(dedupeKey);
 
@@ -1285,6 +1445,11 @@ function addReservationAttention(payload) {
 
   const row = document.createElement("div");
   row.className = "attention-row";
+  // Точное совпадение по каталогу ценнее дополненного нулями: розыгрыш
+  // 15.08 засыпал баннер трёхзначными ответами на викторину, и настоящие
+  // строки вытеснялись из списка. Приоритет читается при подрезке ниже.
+  row.dataset.match = payload.catalogMatchReason === "exact" ? "exact" : "padded";
+  if (payload.expiresAt) row.dataset.expiresAt = String(payload.expiresAt);
 
   const body = document.createElement("div");
   body.className = "attention-row__body";
@@ -1318,7 +1483,9 @@ function addReservationAttention(payload) {
     reserve.className = "btn attention-row__reserve";
     reserve.type = "button";
     reserve.textContent = payload.quantity > 1 ? `✓ забронировать ${payload.quantity} шт` : "✓ забронировать";
+    const reserveLabel = reserve.textContent;
     reserve.title = `Создать бронь ${payload.code} для ${who} в МойСкладе`;
+    reserve.dataset.titleOk = reserve.title;
     reserve.addEventListener("click", () => {
       if (reserve.disabled) return;
       if (!(state.websocket && state.websocket.readyState === 1)) {
@@ -1329,8 +1496,15 @@ function addReservationAttention(payload) {
         return;
       }
       reserve.disabled = true;
+      reserve.dataset.awaiting = "1";
       reserve.textContent = "…";
-      pendingAttentionActions.set(payload.actionId, { row, button: reserve, code: payload.code, who });
+      pendingAttentionActions.set(payload.actionId, {
+        row,
+        button: reserve,
+        label: reserveLabel,
+        code: payload.code,
+        who,
+      });
       state.websocket.send(JSON.stringify({ type: "reserveFromAttention", actionId: payload.actionId }));
     });
   }
@@ -1352,9 +1526,14 @@ function addReservationAttention(payload) {
   banner.hidden = false;
 
   logEvent(`Бронь требует внимания — ${who}: ${reasonText}`, "warn");
+  refreshAttentionRows();
 
+  // Подрезка списка: сначала уходят дополненные нулями, точные держим до
+  // последнего. Раньше резалось строго с конца, и настоящая бронь исчезала
+  // под потоком викторины.
   while (list.children.length > 20) {
-    list.lastChild.remove();
+    const padded = [...list.children].reverse().find((child) => child.dataset.match !== "exact");
+    (padded || list.lastChild).remove();
   }
 }
 
@@ -1377,8 +1556,9 @@ function handleAttentionReservationResult(payload) {
     return;
   }
 
-  pending.button.disabled = false;
-  pending.button.textContent = "✓ забронировать";
+  delete pending.button.dataset.awaiting;
+  pending.button.textContent = pending.label;
+  refreshAttentionRows();
 }
 
 function clearReservationAttention() {
