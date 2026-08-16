@@ -97,6 +97,9 @@ test("state snapshots include every open lot, not only active lot", async () => 
     cardsByCode: { "03204": CARD_03204, "00588": CARD_00588 },
     knownCodes: ["03204", "00588"],
     createSessionLog: createCollectingSessionLog(events),
+    // Снимок пишет только свой таймер (см. ws-server.state-snapshot.test.js),
+    // поэтому здесь укорачиваем интервал вместо ожидания 30 секунд.
+    config: { stateSnapshotIntervalMs: 30 },
   });
   const client = await harness.connect();
   try {
@@ -106,6 +109,12 @@ test("state snapshots include every open lot, not only active lot", async () => 
       (m) => m.type === "state" && m.activeLot?.code === "00588" && m.openLots?.length === 2,
       { timeoutMs: 4000 },
     );
+
+    const deadline = Date.now() + 2000;
+    while (!events.some((event) => event.kind === "state_snapshot" && event.openLots?.length === 2)) {
+      if (Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     const snapshots = events.filter((event) => event.kind === "state_snapshot" && Array.isArray(event.openLots));
     const multiLot = snapshots.find((event) => event.openLots.map((lot) => lot.code).sort().join(",") === "00588,03204");

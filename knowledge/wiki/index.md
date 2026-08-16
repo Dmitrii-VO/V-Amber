@@ -86,6 +86,9 @@ change.
   its log bundle (MoySklad call health, order structure, pricing, waitlist,
   wishlist) with the read-only `analyze-broadcast-logs` helper, plus the
   MoySklad ground-truth pass the logs alone cannot give you.
+- [[broadcast-slowdown]] — Why the operator's tab slows down towards the end of
+  a broadcast (client-side full redraws, not the server), the per-bucket
+  measurements from two bundles, and what was changed.
 - [[reservation-digests]] — VK DM summaries for open live-commerce reservations.
 
 ## Source snapshots

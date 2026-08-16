@@ -17,6 +17,8 @@ function serializeReservations(reservations) {
   return {
     lastCommentId: reservations.lastCommentId || 0,
     committedReservationCount: reservations.committedReservationCount || 0,
+    preLotAttentionReservationCount: reservations.preLotAttentionReservationCount || 0,
+    preLotAttentionStaleStockCount: reservations.preLotAttentionStaleStockCount || 0,
     primaryReservation: reservations.primaryReservation || null,
     seenCommentIds: reservations.seenCommentIds instanceof Set
       ? [...reservations.seenCommentIds]
@@ -24,6 +26,9 @@ function serializeReservations(reservations) {
     acceptedUserIds: reservations.acceptedUserIds instanceof Set
       ? [...reservations.acceptedUserIds]
       : Array.isArray(reservations.acceptedUserIds) ? reservations.acceptedUserIds : [],
+    preLotAttentionUserIds: reservations.preLotAttentionUserIds instanceof Set
+      ? [...reservations.preLotAttentionUserIds]
+      : Array.isArray(reservations.preLotAttentionUserIds) ? reservations.preLotAttentionUserIds : [],
     events: Array.isArray(reservations.events) ? reservations.events : [],
   };
 }

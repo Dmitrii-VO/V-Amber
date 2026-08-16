@@ -20,6 +20,12 @@ reservations and lot changes.
   overbooked. Read: `null` at `lot_opened` is the leading indicator to watch
   for mid-broadcast, not a rare edge case — it reliably correlates with a
   post-hoc overbook. See [[log-verification-checklist]] step 7.
+- **Attention handoff, 2026-08-17**: a successful reservation made from an
+  attention row before its lot opens is transferred to the first subsequent lot
+  for the same product. The buyer is pre-accepted, so a repeated comment cannot
+  append the product again. The lot also disables its `0/null → 1` stock floor
+  after this handoff because the earlier reservation already consumed the
+  operator-in-hand unit. A positive MoySklad balance is not reduced twice.
 
 ## Runtime files
 

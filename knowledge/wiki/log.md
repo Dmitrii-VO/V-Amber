@@ -3,6 +3,14 @@
 Append notable ingests, project questions, wiki maintenance passes, and durable
 decisions here. Use a stable heading format so agents can scan recent changes.
 
+## [2026-08-17] fix | Cross-path attention reservation deduplication
+
+Successful lot-less attention reservations now hand off to the first subsequent
+lot for the same product. The handoff blocks a repeated buyer comment and
+disables the lot's `0/null → 1` fallback when the attention reservation already
+consumed that physical slot. See [[reservation-flow]] and
+[[stock-synchronization]].
+
 ## [2026-08-06] refactor | Аудит на переусложнение: что срезано и где аудит сам ошибся втрое
 
 Прогон ponytail-audit по всему дереву, затем четыре PR (#51–#54, слиты в
