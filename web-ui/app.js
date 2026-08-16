@@ -418,12 +418,20 @@ function renderDetection(detection) {
   }
 
   elements.detectionInset.hidden = false;
+  const ambiguous = detection.status === "ambiguous";
   const chosen = detection.chosen || {};
-  elements.detectionCode.textContent = chosen.code || "—";
+  elements.detectionCode.textContent = ambiguous ? "?" : (chosen.code || "—");
 
   const parts = [];
-  if (chosen.source) parts.push(chosen.source);
-  if (detection.status) parts.push(detection.status);
+  if (ambiguous) {
+    parts.push("спорный артикул");
+    parts.push(detection.heldPrice
+      ? `цена ${detection.heldPrice} ₽ ждёт выбора`
+      : "выберите код");
+  } else {
+    if (chosen.source) parts.push(chosen.source);
+    if (detection.status) parts.push(detection.status);
+  }
   elements.detectionSourceLine.textContent = parts.join(" · ");
 
   clearChildren(elements.detectionCandidatesWrap);
@@ -431,6 +439,29 @@ function renderDetection(detection) {
   for (const c of candidates) {
     const code = c && (c.code || c);
     if (!code) continue;
+    if (ambiguous) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn candidate candidate--pick";
+      button.textContent = code;
+      button.title = `Открыть лот ${code} по фразе «${detection.transcript || ""}»`;
+      button.addEventListener("click", () => {
+        if (!(state.websocket && state.websocket.readyState === 1)) {
+          logEvent("Связь с сервером не установлена — выбор не отправлен", "warn");
+          return;
+        }
+        for (const sibling of elements.detectionCandidatesWrap.querySelectorAll("button")) {
+          sibling.disabled = true;
+        }
+        state.websocket.send(JSON.stringify({
+          type: "confirmArticleCandidate",
+          detectionId: detection.detectionId,
+          code,
+        }));
+      });
+      elements.detectionCandidatesWrap.append(button);
+      continue;
+    }
     const span = document.createElement("span");
     span.className = "candidate";
     span.textContent = code;
@@ -1050,35 +1081,7 @@ function connectSocket() {
 // Кнопка несёт detectionId: сервер примет её, только если это распознавание
 // всё ещё последнее и всё ещё спорное. Старый клик отвергается с warning'ом.
 function renderArticleAmbiguity(payload) {
-  const wrap = elements.detectionCandidatesWrap;
-  if (!wrap) return;
-  elements.detectionInset.hidden = false;
-  elements.detectionCode.textContent = "?";
-  elements.detectionSourceLine.textContent = payload.heldPrice
-    ? `спорный артикул · цена ${payload.heldPrice} ₽ ждёт выбора`
-    : "спорный артикул · выберите код";
-
-  clearChildren(wrap);
-  for (const candidate of payload.candidates || []) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "btn candidate candidate--pick";
-    button.textContent = candidate.code;
-    button.title = `Открыть лот ${candidate.code} по фразе «${payload.transcript || ""}»`;
-    button.addEventListener("click", () => {
-      if (!(state.websocket && state.websocket.readyState === 1)) {
-        logEvent("Связь с сервером не установлена — выбор не отправлен", "warn");
-        return;
-      }
-      for (const sibling of wrap.querySelectorAll("button")) sibling.disabled = true;
-      state.websocket.send(JSON.stringify({
-        type: "confirmArticleCandidate",
-        detectionId: payload.detectionId,
-        code: candidate.code,
-      }));
-    });
-    wrap.append(button);
-  }
+  renderDetection({ ...payload, status: "ambiguous" });
   logEvent(`Спорный артикул: ${(payload.candidates || []).map((c) => c.code).join(" / ")} — выберите код`, "warn");
 }
 

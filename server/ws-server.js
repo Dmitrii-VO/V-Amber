@@ -988,6 +988,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         priceResult,
         discountResult,
       };
+      lastDetection = {
+        ...detection,
+        heldPrice: priceResult?.value ?? null,
+      };
       logger.warn("article", "article_ambiguous", {
         connectionId,
         detectionId: detection.detectionId,
@@ -3861,7 +3865,6 @@ export function attachWsServer(httpServer, config, services = {}) {
             transcript: held.transcript,
           });
 
-          const previousLotSessionId = activeLot?.lotSessionId || null;
           const confirmed = {
             ...lastDetection,
             status: "confirmed",
@@ -3878,15 +3881,20 @@ export function attachWsServer(httpServer, config, services = {}) {
             voicePrice: held.priceResult,
           });
 
-          const createdLot = activeLot?.lotSessionId !== previousLotSessionId ? activeLot : null;
+          const confirmedLot = activeLot?.code === code
+            && lastDetection?.detectionId === detectionId
+            && lastDetection?.status === "confirmed"
+            && lastDetection?.chosen?.code === code
+            ? activeLot
+            : null;
           if (held.discountResult) {
-            if (createdLot && createdLot.code === code) {
+            if (confirmedLot) {
               await applyDiscount(held.discountResult, held.transcript).catch((error) => {
                 logger.error("discount", "apply_failed", { connectionId, text: held.transcript, error });
               });
             } else {
               logger.warn("discount", "held_discount_discarded", {
-                connectionId, detectionId, code, reason: "lot_not_created",
+                connectionId, detectionId, code, reason: "lot_not_confirmed",
               });
               sendJson(websocket, {
                 type: "warning",

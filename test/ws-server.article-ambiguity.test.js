@@ -78,6 +78,7 @@ test("цена из спорной фразы не трогает предыду
     assert.equal(held.activeLot.code, "03900");
     assert.equal(held.activeLot.product.voicePrice, null);
     assert.equal(held.activeLot.voiceSuggestions.length, 0);
+    assert.equal(held.lastDetection.heldPrice, 8800);
 
     client.send({ type: "confirmArticleCandidate", detectionId: message.detectionId, code: "03124" });
     const state = await client.waitFor(
@@ -129,6 +130,33 @@ test("код вне списка кандидатов не принимаетс�
     client.send({ type: "confirmArticleCandidate", detectionId: message.detectionId, code: "03900" });
     await client.waitFor((m) => m.type === "warning" && /устарел/.test(m.message || ""), { timeoutMs: 6000 });
     assert.equal(harness.vk.callsTo("publishLotCard").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("выбор уже активного кандидата применяет удержанную скидку", async () => {
+  const cards = {
+    ...CARDS,
+    "03": { ...CARDS["03"], salePrice: 1000 },
+  };
+  const harness = await startHarness({ cardsByCode: cards, knownCodes: KNOWN });
+  const client = await harness.connect();
+  try {
+    await startStream(harness, client);
+    client.send({ type: "manualCode", code: "03" });
+    const opened = await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03");
+
+    say(harness, "артикул ноль три сто двадцать четыре скидка десять процентов");
+    const message = await client.waitFor((m) => m.type === "articleAmbiguous", { timeoutMs: 6000 });
+    client.send({ type: "confirmArticleCandidate", detectionId: message.detectionId, code: "03" });
+
+    const state = await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.code === "03" && m.activeLot?.discountAmount === 100,
+      { timeoutMs: 6000 },
+    );
+    assert.equal(state.activeLot.lotSessionId, opened.activeLot.lotSessionId);
   } finally {
     await client.close();
     await harness.close();
