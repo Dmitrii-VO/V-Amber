@@ -378,7 +378,12 @@ export function attachWsServer(httpServer, config, services = {}) {
       // изменения лота (открытие, цена голосом, скидка, закрытие), поэтому
       // отдельных вызовов рядом с каждым vk.publish* не нужно.
       viewerLot.sync(activeLot);
-      emitStateSnapshot();
+      // Снимок здесь НЕ пишем: emitState зовётся на каждое изменение лота, и
+      // за эфир это было 1014 снимков вместо 142 по таймеру. Полный слепок
+      // раздувал jsonl до 31 МБ, из-за чего диагностический бандл обрезал
+      // первые 50 минут эфира. Отдельные события (lot_opened, price_changed,
+      // reservation_finalized) на месте, реконструкция по ним не страдает.
+      // knowledge/wiki/broadcast-slowdown.md.
     }
 
     const unsubscribeSafeMode = onSafeModeChange((enabled, meta) => {
@@ -403,7 +408,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         wishlistActive: services.wishlistStore?.getActiveCount?.() ?? 0,
       });
     }
-    const stateSnapshotInterval = setInterval(emitStateSnapshot, 30_000);
+    const stateSnapshotIntervalMs = Number(config?.stateSnapshotIntervalMs) > 0
+      ? Number(config.stateSnapshotIntervalMs)
+      : 30_000;
+    const stateSnapshotInterval = setInterval(emitStateSnapshot, stateSnapshotIntervalMs);
     stateSnapshotInterval.unref();
 
     function resetDetectionState() {
