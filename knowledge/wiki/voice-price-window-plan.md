@@ -17,7 +17,10 @@ decision, rejected alternatives, acceptance criteria.
 
 # Problem 1 — false price binding
 
-Status: agreed, not yet implemented.
+Status: **implemented** 2026-08-16 — PR #57 (single price-change function,
+`discountDescriptor`), #58 (voice change window and suggestions), #59 (drop the
+`стоит` trigger, 119-phrase regression corpus), #60 (no zero-price positions).
+P2 items (the <100 ₽ warning, price history and undo) are still open.
 
 ## Problem
 
@@ -956,7 +959,12 @@ the connective cases, and the `00015` regression above.
 
 # Problem 3 — manual reservation from the attention banner
 
-Status: **agreed** after four review rounds. Design A — a server-owned attention
+Status: **stage one implemented** 2026-08-16 in PR #62 (outcome audit event,
+`expiresAt` and `catalogMatchReason`, disabled-with-reason button, `actionId`
+keying, exact-over-padded eviction). Stage two — the queue itself — waits for
+one broadcast with those audit events, per the staging note below.
+
+Agreed after four review rounds. Design A — a server-owned attention
 queue — selected after the operator confirmed (2026-08-16) that finishing the
 banner after the broadcast is a real workflow. The decision below is final; the
 rounds are the record.
