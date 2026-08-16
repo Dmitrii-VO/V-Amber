@@ -41,6 +41,7 @@ import { createPendingActions } from "./domain/pending-actions.js";
 let nextConnectionId = 1;
 let nextLotSessionId = 1;
 let nextDetectionId = 1;
+let nextVoiceSuggestionId = 1;
 
 // Сброс модульных счётчиков id между тестами: иначе порядок прогона течёт
 // в lotSessionId/detectionId и снапшоты становятся хрупкими. Прод-код это
@@ -902,6 +903,66 @@ export function attachWsServer(httpServer, config, services = {}) {
       return pendingAttentionReservations.peek(actionId);
     }
 
+    // Окно голосовой правки. Любой ценовой триггер с числом в пределах 8
+    // токенов переписывал цену активного лота без всякой проверки, что фраза
+    // вообще про товар: 2026-08-15 лот 03048 за девять минут получил цены 28 ₽
+    // («жара стоит сегодня двадцать восемь»), 1200 ₽ («крем тысяча двести»),
+    // 644 ₽ и 650 ₽ (цены Озона) — и каждая уехала комментарием в VK.
+    //
+    // Правило: голос меняет цену только пока окно лота открыто. Дальше он
+    // предлагает, а решает оператор. 90 секунд покрывают 99 % реальных цен
+    // (медиана 6 с, p90 22 с) и 95 % скидок; цена и скидка держат
+    // ОТДЕЛЬНЫЕ гейты, потому что в 52 из 58 лотов скидка называется ПОСЛЕ
+    // цены, и общий флаг отправил бы их все в подсказки.
+    //
+    // Сброс — только по новому lotSessionId. Повторное называние того же
+    // артикула окно не открывает: 302 переобнаружения в бандле против 4
+    // полезных цен, то есть это была бы лазейка, а не удобство.
+    const VOICE_CHANGE_WINDOW_MS = Number(config?.voiceChangeWindowMs) > 0
+      ? Number(config.voiceChangeWindowMs)
+      : 90_000;
+    const MAX_VOICE_SUGGESTIONS = 5;
+
+    function isVoiceGateOpen(lot, kind) {
+      if (!lot) return false;
+      // Строго !== false: лот, восстановленный из снимка без этих полей,
+      // считается закрытым в обе стороны. Молча пустить голос в цену
+      // после рестарта — ровно тот случай, ради которого окно и вводится.
+      const closed = kind === "price" ? lot.voicePriceAutoClosed : lot.voiceDiscountAutoClosed;
+      if (closed !== false) return false;
+      const openedAt = Number(lot.voiceWindowOpenedAt);
+      if (!Number.isFinite(openedAt)) return false;
+      return Date.now() - openedAt <= VOICE_CHANGE_WINDOW_MS;
+    }
+
+    // Подсказка живёт НА ЛОТЕ, а не в отдельной коллекции: так она физически
+    // не может примениться к другому лоту, уезжает вместе с ним в снимок
+    // состояния и умирает вместе с ним при закрытии.
+    function addVoiceSuggestion(lot, suggestion) {
+      if (!lot) return;
+      if (!Array.isArray(lot.voiceSuggestions)) lot.voiceSuggestions = [];
+      const entry = {
+        id: `sg-${lot.lotSessionId}-${nextVoiceSuggestionId++}`,
+        lotSessionId: lot.lotSessionId,
+        createdAt: new Date().toISOString(),
+        ...suggestion,
+      };
+      lot.voiceSuggestions.push(entry);
+      if (lot.voiceSuggestions.length > MAX_VOICE_SUGGESTIONS) {
+        lot.voiceSuggestions.splice(0, lot.voiceSuggestions.length - MAX_VOICE_SUGGESTIONS);
+      }
+      logger.info("price", "voice_change_suggested", {
+        connectionId,
+        kind: entry.kind,
+        value: entry.value,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        transcript: entry.transcript || null,
+      });
+      emitState();
+      return entry;
+    }
+
     async function applyVoicePrice(priceResult, transcript = null) {
       if (!priceResult?.value) {
         return false;
@@ -929,6 +990,20 @@ export function attachWsServer(httpServer, config, services = {}) {
         sendJson(websocket, {
           type: "warning",
           message: `Цена ${priceResult.value} ₽ из речи не применена: у лота ${activeLot.code} уже есть цена ${activeLot.product.salePrice} ₽ из МойСклад. Изменить можно кликом по цене лота`,
+        });
+        return false;
+      }
+
+      if (!isVoiceGateOpen(activeLot, "price")) {
+        addVoiceSuggestion(activeLot, {
+          kind: "price",
+          value: priceResult.value,
+          trigger: priceResult.trigger || null,
+          transcript,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Услышал цену ${priceResult.value} ₽ для лота ${activeLot.code}, но цена уже задана — предложил вместо замены`,
         });
         return false;
       }
@@ -981,6 +1056,10 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (source === "manual") {
         lot.product.salePrice = value;
       }
+      // Цена у лота теперь есть — голос дальше только предлагает. Ручная
+      // правка закрывает гейт по той же причине: перебивать голосом то, что
+      // оператор ввёл руками, нельзя.
+      lot.voicePriceAutoClosed = true;
 
       recomputeLotDiscountAmount(lot);
 
@@ -2622,7 +2701,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       return { updated, failed, skipped: 0 };
     }
 
-    async function applyDiscount(input, transcript = null) {
+    async function applyDiscount(input, transcript = null, { fromVoice = true } = {}) {
       // Раньше здесь требовался vkPublication.commentId — это блокировало
       // применение скидки в safe mode и при любых сбоях публикации в VK
       // (например, видео недоступно). Скидку считаем по внутреннему лоту
@@ -2687,7 +2766,26 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      // Скидка держит собственный гейт: в 52 из 58 лотов бандла она названа
+      // ПОСЛЕ цены (медиана +6 с), поэтому закрытие ценового гейта её
+      // трогать не должно. Общие объявления вида «все браслетики по тридцать
+      // процентов» с длинным хвостом до 18 минут окно уже не пускает.
+      if (fromVoice && !isVoiceGateOpen(activeLot, "discount")) {
+        addVoiceSuggestion(activeLot, {
+          kind: "discount",
+          value: amount,
+          descriptor,
+          transcript,
+        });
+        sendJson(websocket, {
+          type: "warning",
+          message: `Услышал скидку для лота ${activeLot.code}, но окно правки закрыто — предложил вместо применения`,
+        });
+        return;
+      }
+
       const originalPrice = salePrice;
+      activeLot.voiceDiscountAutoClosed = true;
       activeLot.discountAmount = amount;
       // Дескриптор рядом с суммой, а не вместо неё: сумма остаётся
       // производной и пересчитывается в commitLotPrice при смене цены.
@@ -2778,6 +2876,13 @@ export function attachWsServer(httpServer, config, services = {}) {
           hasPhoto: Boolean(productCard.photo),
         } : null,
         discountAmount: 0,
+        // Окно голосовой правки открывается вместе с лотом и сбрасывается
+        // только новым lotSessionId. Если лот открылся фразой, в которой уже
+        // была цена, ценовой гейт закрыт сразу — эта цена и есть первая.
+        voiceWindowOpenedAt: Date.now(),
+        voicePriceAutoClosed: Boolean(productCard?.voicePrice),
+        voiceDiscountAutoClosed: false,
+        voiceSuggestions: [],
         vkPublication: null,
         reservations: {
           lastCommentId: 0,
@@ -2885,9 +2990,21 @@ export function attachWsServer(httpServer, config, services = {}) {
       let priceChanged = false;
       if (voicePrice?.value && lot.product
           && lot.product.voicePrice !== voicePrice.value) {
-        lot.product.voicePrice = voicePrice.value;
-        lot.product.priceSource = "voice";
-        priceChanged = true;
+        // Переобнаружение того же кода окно НЕ открывает — иначе «назови
+        // артикул ещё раз» становится способом перебить цену чем угодно.
+        if (isVoiceGateOpen(lot, "price")) {
+          lot.product.voicePrice = voicePrice.value;
+          lot.product.priceSource = "voice";
+          lot.voicePriceAutoClosed = true;
+          priceChanged = true;
+        } else {
+          addVoiceSuggestion(lot, {
+            kind: "price",
+            value: voicePrice.value,
+            trigger: voicePrice.trigger || null,
+            transcript: detection.transcript,
+          });
+        }
       }
 
       lot.transcript = detection.transcript;
@@ -3559,6 +3676,44 @@ export function attachWsServer(httpServer, config, services = {}) {
             return;
           }
           await commitLotPrice(activeLot, { value, source: "manual" });
+          return;
+        }
+
+        // Подсказка из закрытого окна: оператор либо принимает её одним
+        // кликом, либо отклоняет. Ищем строго в текущем активном лоте —
+        // подсказка от прошлого лота физически недостижима, потому что
+        // хранится на нём самом.
+        if (payload.type === "applyVoiceSuggestion" || payload.type === "dismissVoiceSuggestion") {
+          const suggestionId = String(payload.suggestionId || "");
+          const list = Array.isArray(activeLot?.voiceSuggestions) ? activeLot.voiceSuggestions : [];
+          const index = list.findIndex((item) => item.id === suggestionId);
+          if (index === -1) {
+            sendJson(websocket, { type: "warning", message: "Подсказка устарела — лот уже закрыт или изменён" });
+            return;
+          }
+          const [suggestion] = list.splice(index, 1);
+          const dismissed = payload.type === "dismissVoiceSuggestion";
+          logger.info("price", dismissed ? "voice_change_suggestion_dismissed" : "voice_change_suggestion_applied", {
+            connectionId,
+            kind: suggestion.kind,
+            value: suggestion.value,
+            code: activeLot.code,
+            lotSessionId: activeLot.lotSessionId,
+            transcript: suggestion.transcript || null,
+          });
+          if (dismissed) {
+            emitState();
+            return;
+          }
+          if (suggestion.kind === "price") {
+            await commitLotPrice(activeLot, {
+              value: suggestion.value,
+              source: "manual",
+              transcript: suggestion.transcript || null,
+            });
+          } else {
+            await applyDiscount(suggestion.descriptor, suggestion.transcript || null, { fromVoice: false });
+          }
           return;
         }
 

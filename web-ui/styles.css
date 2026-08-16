@@ -1053,3 +1053,37 @@ a { color: inherit; }
   outline: none;
   border-color: var(--accent, #60a5fa);
 }
+
+/* Подсказки голосовой правки: услышанные цена/скидка, которые окно лота уже
+   не пустило в мутацию. Оператор принимает или отклоняет одним кликом. */
+.voice-suggestions {
+  border-top: 1px solid var(--border);
+  padding: var(--gap-3) var(--gap-5) var(--gap-4);
+  background: var(--surface);
+}
+.voice-suggestions__title {
+  margin-bottom: var(--gap-2);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.voice-suggestions__list { display: flex; flex-direction: column; gap: var(--gap-2); }
+.voice-suggestion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--gap-3);
+  padding: var(--gap-2) var(--gap-3);
+  border: 1px solid var(--amber-border);
+  border-radius: var(--radius);
+  background: var(--amber-bg);
+}
+.voice-suggestion__body { min-width: 0; }
+.voice-suggestion__head { font-family: var(--font-mono); }
+.voice-suggestion__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+}

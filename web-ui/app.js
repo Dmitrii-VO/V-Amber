@@ -31,6 +31,8 @@ const elements = {
   lotStock: $("lotStock"),
   openLotsWrap: $("openLotsWrap"),
   openLotsList: $("openLotsList"),
+  voiceSuggestionsWrap: $("voiceSuggestionsWrap"),
+  voiceSuggestionsList: $("voiceSuggestionsList"),
 
   detectionInset: $("detectionInset"),
   detectionCode: $("detectionCode"),
@@ -523,6 +525,7 @@ function renderActiveLot(lot) {
     elements.lotArticle.textContent = "";
     clearChildren(elements.lotStockPill);
     renderReservationsForLots([]);
+    renderVoiceSuggestions(null);
     renderOpenLots([], null);
     state.activeLotOpenedAt = null;
     updateLotAge();
@@ -592,7 +595,71 @@ function renderActiveLot(lot) {
     elements.lotStockPill.append(pill);
   }
 
+  renderVoiceSuggestions(lot);
   renderOpenLots(state.openLots, lot);
+}
+
+// Цена/скидка, услышанные после закрытия окна правки лота. Сервер их не
+// применяет (см. knowledge/wiki/voice-price-window-plan.md), а показывает
+// здесь: одна кнопка — принять, вторая — отклонить. Список приходит внутри
+// лота, поэтому подсказка прошлого лота тут физически не появится.
+function renderVoiceSuggestions(lot) {
+  const wrap = elements.voiceSuggestionsWrap;
+  const list = elements.voiceSuggestionsList;
+  if (!wrap || !list) return;
+
+  const items = Array.isArray(lot?.voiceSuggestions) ? lot.voiceSuggestions : [];
+  clearChildren(list);
+  wrap.hidden = items.length === 0;
+  if (items.length === 0) return;
+
+  const send = (type, suggestionId) => {
+    if (!(state.websocket && state.websocket.readyState === 1)) {
+      logEvent("Связь с сервером не установлена — подсказку не применить", "warn");
+      return;
+    }
+    state.websocket.send(JSON.stringify({ type, suggestionId }));
+  };
+
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "voice-suggestion";
+
+    const body = document.createElement("div");
+    body.className = "voice-suggestion__body";
+    const head = document.createElement("div");
+    head.className = "voice-suggestion__head";
+    head.textContent = item.kind === "discount"
+      ? `скидка ${item.descriptor?.kind === "percent" ? `${item.descriptor.value} %` : formatPrice(item.value)}`
+      : formatPrice(item.value);
+    const sub = document.createElement("div");
+    sub.className = "voice-suggestion__sub dim";
+    sub.textContent = item.transcript || "";
+    sub.title = item.transcript || "";
+    body.append(head, sub);
+
+    const apply = document.createElement("button");
+    apply.className = "btn";
+    apply.type = "button";
+    apply.textContent = "✓ применить";
+    apply.addEventListener("click", () => {
+      apply.disabled = true;
+      send("applyVoiceSuggestion", item.id);
+    });
+
+    const dismiss = document.createElement("button");
+    dismiss.className = "btn btn--ghost";
+    dismiss.type = "button";
+    dismiss.textContent = "✕";
+    dismiss.title = "Отклонить подсказку";
+    dismiss.addEventListener("click", () => {
+      dismiss.disabled = true;
+      send("dismissVoiceSuggestion", item.id);
+    });
+
+    row.append(body, apply, dismiss);
+    list.append(row);
+  }
 }
 
 function renderOpenLots(lots, activeLot) {
