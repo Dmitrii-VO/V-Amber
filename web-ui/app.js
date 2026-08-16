@@ -1483,6 +1483,7 @@ function addReservationAttention(payload) {
     reserve.className = "btn attention-row__reserve";
     reserve.type = "button";
     reserve.textContent = payload.quantity > 1 ? `✓ забронировать ${payload.quantity} шт` : "✓ забронировать";
+    const reserveLabel = reserve.textContent;
     reserve.title = `Создать бронь ${payload.code} для ${who} в МойСкладе`;
     reserve.dataset.titleOk = reserve.title;
     reserve.addEventListener("click", () => {
@@ -1497,7 +1498,13 @@ function addReservationAttention(payload) {
       reserve.disabled = true;
       reserve.dataset.awaiting = "1";
       reserve.textContent = "…";
-      pendingAttentionActions.set(payload.actionId, { row, button: reserve, code: payload.code, who });
+      pendingAttentionActions.set(payload.actionId, {
+        row,
+        button: reserve,
+        label: reserveLabel,
+        code: payload.code,
+        who,
+      });
       state.websocket.send(JSON.stringify({ type: "reserveFromAttention", actionId: payload.actionId }));
     });
   }
@@ -1549,8 +1556,9 @@ function handleAttentionReservationResult(payload) {
     return;
   }
 
-  pending.button.disabled = false;
-  pending.button.textContent = "✓ забронировать";
+  delete pending.button.dataset.awaiting;
+  pending.button.textContent = pending.label;
+  refreshAttentionRows();
 }
 
 function clearReservationAttention() {
