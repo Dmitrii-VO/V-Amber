@@ -698,13 +698,37 @@ function renderVoiceSuggestions(lot) {
   }
 }
 
+function countLiveReservations(lot) {
+  const events = Array.isArray(lot?.reservations?.events) ? lot.reservations.events : [];
+  let n = 0;
+  for (const ev of events) {
+    if (ev.status === "reserved" || ev.status === "reserved_appended") n += 1;
+  }
+  return n;
+}
+
+// Сервер шлёт state на любое изменение лота (цена, скидка, публикация в ВК) —
+// 1419 раз за эфир, при 76 открытых лотах. Раньше каждое такое сообщение
+// пересобирало оба списка целиком, хотя почти всегда рисовало то же самое.
+// Сигнатура отсекает эти холостые перерисовки; она нарочно дешёвая — строка,
+// а не сравнение DOM. knowledge/wiki/broadcast-slowdown.md.
+let openLotsSignature = null;
+let reservationsSignature = null;
+
 function renderOpenLots(lots, activeLot) {
   const wrap = elements.openLotsWrap;
   const list = elements.openLotsList;
   if (!wrap || !list) return;
-  clearChildren(list);
   const openLots = Array.isArray(lots) ? lots : [];
   wrap.hidden = openLots.length <= 1;
+
+  const signature = openLots
+    .map((lot) => `${lot.lotSessionId}:${lot.code || lot.product?.code || ""}:${countLiveReservations(lot)}`)
+    .join("|") + `#${activeLot?.lotSessionId || ""}`;
+  if (signature === openLotsSignature) return;
+  openLotsSignature = signature;
+
+  clearChildren(list);
   for (const lot of openLots) {
     const product = lot.product || {};
     const code = lot.code || product.code || "—";
@@ -724,9 +748,7 @@ function renderOpenLots(lots, activeLot) {
 
     const stats = document.createElement("div");
     stats.className = "open-lot__stats";
-    const events = Array.isArray(lot.reservations?.events) ? lot.reservations.events : [];
-    const reservedCount = events.filter((ev) => ev.status === "reserved" || ev.status === "reserved_appended").length;
-    stats.textContent = `${reservedCount} броней`;
+    stats.textContent = `${countLiveReservations(lot)} броней`;
 
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
@@ -755,14 +777,10 @@ function renderReservationsForLots(lots) {
       events.push({ ...ev, lotSessionId: lot.lotSessionId, lotCode: ev.lotCode || lot.code });
     }
   }
-  clearChildren(elements.reservationList);
-
-  if (events.length === 0) {
-    elements.reservationEmpty.hidden = false;
-    elements.reservationCount.textContent = "· 0";
-    return;
-  }
-  elements.reservationEmpty.hidden = true;
+  // Счётчик, пустое состояние и high-water обновляем всегда, до сигнатуры:
+  // на high-water висит баннер итогов после остановки эфира, и пропущенная
+  // перерисовка не должна его обнулять.
+  elements.reservationEmpty.hidden = events.length > 0;
   elements.reservationCount.textContent = `· ${events.length}`;
   // Used by the post-stop digest banner to decide whether to prompt the
   // operator. Tracks the high-water mark across all lots in the session,
@@ -770,6 +788,18 @@ function renderReservationsForLots(lots) {
   if (events.length > state.reservationsThisSession) {
     state.reservationsThisSession = events.length;
   }
+
+  // В сигнатуру входят и предложения «+N шт»: их кнопка восстанавливается
+  // из state именно здесь, поэтому её появление обязано пробить пропуск.
+  const signature = events
+    .map((ev) => `${ev.lotSessionId}:${ev.commentId ?? ""}:${ev.viewerId ?? ""}:${ev.status}:${ev.quantity ?? ""}:${ev.price ?? ""}`)
+    .join("|")
+    + "#" + [...state.pendingQuantity].map(([key, v]) => `${key}=${v?.actionId}:${v?.quantity}`).join(",");
+  if (signature === reservationsSignature) return;
+  reservationsSignature = signature;
+
+  clearChildren(elements.reservationList);
+  if (events.length === 0) return;
 
   const perViewer = aggregatePerViewer();
   for (const ev of events.slice().reverse()) {
@@ -851,7 +881,85 @@ function renderReservationsForLots(lots) {
   }
 }
 
+// Лента растёт весь эфир и раньше перерисовывалась целиком на каждый партиал:
+// к концу эфира это 2670 узлов на снос и столько же на создание, примерно раз
+// в секунду, и главный поток вставал вместе с отправкой аудио. Теперь строка
+// дописывается, а «сырая» строка распознавания живёт одним элементом, которому
+// меняют текст. Потолка строк нет намеренно: 900 строк за эфир браузеру ничего
+// не стоят, а обрезка выбросила бы историю, которую оператор перечитывает.
+// Разбор: knowledge/wiki/broadcast-slowdown.md.
+let transcriptPartialLine = null;
+
+function createTranscriptLine(line) {
+  const div = document.createElement("div");
+  div.className = "transcript-line";
+  const ts = document.createElement("span");
+  ts.className = "ts";
+  ts.textContent = line.ts;
+  const txt = document.createElement("span");
+  txt.textContent = line.text;
+  div.append(ts, txt);
+  return div;
+}
+
+// Автопрокрутка только когда оператор и так внизу: иначе чтение середины ленты
+// сбрасывало вниз на каждом распознанном слове.
+function isTranscriptAtBottom() {
+  const el = elements.transcriptOutput;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+}
+
+function scrollTranscriptToEnd(wasAtBottom) {
+  if (wasAtBottom) {
+    elements.transcriptOutput.scrollTop = elements.transcriptOutput.scrollHeight;
+  }
+}
+
+// Переводит контейнер из «пустого» состояния в ленту, не трогая уже
+// добавленные строки.
+function ensureTranscriptBody() {
+  if (elements.transcriptOutput.className !== "transcript") {
+    elements.transcriptOutput.className = "transcript";
+    clearChildren(elements.transcriptOutput);
+    transcriptPartialLine = null;
+  }
+}
+
+function appendTranscriptLine(line) {
+  ensureTranscriptBody();
+  const wasAtBottom = isTranscriptAtBottom();
+  // insertBefore(node, null) — это append, поэтому отдельная ветка не нужна.
+  elements.transcriptOutput.insertBefore(createTranscriptLine(line), transcriptPartialLine);
+  scrollTranscriptToEnd(wasAtBottom);
+}
+
+function updateTranscriptPartial() {
+  if (elements.transcriptOutput.className !== "transcript") {
+    // Первый партиал сессии: показать ленту целиком (там же создастся строка).
+    renderTranscript();
+    return;
+  }
+  const wasAtBottom = isTranscriptAtBottom();
+  if (!state.partialText) {
+    if (transcriptPartialLine) {
+      transcriptPartialLine.remove();
+      transcriptPartialLine = null;
+    }
+  } else {
+    if (!transcriptPartialLine) {
+      transcriptPartialLine = document.createElement("div");
+      transcriptPartialLine.className = "transcript-line partial";
+      elements.transcriptOutput.append(transcriptPartialLine);
+    }
+    transcriptPartialLine.textContent = state.partialText;
+  }
+  scrollTranscriptToEnd(wasAtBottom);
+}
+
+// Полная перерисовка. Нужна только на старте сессии и при сбросе — в горячем
+// пути её больше нет.
 function renderTranscript() {
+  transcriptPartialLine = null;
   const lines = state.finalLines;
   if (lines.length === 0 && !state.partialText) {
     elements.transcriptOutput.className = "transcript-empty";
@@ -862,21 +970,13 @@ function renderTranscript() {
   clearChildren(elements.transcriptOutput);
 
   for (const line of lines) {
-    const div = document.createElement("div");
-    div.className = "transcript-line";
-    const ts = document.createElement("span");
-    ts.className = "ts";
-    ts.textContent = line.ts;
-    const txt = document.createElement("span");
-    txt.textContent = line.text;
-    div.append(ts, txt);
-    elements.transcriptOutput.append(div);
+    elements.transcriptOutput.append(createTranscriptLine(line));
   }
   if (state.partialText) {
-    const div = document.createElement("div");
-    div.className = "transcript-line partial";
-    div.textContent = state.partialText;
-    elements.transcriptOutput.append(div);
+    transcriptPartialLine = document.createElement("div");
+    transcriptPartialLine.className = "transcript-line partial";
+    transcriptPartialLine.textContent = state.partialText;
+    elements.transcriptOutput.append(transcriptPartialLine);
   }
   elements.transcriptOutput.scrollTop = elements.transcriptOutput.scrollHeight;
 }
@@ -1100,20 +1200,22 @@ function handleServerMessage(payload) {
     setTranscriptStatus("partial");
     elements.partialLatency.textContent = formatLatency(payload.latencyMs);
     state.partialText = payload.text || "";
-    renderTranscript();
+    updateTranscriptPartial();
     return;
   }
 
   if (payload.type === "final") {
     setTranscriptStatus("final");
     elements.finalLatency.textContent = formatLatency(payload.latencyMs);
+    state.partialText = "";
+    updateTranscriptPartial();
     if (payload.text) {
-      state.finalLines.push({ ts: new Date().toLocaleTimeString(), text: payload.text });
+      const line = { ts: new Date().toLocaleTimeString(), text: payload.text };
+      state.finalLines.push(line);
       state.transcriptFinalCount += 1;
       elements.transcriptCount.textContent = `· ${state.transcriptFinalCount}`;
+      appendTranscriptLine(line);
     }
-    state.partialText = "";
-    renderTranscript();
     return;
   }
 
@@ -1714,6 +1816,10 @@ async function startStreaming(options = {}) {
     state.finalLines = [];
     state.partialText = "";
     state.transcriptFinalCount = 0;
+    // Новый эфир — забываем сигнатуры прошлого, иначе первый state мог бы
+    // совпасть с последним состоянием прошлой сессии и не перерисоваться.
+    openLotsSignature = null;
+    reservationsSignature = null;
     elements.transcriptCount.textContent = "· 0";
     updateMetrics();
     renderTranscript();
