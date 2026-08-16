@@ -147,6 +147,11 @@ test("выбор уже активного кандидата применяет
     await startStream(harness, client);
     client.send({ type: "manualCode", code: "03" });
     const opened = await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03");
+    say(harness, "скидка пять процентов");
+    await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.discountAmount === 50,
+      { timeoutMs: 6000 },
+    );
 
     say(harness, "артикул ноль три сто двадцать четыре скидка десять процентов");
     const message = await client.waitFor((m) => m.type === "articleAmbiguous", { timeoutMs: 6000 });

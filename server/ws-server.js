@@ -3889,7 +3889,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             : null;
           if (held.discountResult) {
             if (confirmedLot) {
-              await applyDiscount(held.discountResult, held.transcript).catch((error) => {
+              await applyDiscount(held.discountResult, held.transcript, { fromVoice: false }).catch((error) => {
                 logger.error("discount", "apply_failed", { connectionId, text: held.transcript, error });
               });
             } else {
