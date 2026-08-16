@@ -167,3 +167,52 @@ test("выбор уже активного кандидата применяет
     await harness.close();
   }
 });
+
+test("без каталога кнопки выбора остаются рабочими", async () => {
+  // Каталог не поднялся (ночь 15.08 — девять подряд ENOTFOUND
+  // api.moysklad.ru). Подтверждённых кандидатов нет ни одного, и фильтр
+  // «только knownCode» оставлял пустой список принимаемых кодов, хотя кнопки
+  // в панели рисовались. Клик отвечал «Выбор устарел» — неправда.
+  const harness = await startHarness({ cardsByCode: CARDS, knownCodes: [] });
+  const client = await harness.connect();
+  try {
+    await startStream(harness, client);
+    say(harness, "код товара 03124 03900");
+
+    const message = await client.waitFor((m) => m.type === "articleAmbiguous", { timeoutMs: 6000 });
+    assert.deepEqual(message.candidates.map((c) => c.code).sort(), ["03124", "03900"]);
+
+    client.send({ type: "confirmArticleCandidate", detectionId: message.detectionId, code: "03124" });
+    const state = await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.code === "03124",
+      { timeoutMs: 6000 },
+    );
+    assert.equal(state.activeLot.code, "03124");
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("с каталогом в панель не попадает код, который сервер не примет", async () => {
+  const harness = await startHarness({ cardsByCode: CARDS, knownCodes: KNOWN });
+  const client = await harness.connect();
+  try {
+    await startStream(harness, client);
+    say(harness, "артикул ноль три сто двадцать четыре");
+    const message = await client.waitFor((m) => m.type === "articleAmbiguous", { timeoutMs: 6000 });
+
+    const state = await client.waitFor(
+      (m) => m.type === "state" && m.lastDetection?.status === "ambiguous",
+      { timeoutMs: 6000 },
+    );
+    // Список для отрисовки и список принимаемых сервером кодов — один и тот же.
+    assert.deepEqual(
+      (state.lastDetection.candidates || []).map((c) => c.code).sort(),
+      message.candidates.map((c) => c.code).sort(),
+    );
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
