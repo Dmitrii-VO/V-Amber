@@ -37,7 +37,7 @@ test("первая цена применяется, вторая станови�
       { timeoutMs: 6000 },
     );
 
-    say(harness, "крем тысяча двести рублей стоит");
+    say(harness, "озон поставил сейчас цену шестьсот сорок четыре рубля а нам возмещает разницу");
     const state = await client.waitFor(
       (m) => m.type === "state" && m.activeLot?.voiceSuggestions?.length === 1,
       { timeoutMs: 6000 },
@@ -46,7 +46,7 @@ test("первая цена применяется, вторая станови�
     assert.equal(state.activeLot.product.voicePrice, 8800, "цена лота меняться не должна");
     const suggestion = state.activeLot.voiceSuggestions[0];
     assert.equal(suggestion.kind, "price");
-    assert.equal(suggestion.value, 1200);
+    assert.equal(suggestion.value, 644);
     assert.equal(suggestion.lotSessionId, state.activeLot.lotSessionId);
   } finally {
     await client.close();
