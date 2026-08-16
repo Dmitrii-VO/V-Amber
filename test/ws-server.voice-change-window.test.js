@@ -172,6 +172,37 @@ test("повторный артикул того же лота окно не о�
   }
 });
 
+test("повторный артикул с первой ценой проигрывает ожидающую бронь", async () => {
+  const harness = await startHarness({ cardsByCode: { "03048": CARD }, knownCodes: ["03048"] });
+  const client = await harness.connect();
+  try {
+    const opened = await openLot(harness, client);
+    const lotSessionId = opened.activeLot.lotSessionId;
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03048", firstName: "Аня" });
+    await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.reservations?.events?.some((event) => event.status === "pending_reservation"),
+      { timeoutMs: 6000 },
+    );
+
+    say(harness, "код товара 03048 цена восемь тысяч восемьсот рублей");
+    const state = await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.product?.voicePrice === 8800
+        && m.activeLot?.reservations?.events?.some((event) => event.status === "reserved"),
+      { timeoutMs: 6000 },
+    );
+
+    assert.equal(state.activeLot.lotSessionId, lotSessionId);
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(harness.moysklad.callsTo("updateCustomerOrderPositionPricing").length, 0);
+    assert.equal(harness.vk.callsTo("publishPriceUpdate").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("окно закрывается по TTL, даже если цену так и не назвали", async () => {
   // Реальный TTL — 90 секунд; в тесте окно сжато через конфиг.
   const harness = await startHarness({
