@@ -328,11 +328,16 @@ function setSocketState(value) {
   elements.socketDot.className = "dot";
   if (value === "connected") elements.socketDot.classList.add("dot--live");
   else if (value === "error") elements.socketDot.classList.add("dot--err");
+  // Связь и есть одно из двух условий доступности «✓ забронировать».
+  if (typeof refreshAttentionRows === "function") refreshAttentionRows();
 }
 
 function setLifecycle(next) {
   const previous = state.lifecycle;
   state.lifecycle = next;
+  // Остановка эфира гасит серверные токены строк внимания — кнопки в баннере
+  // должны погаснуть вместе с ними, а не притворяться живыми.
+  if (typeof refreshAttentionRows === "function") refreshAttentionRows();
   const isActive = next === "starting" || next === "streaming" || next === "stopping";
 
   // Stream just ended after a session with at least one reservation —
@@ -1375,6 +1380,42 @@ document.getElementById("digestPromptOpen")?.addEventListener("click", () => {
 
 document.getElementById("digestPromptDismiss")?.addEventListener("click", hideDigestPromptBanner);
 
+// Кнопка «✓ забронировать» жила в DOM вечно, а токен под ней умирал: через 30
+// минут по TTL, на остановке эфира и на закрытии сокета. Оператор видел
+// одинаковые кнопки — рабочую и мёртвую, — жал и получал «Строка устарела».
+// Именно так родилась жалоба «не работает твоя бронь ручная» (15.08, 01:15:
+// эфир кончился в 22:51). Теперь недоступность видна ДО клика и с причиной.
+function attentionActionDisabledReason() {
+  if (!(state.websocket && state.websocket.readyState === 1)) {
+    return "нет связи — состояние неизвестно";
+  }
+  if (!(state.lifecycle === "streaming" || state.lifecycle === "starting")) {
+    return "эфир остановлен";
+  }
+  return null;
+}
+
+function refreshAttentionRows() {
+  const list = document.getElementById("reservationAttentionList");
+  if (!list) return;
+  const reason = attentionActionDisabledReason();
+  const now = Date.now();
+  for (const row of list.children) {
+    const button = row.querySelector(".attention-row__reserve");
+    if (!button || button.dataset.awaiting === "1") continue;
+    const expiresAt = Number(row.dataset.expiresAt || 0);
+    const why = (expiresAt > 0 && expiresAt < now)
+      ? "строка устарела — попросите покупателя повторить код"
+      : reason;
+    button.disabled = Boolean(why);
+    button.title = why ? `Бронь недоступна: ${why}` : (button.dataset.titleOk || "");
+    row.classList.toggle("attention-row--stale", Boolean(why));
+  }
+}
+
+// Таймер только рисует: авторитет по сроку действия у сервера.
+setInterval(refreshAttentionRows, 5000);
+
 // Брони, требующие ручного разбора оператором (нет однозначного открытого лота).
 const reservationAttentionSeen = new Set();
 // actionId → строка баннера, ждущая ответа сервера на «✓ забронировать».
@@ -1385,8 +1426,12 @@ function addReservationAttention(payload) {
   const list = document.getElementById("reservationAttentionList");
   if (!banner || !list) return;
 
-  // Один и тот же коммент не дублируем (поллер может прислать его повторно).
-  const dedupeKey = String(payload.commentId ?? `${payload.viewerId}:${payload.code}:${payload.text}`);
+  // Ключ строки — actionId, а не commentId. Сервер может выдать НОВОЕ
+  // действие по тому же комментарию (прошлое протухло, эфир перезапущен), и
+  // дедуп по комментарию молча съедал бы живую строку, оставляя мёртвую.
+  const dedupeKey = String(
+    payload.actionId ?? payload.commentId ?? `${payload.viewerId}:${payload.code}:${payload.text}`,
+  );
   if (reservationAttentionSeen.has(dedupeKey)) return;
   reservationAttentionSeen.add(dedupeKey);
 
@@ -1397,6 +1442,11 @@ function addReservationAttention(payload) {
 
   const row = document.createElement("div");
   row.className = "attention-row";
+  // Точное совпадение по каталогу ценнее дополненного нулями: розыгрыш
+  // 15.08 засыпал баннер трёхзначными ответами на викторину, и настоящие
+  // строки вытеснялись из списка. Приоритет читается при подрезке ниже.
+  row.dataset.match = payload.catalogMatchReason === "exact" ? "exact" : "padded";
+  if (payload.expiresAt) row.dataset.expiresAt = String(payload.expiresAt);
 
   const body = document.createElement("div");
   body.className = "attention-row__body";
@@ -1431,6 +1481,7 @@ function addReservationAttention(payload) {
     reserve.type = "button";
     reserve.textContent = payload.quantity > 1 ? `✓ забронировать ${payload.quantity} шт` : "✓ забронировать";
     reserve.title = `Создать бронь ${payload.code} для ${who} в МойСкладе`;
+    reserve.dataset.titleOk = reserve.title;
     reserve.addEventListener("click", () => {
       if (reserve.disabled) return;
       if (!(state.websocket && state.websocket.readyState === 1)) {
@@ -1441,6 +1492,7 @@ function addReservationAttention(payload) {
         return;
       }
       reserve.disabled = true;
+      reserve.dataset.awaiting = "1";
       reserve.textContent = "…";
       pendingAttentionActions.set(payload.actionId, { row, button: reserve, code: payload.code, who });
       state.websocket.send(JSON.stringify({ type: "reserveFromAttention", actionId: payload.actionId }));
@@ -1464,9 +1516,14 @@ function addReservationAttention(payload) {
   banner.hidden = false;
 
   logEvent(`Бронь требует внимания — ${who}: ${reasonText}`, "warn");
+  refreshAttentionRows();
 
+  // Подрезка списка: сначала уходят дополненные нулями, точные держим до
+  // последнего. Раньше резалось строго с конца, и настоящая бронь исчезала
+  // под потоком викторины.
   while (list.children.length > 20) {
-    list.lastChild.remove();
+    const padded = [...list.children].reverse().find((child) => child.dataset.match !== "exact");
+    (padded || list.lastChild).remove();
   }
 }
 

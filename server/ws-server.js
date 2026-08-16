@@ -1962,6 +1962,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       nameCacheStore,
       getOpenLots: () => getOpenLots(),
       registerPendingReservation: (payload) => registerPendingAttentionReservation(payload),
+      pendingReservationTtlMs: pendingAttentionReservations.ttlMs,
       notify: (payload) => sendJson(websocket, payload),
     });
 
@@ -4240,16 +4241,45 @@ export function attachWsServer(httpServer, config, services = {}) {
           // Лота нет, поэтому нет и стокового гейта лота: цену, остаток и товар
           // берём прямо из карточки МойСклада. Позиция дописывается в тот же
           // заказ кампании, что и обычная бронь (findBroadcastCustomerOrderForCounterparty).
-          const ackFail = (message, status = "failed") => {
-            sendJson(websocket, { type: "warning", message });
+          // Единственная точка ответа на клик — и единственное место, где
+          // пишется исход. Раньше отказы уходили в UI и НЕ писались никуда:
+          // в логах эфира «не кликали» и «кликнул, но не получилось» выглядели
+          // одинаково, поэтому на жалобу «не работает твоя бронь ручная»
+          // ответить было нечем — по шести строкам 15.08 до сих пор неизвестно,
+          // что произошло. Любой новый исход обязан идти через эту функцию.
+          const ackResult = ({ ok, status, message, auditStatus, ...extra }) => {
+            // Именно замыкание на pending, а не повторный peek: успешные
+            // ветки тратят токен ДО ответа, и peek вернул бы null.
+            const pendingForLog = pending;
+            logger.info("ws", "attention_reservation_outcome", {
+              connectionId,
+              actionId: payload.actionId,
+              runId: activeRunId,
+              // В аудите исход детальнее, чем в ответе клиенту: UI различает
+              // только успех и отказ, а разбор эфира — «создан заказ» и
+              // «дописан в существующий».
+              status: auditStatus || status,
+              ok,
+              code: pendingForLog?.code ?? extra.code ?? null,
+              viewerId: pendingForLog?.viewerId ?? null,
+              viewerName: pendingForLog?.viewerName ?? null,
+              commentId: pendingForLog?.commentId ?? null,
+              quantity: pendingForLog?.quantity ?? null,
+              tokenAgeMs: pendingForLog?.issuedAt ? Date.now() - pendingForLog.issuedAt : null,
+              orderId: extra.orderId ?? null,
+              positionId: extra.positionId ?? null,
+              message,
+            });
+            if (!ok) sendJson(websocket, { type: "warning", message });
             sendJson(websocket, {
               type: "attentionReservationResult",
               actionId: payload.actionId,
-              ok: false,
+              ok,
               status,
               message,
             });
           };
+          const ackFail = (message, status = "failed") => ackResult({ ok: false, status, message });
 
           const pending = peekPendingAttentionReservation(payload.actionId);
           if (!pending) {
@@ -4296,9 +4326,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               const lotState = ensureReservationState(openLot);
               if (lotState.acceptedUserIds.has(pending.viewerId)) {
                 pendingAttentionReservations.delete(payload.actionId);
-                sendJson(websocket, {
-                  type: "attentionReservationResult",
-                  actionId: payload.actionId,
+                ackResult({
                   ok: true,
                   status: "already_reserved",
                   message: `${pending.code}: бронь для ${pending.viewerName || `id${pending.viewerId}`} уже есть в списке лота`,
@@ -4344,12 +4372,12 @@ export function attachWsServer(httpServer, config, services = {}) {
               };
               if (settled[lotEvent.status]) {
                 pendingAttentionReservations.delete(payload.actionId);
-                sendJson(websocket, {
-                  type: "attentionReservationResult",
-                  actionId: payload.actionId,
+                ackResult({
                   ok: true,
                   status: lotEvent.status === "out_of_stock" ? "wishlist" : lotEvent.status,
                   message: settled[lotEvent.status],
+                  orderId: lotEvent.customerOrder?.id || null,
+                  positionId: lotEvent.customerOrder?.positionId || null,
                 });
                 return;
               }
@@ -4443,9 +4471,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               pendingAttentionReservations.delete(payload.actionId);
               // Без имени зрителя wishlistStore запись не создаёт — не выдаём это
               // за успех, иначе покупатель тихо потеряется во второй раз.
-              sendJson(websocket, {
-                type: "attentionReservationResult",
-                actionId: payload.actionId,
+              ackResult({
                 ok: Boolean(entry),
                 status: entry ? "wishlist" : "wishlist_failed",
                 message: entry
@@ -4519,12 +4545,11 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
               if (already?.present) {
                 pendingAttentionReservations.delete(payload.actionId);
-                sendJson(websocket, {
-                  type: "attentionReservationResult",
-                  actionId: payload.actionId,
+                ackResult({
                   ok: true,
                   status: "already_reserved",
                   message: `${pending.code} уже есть в заказе ${existingOrder.name || existingOrder.id} — повторно не добавляю`,
+                  orderId: existingOrder.id,
                 });
                 return;
               }
@@ -4593,13 +4618,14 @@ export function attachWsServer(httpServer, config, services = {}) {
             // Номер заказа в ответе — не украшение: у этой брони нет строки в
             // списке лота, поэтому отменить её кнопкой нельзя, и единственный
             // способ откатить ошибочный клик — открыть заказ в МойСкладе.
-            sendJson(websocket, {
-              type: "attentionReservationResult",
-              actionId: payload.actionId,
+            ackResult({
               ok: true,
               status: "reserved",
+              auditStatus: existingOrder?.id ? "reserved_appended" : "reserved",
               message: `${pending.code} забронирован для ${pending.viewerName || `id${pending.viewerId}`}`
                 + ` — заказ ${existingOrder?.name || writeResult?.name || orderId}`,
+              orderId,
+              positionId: writeResult?.positionId || null,
             });
           } catch (error) {
             logger.error("ws", "attention_reservation_failed", {

@@ -1096,3 +1096,7 @@ a { color: inherit; }
   color: var(--text);
 }
 .candidate--pick:disabled { opacity: 0.5; cursor: default; }
+
+/* Строка внимания, по которой действие уже недоступно: причина в title
+   кнопки, а сама строка притушена, чтобы не выглядела рабочей. */
+.attention-row--stale { opacity: 0.55; }

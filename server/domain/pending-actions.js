@@ -38,9 +38,13 @@ export function createPendingActions({ ttlMs, max = Infinity, now = Date.now } =
   }
 
   return {
+    ttlMs,
+
     issue(payload) {
       const actionId = randomUUID();
-      entries.set(actionId, { ...payload, expiresAt: now() + ttlMs });
+      // issuedAt нужен исходу в логе: «токен протух через 40 минут» и «клик
+      // через 5 секунд» — это разные истории про одну и ту же кнопку.
+      entries.set(actionId, { ...payload, issuedAt: now(), expiresAt: now() + ttlMs });
       trim();
       return actionId;
     },

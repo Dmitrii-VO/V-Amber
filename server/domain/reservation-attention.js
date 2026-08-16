@@ -25,6 +25,7 @@ export function createReservationAttention({
   nameCacheStore,
   getOpenLots,
   registerPendingReservation,
+  pendingReservationTtlMs = 30 * 60_000,
   notify,
   floodGuard = createCommentFloodGuard(),
 } = {}) {
@@ -115,10 +116,16 @@ export function createReservationAttention({
           source: comment.source,
         })
         : null;
+      const attentionExpiresAt = attentionActionId ? Date.now() + pendingReservationTtlMs : null;
 
       notify({
         type: "reservationAttention",
         reason,
+        // Строка живёт в баннере до разбора, а токен под ней протухает через
+        // 30 минут. Без этих двух полей оператор видел одинаковые кнопки:
+        // рабочую и уже мёртвую (жалоба 15.08 в 01:15 — эфир кончился в 22:51).
+        expiresAt: attentionExpiresAt,
+        catalogMatchReason: probeCodeResolution.reason || null,
         commentId: comment.id,
         viewerId: comment.viewerId,
         viewerName: viewerNameForAttention,
