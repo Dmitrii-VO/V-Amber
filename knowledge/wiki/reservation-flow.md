@@ -139,6 +139,25 @@ The attention row now carries a **«✓ забронировать»** action:
   `processReservationEvent` restores the stock gate, the counter, the waitlist,
   the dashboard row with «× отменить», and the public reply. Repeat clicks are
   caught by the lot's `acceptedUserIds`.
+- **If the click succeeds before the lot opens, the first subsequent lot for
+  that product receives a handoff.** The session keeps the successful
+  `viewerId + productId` result until `registerOpenLot`, then seeds that lot's
+  `acceptedUserIds`. A repeat buyer comment is logged as
+  `reservation_duplicate_attention_ignored` and cannot append a second
+  position. Unconsumed handoffs live at the WS-server level for 30 minutes, so
+  an operator reconnect does not lose them. The handoff is consumed by the
+  first matching lot, so a later, separate lot for the same product can accept
+  a new purchase.
+- The handoff also records `preLotAttentionReservationCount`. A positive
+  MoySklad balance already includes the earlier reserve and is not decremented
+  twice. If the lot opens while the attention write is still in flight, its
+  positive balance predates that write; `preLotAttentionStaleStockCount`
+  subtracts only that race-time reservation. A later successful unknown-stock
+  refresh clears the stale amount it supersedes. For `availableStock == 0` or
+  unknown stock, however, the usual operator-in-hand `floor=1` fallback is
+  disabled because that physical slot was already consumed by the attention
+  reservation. The field and handed-off viewer IDs are stored in
+  `active-state.json` with the rest of the lot state.
 - **Without an open lot the reservation has no dashboard row and no cancel
   button** — there is no lot to hang it on, so the addressable-cancel path (#16)
   cannot reach it. The success message therefore names the order, which is the

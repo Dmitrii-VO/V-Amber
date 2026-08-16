@@ -71,6 +71,10 @@ export function attachWsServer(httpServer, config, services = {}) {
   const createSessionLogImpl = services.createSessionLog || createSessionLog;
   const saveActiveStateImpl = services.saveActiveState || saveActiveState;
   const clearActiveStateImpl = services.clearActiveState || clearActiveState;
+  // Живёт на уровне WS-сервера, а не одного сокета: реконнект оператора не
+  // должен забывать уже созданную в МойСкладе безлотовую attention-бронь.
+  const attentionHandoffTtlMs = 30 * 60_000;
+  const completedAttentionReservations = new Map();
   // Seam для тестов: позволяет подменить реальную gRPC-сессию SpeechKit
   // фейком, который скармливает скриптовые транскрипты через onFinal без
   // сети. Прод всегда идёт дефолтным путём (new SpeechKitStreamingSession).
@@ -306,7 +310,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     // TTL заметно больше, чем у «+N штук»: строка внимания живёт в баннере до
     // разбора, оператор доходит до неё между лотами, а не в ту же секунду.
     const pendingAttentionReservations = createPendingActions({
-      ttlMs: 30 * 60_000,
+      ttlMs: attentionHandoffTtlMs,
       max: 200,
     });
     // Токен намеренно НЕ тратится до успешной записи (чтобы сбой МойСклада можно
@@ -442,10 +446,69 @@ export function attachWsServer(httpServer, config, services = {}) {
       voicePipeline.resetTriggerWindow("detection_state_reset");
     }
 
-    function registerOpenLot(lot) {
-      if (lot?.lotSessionId) {
-        openLotsBySessionId.set(lot.lotSessionId, lot);
+    function handoffCompletedAttentionReservations(lot) {
+      if (!lot?.lotSessionId || !lot.product?.id) return;
+      const state = ensureReservationState(lot);
+      const now = Date.now();
+      for (const [key, reservation] of completedAttentionReservations) {
+        if (reservation.expiresAt < now) {
+          completedAttentionReservations.delete(key);
+          continue;
+        }
+        if (reservation.productId !== lot.product.id) continue;
+        addBoundedId(state.acceptedUserIds, reservation.viewerId);
+        addBoundedId(state.preLotAttentionUserIds, reservation.viewerId);
+        state.preLotAttentionReservationCount += reservation.quantity;
+        if (reservation.stockSnapshotStale === true) {
+          state.preLotAttentionStaleStockCount += reservation.quantity;
+        }
+        completedAttentionReservations.delete(key);
+        logger.info("ws", "attention_reservation_handed_to_lot", {
+          connectionId,
+          code: lot.code,
+          productId: reservation.productId,
+          viewerId: reservation.viewerId,
+          orderId: reservation.orderId,
+          positionId: reservation.positionId,
+          attentionLotSessionId: reservation.lotSessionId,
+          lotSessionId: lot.lotSessionId,
+          quantity: reservation.quantity,
+        });
       }
+    }
+
+    function rememberCompletedAttentionReservation(reservation) {
+      const key = `${reservation.viewerId}:${reservation.productId}`;
+      completedAttentionReservations.set(key, {
+        ...reservation,
+        expiresAt: Date.now() + attentionHandoffTtlMs,
+      });
+      while (completedAttentionReservations.size > 200) {
+        const oldestKey = completedAttentionReservations.keys().next().value;
+        const evicted = completedAttentionReservations.get(oldestKey);
+        completedAttentionReservations.delete(oldestKey);
+        logger.warn("ws", "attention_reservation_handoff_evicted", {
+          connectionId,
+          productId: evicted?.productId || null,
+          viewerId: evicted?.viewerId || null,
+          orderId: evicted?.orderId || null,
+        });
+      }
+
+      // Лот мог открыться, пока запись ожидала сетевой ответ МойСклада.
+      const openLot = getOpenLots().find((candidate) => candidate.product?.id === reservation.productId);
+      if (openLot) {
+        // Свежая запись завершилась уже после открытия лота, значит числовой
+        // availableStock в карточке снят ДО этого резерва и требует вычитания.
+        completedAttentionReservations.get(key).stockSnapshotStale = reservation.freshWrite === true;
+        handoffCompletedAttentionReservations(openLot);
+      }
+    }
+
+    function registerOpenLot(lot) {
+      if (!lot?.lotSessionId) return;
+      openLotsBySessionId.set(lot.lotSessionId, lot);
+      handoffCompletedAttentionReservations(lot);
     }
 
     function unregisterOpenLot(lot) {
@@ -619,11 +682,14 @@ export function attachWsServer(httpServer, config, services = {}) {
           lastCommentId: 0,
           seenCommentIds: createBoundedIdSet(),
           acceptedUserIds: createBoundedIdSet(),
+          preLotAttentionUserIds: createBoundedIdSet(),
           events: [],
           // Persistent counter, separate from the trimmed events buffer above.
           // Without this, lots with more than 20 reservations under-report and
           // the stock guard lets extra orders through.
           committedReservationCount: 0,
+          preLotAttentionReservationCount: 0,
+          preLotAttentionStaleStockCount: 0,
         };
       } else {
         if (!(lot.reservations.seenCommentIds instanceof Set)) {
@@ -632,6 +698,19 @@ export function attachWsServer(httpServer, config, services = {}) {
         if (!(lot.reservations.acceptedUserIds instanceof Set)) {
           lot.reservations.acceptedUserIds = createBoundedIdSet(lot.reservations.acceptedUserIds);
         }
+        if (!(lot.reservations.preLotAttentionUserIds instanceof Set)) {
+          lot.reservations.preLotAttentionUserIds = createBoundedIdSet(
+            lot.reservations.preLotAttentionUserIds,
+          );
+        }
+        lot.reservations.preLotAttentionReservationCount = Math.max(
+          0,
+          Number(lot.reservations.preLotAttentionReservationCount) || 0,
+        );
+        lot.reservations.preLotAttentionStaleStockCount = Math.max(
+          0,
+          Number(lot.reservations.preLotAttentionStaleStockCount) || 0,
+        );
       }
 
       return lot.reservations;
@@ -1220,9 +1299,25 @@ export function attachWsServer(httpServer, config, services = {}) {
       // treat unknown / zero stock as a floor of 1, so the first reservation
       // is always allowed. Subsequent reservations on the same lot then bump
       // committedReservationCount and the guard tightens.
-      const effectiveStock = (typeof availableStock === "number" && Number.isFinite(availableStock))
-        ? Math.max(1, Math.floor(availableStock))
-        : 1;
+      // Безлотовая attention-бронь уже заняла физическую единицу до открытия
+      // этого лота. Положительный остаток МойСклад уже вернул с учётом резерва,
+      // поэтому повторно его не вычитаем. Но fallback 0/null → 1 отключаем:
+      // именно он иначе продавал ту же «единицу в руках» второй раз.
+      const preLotAttentionReservationCount = Math.max(
+        0,
+        Number(state?.preLotAttentionReservationCount) || 0,
+      );
+      const preLotAttentionStaleStockCount = Math.max(
+        0,
+        Number(state?.preLotAttentionStaleStockCount) || 0,
+      );
+      const hasKnownStock = typeof availableStock === "number" && Number.isFinite(availableStock);
+      const numericStock = hasKnownStock
+        ? Math.max(0, Math.floor(availableStock) - preLotAttentionStaleStockCount)
+        : null;
+      const effectiveStock = numericStock !== null && numericStock > 0
+        ? numericStock
+        : preLotAttentionReservationCount > 0 ? 0 : 1;
       return Math.max(0, effectiveStock - getCommittedReservationCount(state));
     }
 
@@ -1238,6 +1333,13 @@ export function attachWsServer(httpServer, config, services = {}) {
       const current = lot.product?.availableStock;
       if (typeof current === "number" && Number.isFinite(current)) return;
       if (isLotPoisoned(lot.lotSessionId)) return;
+      // Этот refresh стартует уже после известных race-handoff'ов. Успешный
+      // ответ МойСклада включает их резервы, поэтому их stale-долг погашаем.
+      // Новые handoff'ы, пришедшие пока запрос был в полёте, сохраняем.
+      const staleStockCountBeforeRefresh = Math.max(
+        0,
+        Number(state?.preLotAttentionStaleStockCount) || 0,
+      );
       try {
         const productCard = await moysklad.getProductCardByCode(lot.code);
         if (openLotsBySessionId.get(lot.lotSessionId) !== lot) return;
@@ -1246,6 +1348,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           lot.product = lot.product || {};
           lot.product.availableStock = productCard.availableStock;
           lot.product.stockUnknown = false;
+          state.preLotAttentionStaleStockCount = Math.max(
+            0,
+            (Number(state.preLotAttentionStaleStockCount) || 0) - staleStockCountBeforeRefresh,
+          );
           logger.info("moysklad", "stock_refreshed_before_first_reservation", {
             connectionId,
             code: lot.code,
@@ -2403,11 +2509,15 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
 
       if (reservationState.acceptedUserIds.has(viewerId)) {
-        logger.info(logSource, "reservation_duplicate_ignored", {
+        const cameFromAttention = reservationState.preLotAttentionUserIds.has(viewerId);
+        logger.info(logSource, cameFromAttention
+          ? "reservation_duplicate_attention_ignored"
+          : "reservation_duplicate_ignored", {
           connectionId,
           lotSessionId: currentLot.lotSessionId,
           commentId: comment.id,
           viewerId,
+          ...(cameFromAttention ? { productId: currentLot.product?.id || null } : {}),
         });
         return;
       }
@@ -3031,6 +3141,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           lastCommentId: 0,
           seenCommentIds: createBoundedIdSet(),
           acceptedUserIds: createBoundedIdSet(),
+          preLotAttentionUserIds: createBoundedIdSet(),
           events: [],
           // Эти поля гонятся через всю логику бронирования; раньше создавались
           // лениво (`|| 0`, `?.` сахар). Явно инициализируем здесь, чтобы
@@ -3038,6 +3149,8 @@ export function attachWsServer(httpServer, config, services = {}) {
           // recovery — без поверхностных undefined.
           primaryReservation: null,
           committedReservationCount: 0,
+          preLotAttentionReservationCount: 0,
+          preLotAttentionStaleStockCount: 0,
         },
       };
     }
@@ -4579,6 +4692,15 @@ export function attachWsServer(httpServer, config, services = {}) {
                 source: "attention_reservation",
               });
               if (already?.present) {
+                rememberCompletedAttentionReservation({
+                  productId: productCard.id,
+                  viewerId: pending.viewerId,
+                  orderId: existingOrder.id,
+                  positionId: already.positionId || null,
+                  lotSessionId: lotLike.lotSessionId,
+                  quantity: Math.max(1, Number(pending.quantity) || 1),
+                  freshWrite: false,
+                });
                 pendingAttentionReservations.delete(payload.actionId);
                 ackResult({
                   ok: true,
@@ -4625,6 +4747,16 @@ export function attachWsServer(httpServer, config, services = {}) {
               id: orderId,
               name: existingOrder?.name || writeResult?.name || null,
               counterpartyId: counterparty.id,
+            });
+
+            rememberCompletedAttentionReservation({
+              productId: productCard.id,
+              viewerId: pending.viewerId,
+              orderId,
+              positionId: writeResult?.positionId || null,
+              lotSessionId: lotLike.lotSessionId,
+              quantity: Math.max(1, Number(pending.quantity) || 1),
+              freshWrite: true,
             });
 
             pendingAttentionReservations.delete(payload.actionId);

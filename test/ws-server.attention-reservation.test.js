@@ -105,7 +105,308 @@ test("повторный клик не дублирует позицию в за
     assert.equal(result.status, "already_reserved");
     assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
     assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 0);
+
+    client.send({ type: "manualCode", code: "03723" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+    harness.vk.pushComment({
+      id: 504,
+      fromId: 8101,
+      text: "03723",
+      firstName: "Марго",
+      lastName: "Краснова",
+    });
+    await client.waitFor((m) => m.type === "viewerComment" && m.commentId === 504, { timeoutMs: 6000 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 0);
   } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("безлотовая attention-бронь блокирует повтор покупателя в следующем лоте", async () => {
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    client.send({ type: "manualCode", code: "03723" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+
+    harness.vk.pushComment({
+      id: 502,
+      fromId: 8101,
+      text: "03723",
+      firstName: "Марго",
+      lastName: "Краснова",
+    });
+    await client.waitFor((m) => m.type === "viewerComment" && m.commentId === 502, { timeoutMs: 6000 });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("лот, открытый во время attention-записи, получает handoff после ответа МойСклада", async () => {
+  let releaseWrite;
+  let markWriteStarted;
+  const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
+  const writeReleased = new Promise((resolve) => { releaseWrite = resolve; });
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": { ...CARD_CLOSED, availableStock: 1 } },
+    overrides: {
+      ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }),
+      createCustomerOrderReservation: async () => {
+        markWriteStarted();
+        await writeReleased;
+        return { id: "co-race", positionId: "pos-race" };
+      },
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await writeStarted;
+
+    client.send({ type: "manualCode", code: "03723" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+    releaseWrite();
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    harness.vk.pushComment({
+      id: 505,
+      fromId: 8101,
+      text: "03723",
+      firstName: "Марго",
+      lastName: "Краснова",
+    });
+    await client.waitFor((m) => m.type === "viewerComment" && m.commentId === 505, { timeoutMs: 6000 });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+
+    harness.vk.pushComment({ id: 508, fromId: 8102, text: "03723", firstName: "Другой" });
+    const state = await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.reservations?.events?.some(
+          (event) => event.viewerId === 8102 && event.status === "out_of_stock",
+        ),
+      { timeoutMs: 6000 },
+    );
+    const second = state.activeLot.reservations.events.find((event) => event.viewerId === 8102);
+    assert.equal(second.status, "out_of_stock");
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    releaseWrite();
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("незабранный attention handoff переживает переподключение оператора", async () => {
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const firstClient = await harness.connect();
+  let secondClient;
+  try {
+    const attention = await attentionFor(harness, firstClient);
+    firstClient.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await firstClient.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+    await firstClient.close();
+
+    secondClient = await harness.connect();
+    secondClient.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await secondClient.waitFor((m) => m.type === "state" && m.activeLot === null);
+    secondClient.send({ type: "manualCode", code: "03723" });
+    await secondClient.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+    harness.vk.pushComment({
+      id: 507,
+      fromId: 8101,
+      text: "03723",
+      firstName: "Марго",
+      lastName: "Краснова",
+    });
+    await secondClient.waitFor((m) => m.type === "viewerComment" && m.commentId === 507, { timeoutMs: 6000 });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+  } finally {
+    if (secondClient) await secondClient.close();
+    else if (firstClient.ws.readyState === 1) await firstClient.close();
+    await harness.close();
+  }
+});
+
+test("безлотовая attention-бронь не оставляет следующему лоту повторный floor-slot", async () => {
+  let closedCardReads = 0;
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: {
+      ensureCounterparty: async ({ viewerId }) => ({ id: `cp-${viewerId}`, name: `viewer-${viewerId}` }),
+      getProductCardByCode: async (code) => {
+        if (code !== "03723") return CARD_LOT;
+        closedCardReads += 1;
+        return { ...CARD_CLOSED, availableStock: closedCardReads === 1 ? 1 : 0 };
+      },
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    client.send({ type: "manualCode", code: "03723" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+
+    harness.vk.pushComment({ id: 503, fromId: 8102, text: "03723", firstName: "Другой" });
+    const state = await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.reservations?.events?.some(
+          (event) => event.viewerId === 8102 && event.status === "out_of_stock",
+        ),
+      { timeoutMs: 6000 },
+    );
+
+    const second = state.activeLot.reservations.events.find((event) => event.viewerId === 8102);
+    assert.equal(second.status, "out_of_stock");
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 1);
+    assert.equal(moysklad.callsTo("appendPositionToCustomerOrder").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("handoff не вычитает повторно положительный остаток МойСклада", async () => {
+  let closedCardReads = 0;
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: {
+      ensureCounterparty: async ({ viewerId }) => ({ id: `cp-${viewerId}`, name: `viewer-${viewerId}` }),
+      getProductCardByCode: async (code) => {
+        if (code !== "03723") return CARD_LOT;
+        closedCardReads += 1;
+        return { ...CARD_CLOSED, availableStock: closedCardReads === 1 ? 4 : 3 };
+      },
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    client.send({ type: "manualCode", code: "03723" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+    harness.vk.pushComment({ id: 506, fromId: 8102, text: "03723 3 шт", firstName: "Другой" });
+
+    const state = await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.reservations?.events?.some(
+          (event) => event.viewerId === 8102 && event.status === "reserved",
+        ),
+      { timeoutMs: 6000 },
+    );
+    const second = state.activeLot.reservations.events.find((event) => event.viewerId === 8102);
+    assert.equal(second.quantity, 3);
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 2);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("stock refresh после null race-handoff не вычитает attention-резерв дважды", async () => {
+  let releaseWrite;
+  let markWriteStarted;
+  let closedCardReads = 0;
+  const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
+  const writeReleased = new Promise((resolve) => { releaseWrite = resolve; });
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
+    overrides: {
+      ensureCounterparty: async ({ viewerId }) => ({ id: `cp-${viewerId}`, name: `viewer-${viewerId}` }),
+      getProductCardByCode: async (code) => {
+        if (code !== "03723") return CARD_LOT;
+        closedCardReads += 1;
+        if (closedCardReads === 1) return { ...CARD_CLOSED, availableStock: 2 };
+        if (closedCardReads === 2) return { ...CARD_CLOSED, availableStock: null };
+        return { ...CARD_CLOSED, availableStock: 1 };
+      },
+      createCustomerOrderReservation: async () => {
+        if (closedCardReads === 1) {
+          markWriteStarted();
+          await writeReleased;
+          return { id: "co-null-race", positionId: "pos-null-race" };
+        }
+        return { id: "co-second", positionId: "pos-second" };
+      },
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const client = await harness.connect();
+  try {
+    const attention = await attentionFor(harness, client);
+    client.send({ type: "reserveFromAttention", actionId: attention.actionId });
+    await writeStarted;
+
+    client.send({ type: "manualCode", code: "03723" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03723");
+    releaseWrite();
+    await client.waitFor(
+      (m) => m.type === "attentionReservationResult" && m.status === "reserved",
+      { timeoutMs: 6000 },
+    );
+
+    harness.vk.pushComment({ id: 509, fromId: 8102, text: "03723", firstName: "Другой" });
+    const state = await client.waitFor(
+      (m) => m.type === "state"
+        && m.activeLot?.reservations?.events?.some(
+          (event) => event.viewerId === 8102 && event.status === "reserved",
+        ),
+      { timeoutMs: 6000 },
+    );
+    const second = state.activeLot.reservations.events.find((event) => event.viewerId === 8102);
+    assert.equal(second.status, "reserved");
+    assert.equal(moysklad.callsTo("createCustomerOrderReservation").length, 2);
+  } finally {
+    releaseWrite();
     await client.close();
     await harness.close();
   }
