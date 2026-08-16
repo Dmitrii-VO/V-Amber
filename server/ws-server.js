@@ -1048,7 +1048,13 @@ export function attachWsServer(httpServer, config, services = {}) {
     // оператора), — и backfillLotPositionPricing не звал ни один: его звала
     // только скидка. Поэтому правка цены после первых броней оставляла позиции
     // в заказах по старой цене, и оператор правил заказы руками.
-    async function commitLotPrice(lot, { value, source, trigger = null, transcript = null } = {}) {
+    async function commitLotPrice(lot, {
+      value,
+      source,
+      trigger = null,
+      transcript = null,
+      publishVkUpdate = true,
+    } = {}) {
       const queueKey = lot.lotSessionId;
       const previous = priceCommitQueues.get(queueKey) || Promise.resolve();
       const current = previous.catch(() => {}).then(async () => {
@@ -1089,7 +1095,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         await backfillLotPositionPricing(lot, { reason: "price_changed" });
 
-        if (lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+        if (publishVkUpdate && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
           await vk.publishPriceUpdate(lot).catch((error) => {
             handleVkPublishError(lot, error);
             logger.warn("vk", "price_update_publish_failed", {
@@ -3001,15 +3007,28 @@ export function attachWsServer(httpServer, config, services = {}) {
       // объекте и выстрелим price-update в VK по уже закрытому лоту.
       if (activeLot !== lot || !isDetectionStillActive(gate)) return;
 
+      lot.transcript = detection.transcript;
+      lastDetection = {
+        ...detection,
+        status: "confirmed",
+        chosen: { code: lot.code, source, fragment: detection.transcript, confidence: 1 },
+        redetection: true,
+      };
+
+      const acceptedReservationCount = lot.reservations?.events?.length || 0;
       let priceChanged = false;
       if (voicePrice?.value && lot.product
           && lot.product.voicePrice !== voicePrice.value) {
         // Переобнаружение того же кода окно НЕ открывает — иначе «назови
         // артикул ещё раз» становится способом перебить цену чем угодно.
         if (isVoiceGateOpen(lot, "price")) {
-          lot.product.voicePrice = voicePrice.value;
-          lot.product.priceSource = "voice";
-          lot.voicePriceAutoClosed = true;
+          await commitLotPrice(lot, {
+            value: voicePrice.value,
+            source: "voice",
+            trigger: voicePrice.trigger || null,
+            transcript: detection.transcript,
+            publishVkUpdate: acceptedReservationCount === 0,
+          });
           priceChanged = true;
         } else {
           addVoiceSuggestion(lot, {
@@ -3020,14 +3039,6 @@ export function attachWsServer(httpServer, config, services = {}) {
           });
         }
       }
-
-      lot.transcript = detection.transcript;
-      lastDetection = {
-        ...detection,
-        status: "confirmed",
-        chosen: { code: lot.code, source, fragment: detection.transcript, confidence: 1 },
-        redetection: true,
-      };
 
       logger.info("article", "article_redetection_same_code", {
         connectionId,
@@ -3040,40 +3051,20 @@ export function attachWsServer(httpServer, config, services = {}) {
         reservationsKept: lot.reservations?.events?.length || 0,
       });
 
-      const acceptedReservationCount = lot.reservations?.events?.length || 0;
-      if (priceChanged && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+      if (priceChanged && acceptedReservationCount > 0
+          && lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
         // Если в лоте уже есть принятые брони — не рискуем зачумить лот
         // ошибкой VK (например, vkErrorCode=801 «комментарии закрыты»
         // через handleVkPublishError → markLotPoisoned). Цена в локальном
         // состоянии уже обновлена, операторский UI её увидит; для
         // покупателей карточка останется со старой ценой — это меньшее
-        // зло, чем потеря sticky-лота со всеми броньями. Если броней
-        // ещё нет, риск приемлем: терять нечего.
-        if (acceptedReservationCount > 0) {
-          logger.info("vk", "redetection_price_update_skipped_due_to_reservations", {
-            connectionId,
-            lotSessionId: lot.lotSessionId,
-            code: lot.code,
-            acceptedReservationCount,
-          });
-        } else {
-          // Повторная проверка: между предыдущей проверкой и публикацией
-          // ничего не было await'нуто, но это самая дорогая операция —
-          // выстрелить нерелевантным update'ом в VK хуже, чем пропустить
-          // обновление цены.
-          if (activeLot !== lot || !isDetectionStillActive(gate)) {
-            emitState();
-            return;
-          }
-          try {
-            await vk.publishPriceUpdate(lot);
-          } catch (error) {
-            handleVkPublishError(lot, error);
-            logger.warn("vk", "redetection_price_update_failed", {
-              connectionId, lotSessionId: lot.lotSessionId, error,
-            });
-          }
-        }
+        // зло, чем потеря sticky-лота со всеми броньями.
+        logger.info("vk", "redetection_price_update_skipped_due_to_reservations", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          acceptedReservationCount,
+        });
       }
 
       voicePipeline.resetTriggerWindow("redetection_merged");
