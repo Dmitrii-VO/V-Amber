@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startHarness } from "./helpers/ws-harness.js";
+import { createMoyskladMock, startHarness } from "./helpers/ws-harness.js";
 
 // Смена цены после первых броней должна догонять уже созданные позиции в
 // МойСкладе — ровно как это давно делает скидка. До объединения путей backfill
@@ -108,6 +108,53 @@ test("абсолютная скидка не пересчитывается пр
     );
     assert.equal(state.activeLot.discountAmount, 200);
   } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("параллельные смены цены пишутся в МойСклад в порядке команд", async () => {
+  let releaseFirst;
+  const firstBlocked = new Promise((resolve) => { releaseFirst = resolve; });
+  const completedPrices = [];
+  let updateNumber = 0;
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03048": CARD },
+    overrides: {
+      updateCustomerOrderPositionPricing: async ({ salePrice }) => {
+        updateNumber += 1;
+        if (updateNumber === 1) await firstBlocked;
+        completedPrices.push(salePrice);
+        return { ok: true };
+      },
+    },
+  });
+  const harness = await startHarness({ moysklad, knownCodes: ["03048"] });
+  const client = await harness.connect();
+  try {
+    await openLotAndReserve(harness, client);
+
+    client.send({ type: "setLotPrice", value: 8800 });
+    while (moysklad.callsTo("updateCustomerOrderPositionPricing").length < 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    client.send({ type: "setLotPrice", value: 9900 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(
+      moysklad.callsTo("updateCustomerOrderPositionPricing").length,
+      1,
+      "вторая запись не должна обгонять незавершённую первую",
+    );
+
+    releaseFirst();
+    await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.product?.salePrice === 9900,
+      { timeoutMs: 6000 },
+    );
+    assert.deepEqual(completedPrices, [8800, 9900]);
+  } finally {
+    releaseFirst();
     await client.close();
     await harness.close();
   }
