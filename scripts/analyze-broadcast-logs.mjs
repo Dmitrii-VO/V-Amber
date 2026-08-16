@@ -19,7 +19,10 @@ const argv = process.argv.slice(2);
 const dateIdx = argv.indexOf("--date");
 const date = dateIdx >= 0 ? argv[dateIdx + 1] : null;
 const asJson = argv.includes("--json");
-const inputs = argv.filter((a, i) => !a.startsWith("--") && i !== dateIdx + 1);
+// Без --date индекс значения равен -1+1=0, и наивная проверка съедала первый
+// путь: одиночный файл вообще не запускался, а из глоба молча пропадала первая
+// сессия.
+const inputs = argv.filter((a, i) => !a.startsWith("--") && (dateIdx < 0 || i !== dateIdx + 1));
 if (inputs.length === 0) {
   console.error("Usage: node scripts/analyze-broadcast-logs.mjs <bundle-dir|*.jsonl> [--date YYYY-MM-DD] [--json]");
   process.exit(1);
@@ -290,6 +293,65 @@ p(`    броней с stockUnknown/availableStock=null: ${stockUnknown.length}$
 for (const e of stockUnknown.filter(isLive).slice(0, 15)) p(`       ⚠ ${e.code} ${e.viewerName} qty=${e.quantity}`);
 if (stockUnknown.filter(isLive).length) flag(`${stockUnknown.filter(isLive).length} живых броней по лотам с неизвестным остатком — проверить find-overbooked.js`);
 
+// ─── §8 Нагрузка ───────────────────────────────────────────────────────────
+// Оператор жалуется, что к концу эфира интерфейс тупит. Тормозит вкладка, а не
+// сервер: её работа росла вместе с длиной ленты транскрипта и числом открытых
+// лотов, потому что и то и другое перерисовывалось целиком. Разбор и замеры —
+// knowledge/wiki/broadcast-slowdown.md. Здесь тот же замер, чтобы сравнивать
+// эфиры до и после правки, а не пересчитывать руками.
+const BUCKET_MIN = 15;
+const median = (values) => (values.length ? values.slice().sort((a, b) => a - b)[Math.floor(values.length / 2)] : 0);
+const startMs = win.from ? new Date(win.from).getTime() : null;
+const loadBuckets = [];
+if (startMs !== null) {
+  for (const e of events) {
+    if (typeof e.ts !== "string") continue;
+    const idx = Math.floor((new Date(e.ts).getTime() - startMs) / (BUCKET_MIN * 60_000));
+    if (!Number.isFinite(idx) || idx < 0) continue;
+    const b = (loadBuckets[idx] ||= { partials: 0, finals: 0, snapshots: 0, snapshotBytes: 0, openLots: 0, stt: [], ms: [] });
+    if (e.kind === "transcript_partial") b.partials += 1;
+    else if (e.kind === "transcript_final") {
+      b.finals += 1;
+      if (e.latencyMs) b.stt.push(e.latencyMs);
+    } else if (e.kind === "state_snapshot") {
+      b.snapshots += 1;
+      b.snapshotBytes += JSON.stringify(e).length;
+      // Последний снимок корзины — сколько лотов вкладка перерисовывала к её концу.
+      b.openLots = Array.isArray(e.openLots) ? e.openLots.length : b.openLots;
+    } else if (e.kind === "moysklad_call" && e.durationMs) b.ms.push(e.durationMs);
+  }
+}
+p(`\n[8] Нагрузка на интерфейс (корзины по ${BUCKET_MIN} мин)`);
+p("     мин │ партиалы  финалы  строк  лотов │ снимков  снимок КБ │ речь p50  МС p50");
+let transcriptLines = 0;
+const loadRows = [];
+for (const [i, b] of loadBuckets.entries()) {
+  if (!b) continue;
+  transcriptLines += b.finals;
+  const snapKb = b.snapshots ? b.snapshotBytes / b.snapshots / 1024 : 0;
+  loadRows.push({
+    fromMin: i * BUCKET_MIN, partials: b.partials, finals: b.finals,
+    transcriptLines, openLots: b.openLots, snapshots: b.snapshots,
+    snapshotKb: Math.round(snapKb * 10) / 10, sttP50: median(b.stt), moyskladP50: median(b.ms),
+  });
+  p(`  ${String(i * BUCKET_MIN).padStart(3)}-${String(i * BUCKET_MIN + BUCKET_MIN).padStart(3)} │`
+    + `${String(b.partials).padStart(9)}${String(b.finals).padStart(8)}${String(transcriptLines).padStart(7)}${String(b.openLots).padStart(7)} │`
+    + `${String(b.snapshots).padStart(8)}${snapKb.toFixed(1).padStart(11)} │`
+    + `${String(median(b.stt)).padStart(9)}${String(median(b.ms)).padStart(8)}`);
+}
+// Снимок пишет таймер раз в 30 с — это максимум 30 штук на корзину. Заметно
+// больше означает, что его снова зовут из emitState, и jsonl опять раздувается
+// до обрезки бандла.
+const snapshotStorm = loadRows.filter((r) => r.snapshots > 45);
+if (snapshotStorm.length) {
+  p(`    ✗ снимок состояния пишется чаще 30-секундного таймера (до ${Math.max(...snapshotStorm.map((r) => r.snapshots))} за корзину)`);
+  flag("state_snapshot пишется чаще таймера — jsonl раздувается, бандл обрежет начало эфира");
+}
+const lastRow = loadRows.at(-1);
+if (lastRow) {
+  p(`    к концу эфира: ${lastRow.transcriptLines} строк транскрипта, ${lastRow.openLots} открытых лотов`);
+}
+
 // ─── Summary ───────────────────────────────────────────────────────────────
 p("\n" + "═".repeat(72));
 if (flags.length === 0) {
@@ -313,6 +375,7 @@ if (asJson) {
     waitlist: { pending: wlPending, promoted: wlPromoted, migrated: wlMigrated, legacyMigrated: legacyMigrationCount, unresolved: wlUnresolved, orphan: orphanWaitlist, orphanEvents: orphanWaitlistEvents.length },
     wishlist: { outOfStock: oos.length, added: wishAdded.length, fromOrderFailed: wishFromFailure.length },
     stock: { lotsUnknown: lotsUnknownStock.length, reservationsUnknown: stockUnknown.length },
+    load: { bucketMinutes: BUCKET_MIN, buckets: loadRows },
     flags,
   }, null, 2));
 }
