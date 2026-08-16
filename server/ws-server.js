@@ -933,43 +933,96 @@ export function attachWsServer(httpServer, config, services = {}) {
         return false;
       }
 
-      activeLot.product.voicePrice = priceResult.value;
-      activeLot.product.priceSource = "voice";
-
-      logger.info("price", "voice_price_applied", {
-        connectionId,
-        voicePrice: priceResult.value,
+      await commitLotPrice(activeLot, {
+        value: priceResult.value,
+        source: "voice",
         trigger: priceResult.trigger || null,
-        code: activeLot.code,
-        lotSessionId: activeLot.lotSessionId,
+        transcript,
+      });
+      return true;
+    }
+
+    // Скидка хранится абсолютной суммой (discountAmount), потому что её читают
+    // ~12 мест — от построения позиции в МойСкладе до карточки VK. Дескриптор
+    // хранит ИСХОДНОЕ намерение оператора рядом с суммой, и после смены цены
+    // процентная скидка пересчитывается вместо того, чтобы остаться рублями от
+    // старой цены (эфир 2026-08-15, лот 03048: цена вернулась на 8800 ₽, а лот
+    // остался 8768 ₽ — 32 ₽ это 5 % от ложных 650 ₽).
+    //
+    // Лот без дескриптора трактуется как абсолютная скидка и не трогается:
+    // это и миграция сохранённого состояния, и поведение по умолчанию.
+    function recomputeLotDiscountAmount(lot) {
+      if (lot?.discountDescriptor?.kind !== "percent") {
+        return;
+      }
+      const percent = Number(lot.discountDescriptor.value);
+      // getLotEffectivePrice — цена ДО скидки (её же берёт applyDiscount).
+      const salePrice = Number(getLotEffectivePrice(lot) || 0);
+      if (!Number.isFinite(percent) || percent <= 0 || !Number.isFinite(salePrice) || salePrice <= 0) {
+        return;
+      }
+      const amount = Math.floor((salePrice * percent) / 100);
+      lot.discountAmount = amount > 0 && amount < salePrice ? amount : 0;
+    }
+
+    // Единая точка изменения цены лота: состояние → пересчёт скидки →
+    // переоценка уже созданных позиций в МойСкладе → карточка VK → лог.
+    //
+    // Раньше путей было два — applyVoicePrice (голос) и setLotPrice (клик
+    // оператора), — и backfillLotPositionPricing не звал ни один: его звала
+    // только скидка. Поэтому правка цены после первых броней оставляла позиции
+    // в заказах по старой цене, и оператор правил заказы руками.
+    async function commitLotPrice(lot, { value, source, trigger = null, transcript = null } = {}) {
+      lot.product.voicePrice = value;
+      lot.product.priceSource = source;
+      // Ручная правка — явное намерение оператора, поэтому перекрываем и
+      // salePrice: иначе склад-гейт и суммы броней продолжают считаться по
+      // старой (неверной) цене из МойСклада.
+      if (source === "manual") {
+        lot.product.salePrice = value;
+      }
+
+      recomputeLotDiscountAmount(lot);
+
+      logger.info("price", source === "manual" ? "manual_price_applied" : "voice_price_applied", {
+        connectionId,
+        value,
+        voicePrice: value,
+        source,
+        trigger,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        discountAmount: Number(lot.discountAmount || 0),
         transcript,
       });
       sessionLog.logPriceChanged({
-        code: activeLot.code,
-        lotSessionId: activeLot.lotSessionId,
-        source: "voice",
-        value: priceResult.value,
-        trigger: priceResult.trigger || null,
+        code: lot.code,
+        lotSessionId: lot.lotSessionId,
+        source,
+        value,
+        trigger,
         transcript,
       });
 
-      if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
-        await vk.publishPriceUpdate(activeLot).catch((error) => {
-          handleVkPublishError(activeLot, error);
+      await backfillLotPositionPricing(lot, { reason: "price_changed" });
+
+      if (lot.vkPublication?.commentId && !isLotPoisoned(lot.lotSessionId)) {
+        await vk.publishPriceUpdate(lot).catch((error) => {
+          handleVkPublishError(lot, error);
           logger.warn("vk", "price_update_publish_failed", {
             connectionId,
-            lotSessionId: activeLot?.lotSessionId,
+            lotSessionId: lot?.lotSessionId,
+            source,
             error,
           });
           sendJson(websocket, {
             type: "warning",
-            message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${activeLot?.code || ""}`.trim(),
+            message: `Цена применена, но обновить карточку в VK не удалось — покупатели видят старую цену лота ${lot?.code || ""}`.trim(),
           });
         });
       }
 
       emitState();
-      return true;
     }
 
 
@@ -2518,7 +2571,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             positionId: event.customerOrder.positionId,
             salePrice,
             discountAmount,
-            source: "discount_backfill",
+            source: reason === "price_changed" ? "price_backfill" : "discount_backfill",
           });
           if (result?.skipped === true && result?.safeMode === true) {
             return { updated, failed, skipped: targets.length - updated - failed };
@@ -2560,9 +2613,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
       }
       if (failed > 0) {
+        const what = reason === "price_changed" ? "Цена изменена" : "Скидка применена";
         sendJson(websocket, {
           type: "warning",
-          message: `Скидка применена, но ${failed} уже созданн${failed === 1 ? "ая бронь" : "ых броней"} по лоту ${lot.code} не пересчитал${failed === 1 ? "ась" : "ись"} — проверьте цены в МойСкладе`,
+          message: `${what}, но ${failed} уже созданн${failed === 1 ? "ая бронь" : "ых броней"} по лоту ${lot.code} не пересчитал${failed === 1 ? "ась" : "ись"} — проверьте цены в МойСкладе`,
         });
       }
       return { updated, failed, skipped: 0 };
@@ -2635,6 +2689,11 @@ export function attachWsServer(httpServer, config, services = {}) {
 
       const originalPrice = salePrice;
       activeLot.discountAmount = amount;
+      // Дескриптор рядом с суммой, а не вместо неё: сумма остаётся
+      // производной и пересчитывается в commitLotPrice при смене цены.
+      activeLot.discountDescriptor = descriptor?.kind === "percent"
+        ? { kind: "percent", value: Number(descriptor.value) }
+        : { kind: "absolute", value: amount };
       const newPrice = originalPrice - amount;
 
       logger.info("discount", "discount_applied", {
@@ -3499,35 +3558,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             sendJson(websocket, { type: "warning", message: "Не удалось применить цену: лот неактивен или значение неверно" });
             return;
           }
-          activeLot.product.voicePrice = value;
-          activeLot.product.priceSource = "manual";
-          // For manual override we treat the value as the operator-confirmed
-          // sale price too — otherwise stock guard and reservation totals
-          // still use the (wrong) salePrice from MoySklad.
-          activeLot.product.salePrice = value;
-          logger.info("price", "manual_price_applied", {
-            connectionId,
-            value,
-            code: activeLot.code,
-            lotSessionId: activeLot.lotSessionId,
-          });
-          sessionLog.logPriceChanged({
-            code: activeLot.code,
-            lotSessionId: activeLot.lotSessionId,
-            source: "manual",
-            value,
-          });
-          if (activeLot.vkPublication?.commentId && !isLotPoisoned(activeLot.lotSessionId)) {
-            await vk.publishPriceUpdate(activeLot).catch((error) => {
-              handleVkPublishError(activeLot, error);
-              logger.warn("vk", "manual_price_publish_failed", {
-                connectionId,
-                lotSessionId: activeLot?.lotSessionId,
-                error,
-              });
-            });
-          }
-          emitState();
+          await commitLotPrice(activeLot, { value, source: "manual" });
           return;
         }
 
