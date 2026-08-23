@@ -43,6 +43,9 @@ change.
 
 ## Product and business flows
 
+- [[buyer-code-matching]] — Как код из комментария покупателя привязывается к
+  лоту: точное совпадение, допуск по нулям, классы коллизии каталога и почему
+  правило асимметрично для речи оператора.
 - [[live-commerce-flow]] — Operator speech, product lookup, active lot, VK card,
   and reservations.
 - [[reservation-flow]] — VK `бронь`, stock checks, waitlist state, MoySklad

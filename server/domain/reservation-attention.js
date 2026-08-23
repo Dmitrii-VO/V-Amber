@@ -1,6 +1,6 @@
 import { logger } from "../logger.js";
-import { parseReservationComment } from "../reservation-parser.js";
-import { resolveKnownCode } from "../product-code-resolver.js";
+import { parseReservationComment, hasReservationKeywordToken } from "../reservation-parser.js";
+import { resolveKnownCode, codesEquivalent, BUYER_MAX_ZERO_PAD } from "../product-code-resolver.js";
 import { createCommentFloodGuard } from "../comment-flood-guard.js";
 
 // Комментарий похож на бронь (ключевое слово + код), но однозначного открытого
@@ -81,6 +81,20 @@ export function createReservationAttention({
       const probeCodeResolution = knownCodes && knownCodes.size > 0
         ? resolveKnownCode(probe.code, knownCodes)
         : { status: "no_catalog", code: probe.code, candidates: [] };
+
+      // Голое число, дотянутое до каталожного кода двумя нулями («321» → 00321),
+      // на денежном пути больше не бронирует — все 34 таких совпадения за
+      // 13 эфиров пришли внутрь потока комментариев розыгрыша. Строку оператору
+      // при этом оставляем: вне всплеска (его гасит ограничитель выше) это
+      // может быть живой покупатель, и человеку на такое посмотреть полезно.
+      // А вот КНОПКУ «забронировать» под ней не даём — иначе одним кликом
+      // создаётся ровно та бронь, которую денежный путь только что отклонил.
+      const bookableByBuyerRule = probeCodeResolution.status !== "matched"
+        || hasReservationKeywordToken(comment.text)
+        || codesEquivalent(probe.code, probeCodeResolution.code, {
+          maxZeroPad: BUYER_MAX_ZERO_PAD,
+          ambiguousCodes: productCodeCache?.getAmbiguousCodes?.() || null,
+        });
       const attentionCode = probeCodeResolution.status === "matched"
         ? probeCodeResolution.code
         : probe.code;
@@ -106,7 +120,9 @@ export function createReservationAttention({
       // (закрыт / другой день кампании). При reason "ambiguous" код подошёл
       // НЕСКОЛЬКИМ открытым лотам — это разные товары, и выбирать за
       // оператора в денежном пути нельзя.
-      const attentionActionId = reason === "no_open_lot" && probeCodeResolution.status === "matched"
+      const attentionActionId = reason === "no_open_lot"
+        && probeCodeResolution.status === "matched"
+        && bookableByBuyerRule
         ? registerPendingReservation({
           code: attentionCode,
           viewerId: comment.viewerId,

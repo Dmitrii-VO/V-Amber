@@ -9,7 +9,9 @@ import { createMoySkladClient } from "./moysklad.js";
 import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
-import { parseReservationComment, parseWishlistComment, parseCancelComment } from "./reservation-parser.js";
+import {
+  parseReservationComment, parseWishlistComment, parseCancelComment, hasReservationKeywordToken,
+} from "./reservation-parser.js";
 import { parseCancelCommand } from "./cancel-command-parser.js";
 import { parseQuantityCommand } from "./quantity-command-parser.js";
 import { matchNameAgainst } from "./name-matcher.js";
@@ -17,7 +19,7 @@ import { createAuth } from "./auth.js";
 import { createChatClient } from "./chat-client.js";
 import { createViewerLotPublisher } from "./viewer-lot.js";
 import { createCrossPromoPublisher } from "./cross-promo.js";
-import { resolveKnownCode } from "./product-code-resolver.js";
+import { resolveKnownCode, codesEquivalent, BUYER_MAX_ZERO_PAD } from "./product-code-resolver.js";
 import { createReservationAttention } from "./domain/reservation-attention.js";
 import {
   sendJson,
@@ -670,6 +672,10 @@ export function attachWsServer(httpServer, config, services = {}) {
       const lots = getOpenLots();
       const exact = lots.find((candidate) => String(candidate.code) === String(code));
       if (exact) return { lot: exact, ambiguous: false };
+      // Без опций — снисходительный режим по умолчанию. Здесь это НЕ денежный
+      // путь: код произнёс сам оператор, и цена ошибки — «лот не нашёлся».
+      // Строгость покупательского пути (buyerCodeMatchOptions) сюда тянуть
+      // нельзя, иначе сломается голосовая отмена и «+N штук» по «два сорок три».
       const padded = lots.filter((candidate) => codesEquivalent(String(code), String(candidate.code)));
       if (padded.length === 1) return { lot: padded[0], ambiguous: false };
       return { lot: null, ambiguous: padded.length > 1 };
@@ -1929,12 +1935,31 @@ export function attachWsServer(httpServer, config, services = {}) {
       }
     }
 
-    function codesEquivalent(buyerCode, lotCode) {
-      if (!buyerCode || !lotCode) return false;
-      if (buyerCode === lotCode) return true;
-      if (!/^\d+$/.test(buyerCode) || !/^\d+$/.test(lotCode)) return false;
-      const stripLeadingZeros = (code) => code.replace(/^0+/, "") || "0";
-      return stripLeadingZeros(buyerCode) === stripLeadingZeros(lotCode);
+    // Каталога нет (МойСклад не поднялся) — классы коллизий неизвестны, и
+    // нормализацию по нулям выключаем совсем. Деградация в сторону строгости:
+    // точный код покупателя (93.8 % броней) работает всегда, а допуск — это
+    // бонус, который без каталога выдавать не на чем.
+    //
+    // Ключевое слово («бронь 246», «беру 246») — явное намерение человека, и
+    // оно снимает ограничение на нули: случайное число из розыгрыша его не
+    // несёт (в 44 реальных обрезках за 13 эфиров — ни одного с ключевым
+    // словом).
+    //
+    // Окна «лот только что открыли» здесь СОЗНАТЕЛЬНО нет. Оно напрашивается —
+    // покупатель же смотрит на свежую карточку, — но реплей всех 34 коротких
+    // совпадений за 13 эфиров показал, что все до одного пришли внутрь потока
+    // комментариев: 05.07 лот 00178 открыт в 12:40, четверо пишут «178» в
+    // 12:45–12:46, и в эти минуты в ленту падает 61 и 176 комментариев против
+    // нуля минутой раньше. Свежесть лота отличала бы розыгрыш от покупателя
+    // ровно никак, зато вернула бы пять ложных заказов.
+    function buyerCodeMatchOptions(explicitIntent) {
+      const ambiguousCodes = productCodeCache?.getAmbiguousCodes?.() || null;
+      const hasCatalog = (productCodeCache?.getCodes?.()?.size || 0) > 0;
+      if (!hasCatalog) return { maxZeroPad: 0, ambiguousCodes: null };
+      return {
+        maxZeroPad: explicitIntent ? Infinity : BUYER_MAX_ZERO_PAD,
+        ambiguousCodes,
+      };
     }
 
     function findCommentTarget(text) {
@@ -1958,10 +1983,13 @@ export function attachWsServer(httpServer, config, services = {}) {
       // отправить бронь не на тот лот (например, если открыты «00588» и
       // «000588», buyer «588» подходит обоим).
       const paddedMatches = [];
+      // От лота не зависит — считаем один раз на комментарий, а не на лот.
+      const explicitIntent = hasReservationKeywordToken(text);
       for (const lot of openLots) {
         const expectedCode = normalizeReservationCode(lot.code);
         const reservationComment = parseReservationComment(text, { preferredCode: expectedCode });
-        if (reservationComment.code && codesEquivalent(reservationComment.code, expectedCode)) {
+        if (reservationComment.code
+          && codesEquivalent(reservationComment.code, expectedCode, buyerCodeMatchOptions(explicitIntent))) {
           paddedMatches.push({ lot, reservationComment });
         }
       }

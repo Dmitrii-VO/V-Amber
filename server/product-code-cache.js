@@ -26,6 +26,28 @@ export function deriveCodeLengthBounds(codes) {
   return min === null ? null : { min, max };
 }
 
+// Коды, которые срезание ведущих нулей склеивает с ДРУГИМ кодом каталога:
+// «019» и «00019» — два разных товара, «01» и «00001» тоже. В каталоге на
+// 16.08.2026 таких классов 14. Для этих кодов нормализация по нулям запрещена
+// (см. codesEquivalent): выбор наугад — чужой товар в заказе покупателя, а это
+// хуже лишней брони, потому что заметит его только клиент при получении.
+export function deriveAmbiguousCodes(codes) {
+  const byStripped = new Map();
+  for (const raw of codes || []) {
+    const code = String(raw || "").trim();
+    if (!code || !/^\d+$/.test(code)) continue;
+    const stripped = code.replace(/^0+/, "") || "0";
+    const sameStripped = byStripped.get(stripped);
+    if (sameStripped) sameStripped.push(code);
+    else byStripped.set(stripped, [code]);
+  }
+  const ambiguous = new Set();
+  for (const sameStripped of byStripped.values()) {
+    if (sameStripped.length > 1) for (const code of sameStripped) ambiguous.add(code);
+  }
+  return ambiguous;
+}
+
 export function createProductCodeCache({ filePath = defaultFilePath } = {}) {
   // Map<code, {id,name,supplierId,supplierName,buyPrice}>.
   // Раньше тут лежал просто Set кодов — теперь храним обогащённую запись,
@@ -37,6 +59,7 @@ export function createProductCodeCache({ filePath = defaultFilePath } = {}) {
   let lastError = null;
   let fromDisk = false;
   let bounds = null;
+  let ambiguousCodes = new Set();
 
   function snapshot() {
     return {
@@ -54,6 +77,7 @@ export function createProductCodeCache({ filePath = defaultFilePath } = {}) {
     loadedAt = at;
     fromDisk = disk;
     bounds = deriveCodeLengthBounds(products.keys());
+    ambiguousCodes = deriveAmbiguousCodes(products.keys());
   }
 
   // Пишем через tmp+rename: оборванная запись не должна оставить полуфайл,
@@ -86,6 +110,11 @@ export function createProductCodeCache({ filePath = defaultFilePath } = {}) {
     // на константы из .env.
     getCodeLengthBounds() {
       return bounds;
+    },
+    // Внутренний Set отдаём как есть: он маленький (десятки кодов) и
+    // спрашивается на каждый комментарий покупателя. Только на чтение.
+    getAmbiguousCodes() {
+      return ambiguousCodes;
     },
     // Каталог с прошлого запуска. Нужен ровно для одного сценария: МойСклад
     // недоступен на старте эфира. Без него productCodeCache пуст, каталожный
