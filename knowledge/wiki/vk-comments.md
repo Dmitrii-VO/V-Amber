@@ -58,7 +58,10 @@ lot cards, price updates, reservation replies, and wishlist activity.
 - **Unmatched/ambiguous reservations escalate to the operator, not to chat.**
   A `бронь`+code comment that maps to zero or >1 open lots produces a
   `reservationAttention` WS message (amber console banner), never a public VK
-  reply. See [[reservation-flow#Code matching and operator escalation]].
+  reply. С 2026-08-24 такая строка ещё и **переживает эфир** и разбирается после
+  него — во время трансляции баннер не работает как канал (0 отработанных строк
+  из 6488 за 13 эфиров). См. [[web-dashboard#Post-broadcast review]] и
+  [[reservation-flow#Code matching and operator escalation]].
 
 ## Comment polling cadence and queue priority
 

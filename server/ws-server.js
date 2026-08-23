@@ -68,6 +68,7 @@ export function attachWsServer(httpServer, config, services = {}) {
   const wishlistStore = services.wishlistStore || null;
   const nameCacheStore = services.nameCacheStore || null;
   const blockedViewersStore = services.blockedViewersStore || null;
+  const attentionStore = services.attentionStore || null;
   const createSessionLogImpl = services.createSessionLog || createSessionLog;
   const saveActiveStateImpl = services.saveActiveState || saveActiveState;
   const clearActiveStateImpl = services.clearActiveState || clearActiveState;
@@ -2114,6 +2115,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       nameCacheStore,
       getOpenLots: () => getOpenLots(),
       registerPendingReservation: (payload) => registerPendingAttentionReservation(payload),
+      attentionStore,
       pendingReservationTtlMs: pendingAttentionReservations.ttlMs,
       notify: (payload) => sendJson(websocket, payload),
     });
@@ -4418,10 +4420,20 @@ export function attachWsServer(httpServer, config, services = {}) {
               positionId: extra.positionId ?? null,
               message,
             });
+            // Строка разбора закрывается ровно здесь и только на успех:
+            // отказ оставляет её в списке, чтобы оператор попробовал ещё раз
+            // после эфира (safe-mode выключен, МойСклад ожил).
+            if (ok && attentionRowId) {
+              attentionStore?.resolve?.(attentionRowId, {
+                status: "reserved",
+                resolution: { status: auditStatus || status, orderId: extra.orderId ?? null },
+              });
+            }
             if (!ok) sendJson(websocket, { type: "warning", message });
             sendJson(websocket, {
               type: "attentionReservationResult",
               actionId: payload.actionId,
+              rowId: attentionRowId || undefined,
               ok,
               status,
               message,
@@ -4429,13 +4441,31 @@ export function attachWsServer(httpServer, config, services = {}) {
           };
           const ackFail = (message, status = "failed") => ackResult({ ok: false, status, message });
 
-          const pending = peekPendingAttentionReservation(payload.actionId);
+          // Два входа в одну дверь: живой баннер во время эфира (одноразовый
+          // actionId с TTL 30 минут) и разбор ПОСЛЕ эфира (строка из
+          // attention-store, она эфир переживает). Денежный путь ниже общий —
+          // расходится только источник «кого и что бронируем».
+          const attentionRowId = payload.rowId ? String(payload.rowId) : null;
+          const storedRow = attentionRowId ? attentionStore?.get?.(attentionRowId) : null;
+          const pending = peekPendingAttentionReservation(payload.actionId)
+            || (storedRow?.bookable
+              ? {
+                code: storedRow.code,
+                viewerId: storedRow.viewerId,
+                viewerName: storedRow.viewerName,
+                commentId: storedRow.commentId,
+                quantity: storedRow.quantity,
+                source: storedRow.source,
+                issuedAt: Date.parse(storedRow.createdAt) || Date.now(),
+              }
+              : null);
           if (!pending) {
             ackFail("Строка устарела — попросите покупателя повторить код", "expired");
             return;
           }
 
-          if (attentionReservationsInFlight.has(payload.actionId)) {
+          const inFlightKey = payload.actionId || attentionRowId;
+          if (attentionReservationsInFlight.has(inFlightKey)) {
             ackFail("Бронь по этой строке уже создаётся — подождите", "in_flight");
             return;
           }
@@ -4456,7 +4486,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             return;
           }
 
-          attentionReservationsInFlight.add(payload.actionId);
+          attentionReservationsInFlight.add(inFlightKey);
           try {
             // Лот под этот код мог ОТКРЫТЬСЯ, пока строка ждала в баннере (TTL
             // 30 минут): оператор обычно ровно за этим карточку и открывает —
@@ -4804,7 +4834,7 @@ export function attachWsServer(httpServer, config, services = {}) {
             });
             ackFail("Не удалось создать бронь — попробуйте ещё раз");
           } finally {
-            attentionReservationsInFlight.delete(payload.actionId);
+            attentionReservationsInFlight.delete(inFlightKey);
           }
           return;
         }

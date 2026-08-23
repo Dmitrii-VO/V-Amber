@@ -65,6 +65,12 @@ const elements = {
   digestModal: $("digestModal"),
   digestClose: $("digestClose"),
 
+  reviewButton: $("reviewButton"),
+  reviewCount: $("reviewCount"),
+  reviewModal: $("reviewModal"),
+  reviewClose: $("reviewClose"),
+  reviewList: $("reviewList"),
+  reviewEmpty: $("reviewEmpty"),
   blockedButton: $("blockedButton"),
   blockedCount: $("blockedCount"),
   blockedModal: $("blockedModal"),
@@ -1252,6 +1258,7 @@ function handleServerMessage(payload) {
   }
 
   if (payload.type === "reservationAttention") {
+    void refreshReviewCount();
     // Бронь не удалось однозначно сопоставить открытому лоту (нет лота или
     // подходит несколько). Сервер НЕ бронирует и НЕ пишет в публичный VK —
     // показываем оператору строку «требует внимания», чтобы он уточнил у
@@ -1264,6 +1271,14 @@ function handleServerMessage(payload) {
     // Ack на «✓ забронировать» из баннера внимания. Успех — строка уходит
     // (бронь в МойСкладе есть), отказ — кнопка снова кликабельна: токен на
     // сервере живёт до успешной записи, повтор безопасен.
+    // Клик мог прийти и из разбора после эфира — тогда обновляем его список,
+    // а не строку живого баннера.
+    if (payload.rowId) {
+      logEvent(payload.message || (payload.ok ? "Бронь создана" : "Бронь не создана"), payload.ok ? "ok" : "warn");
+      if (!elements.reviewModal.hidden) void renderReviewList();
+      else void refreshReviewCount();
+      return;
+    }
     handleAttentionReservationResult(payload);
     return;
   }
@@ -3333,6 +3348,111 @@ async function renderBlockedList() {
   }
 }
 
+// ── Разбор после эфира ──────────────────────────────────────────────────────
+//
+// Строки «требует внимания» переживают эфир и разбираются здесь. Во время
+// трансляции оператор держит телефон как камеру и в баннер не смотрит: за
+// 13 эфиров таких строк было 6488, а броней из них создано ноль. Кнопка
+// «Забронировать» уходит по WS тем же путём (reserveFromAttention), что и
+// живой баннер, — денежный путь в приложении один.
+
+async function refreshReviewCount() {
+  try {
+    const response = await fetch("/api/attention");
+    if (!response.ok) return;
+    const data = await response.json();
+    elements.reviewCount.textContent = String(data.openCount || 0);
+  } catch { /* счётчик не критичен */ }
+}
+
+async function dismissReviewRow(id) {
+  try {
+    const response = await fetch("/api/attention/dismiss", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    if (!response.ok) return;
+    logEvent("Строка разбора снята");
+    await renderReviewList();
+  } catch (error) {
+    logEvent(`Не удалось снять строку: ${error?.message || error}`, "warn");
+  }
+}
+
+async function renderReviewList() {
+  let rows = [];
+  try {
+    const response = await fetch("/api/attention");
+    if (response.ok) {
+      const data = await response.json();
+      rows = data.rows || [];
+      elements.reviewCount.textContent = String(data.openCount || 0);
+    }
+  } catch { /* показываем пустой список */ }
+
+  clearChildren(elements.reviewList);
+  elements.reviewEmpty.hidden = rows.length > 0;
+
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "blocked-row";
+
+    const body = document.createElement("div");
+    const head = document.createElement("div");
+    head.textContent = `${row.code} — ${row.viewerName || `id ${row.viewerId}`}`;
+    if (row.quantity > 1) head.textContent += ` · ${row.quantity} шт`;
+    const sub = document.createElement("div");
+    sub.className = "dim";
+    const when = row.createdAt ? new Date(row.createdAt).toLocaleString() : "";
+    const why = row.reason === "ambiguous"
+      ? "код подошёл нескольким лотам — выберите товар в МойСкладе сами"
+      : "открытого лота не было";
+    sub.textContent = [when, `«${row.text}»`, why].filter(Boolean).join(" · ");
+    body.append(head, sub);
+
+    const actions = document.createElement("div");
+    if (row.bookable) {
+      const reserve = document.createElement("button");
+      reserve.type = "button";
+      reserve.className = "btn btn--ghost";
+      reserve.textContent = "Забронировать";
+      reserve.title = `Создать бронь ${row.code} для ${row.viewerName || `id ${row.viewerId}`} в МойСкладе`;
+      reserve.addEventListener("click", () => {
+        if (!window.confirm(`Забронировать ${row.code} для ${row.viewerName || `id ${row.viewerId}`}? Позиция будет создана в заказе МойСклад.`)) return;
+        reserve.disabled = true;
+        if (state.websocket?.readyState !== WebSocket.OPEN) {
+          logEvent("Нет связи с сервером — обновите страницу", "warn");
+          reserve.disabled = false;
+          return;
+        }
+        state.websocket.send(JSON.stringify({ type: "reserveFromAttention", rowId: row.id }));
+      });
+      actions.append(reserve);
+    }
+
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "btn btn--ghost";
+    dismiss.textContent = "Снять";
+    dismiss.title = "Убрать из разбора без брони";
+    dismiss.addEventListener("click", () => { void dismissReviewRow(row.id); });
+    actions.append(dismiss);
+
+    item.append(body, actions);
+    elements.reviewList.append(item);
+  }
+}
+
+function openReviewModal() {
+  elements.reviewModal.hidden = false;
+  void renderReviewList();
+}
+
+function closeReviewModal() {
+  elements.reviewModal.hidden = true;
+}
+
 function openBlockedModal() {
   elements.blockedModal.hidden = false;
   void renderBlockedList();
@@ -3404,12 +3524,19 @@ async function sendDigestMessages() {
 
 elements.digestButton.addEventListener("click", openDigestModal);
 elements.digestClose.addEventListener("click", closeDigestModal);
+elements.reviewButton.addEventListener("click", openReviewModal);
+elements.reviewClose.addEventListener("click", closeReviewModal);
+elements.reviewModal.addEventListener("click", (event) => {
+  if (event.target === elements.reviewModal) closeReviewModal();
+});
+
 elements.blockedButton.addEventListener("click", openBlockedModal);
 elements.blockedClose.addEventListener("click", closeBlockedModal);
 elements.blockedModal.addEventListener("click", (event) => {
   if (event.target === elements.blockedModal) closeBlockedModal();
 });
 void refreshBlockedCount();
+void refreshReviewCount();
 elements.digestCancel.addEventListener("click", closeDigestModal);
 elements.digestRefresh.addEventListener("click", loadDigestPreview);
 elements.digestSend.addEventListener("click", sendDigestMessages);
@@ -4362,6 +4489,7 @@ function openModals() {
   return [
     elements.digestModal,
     elements.blockedModal,
+    elements.reviewModal,
     elements.wishlistModal,
     elements.sendLogsModal,
     elements.wishlistConfirmModal,

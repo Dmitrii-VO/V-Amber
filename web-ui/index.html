@@ -50,6 +50,11 @@
             Сводка броней
           </button>
 
+          <button id="reviewButton" class="btn btn--ghost" title="Разбор после эфира: комментарии с кодом, не ставшие бронью">
+            🔎 Разбор
+            <span id="reviewCount" class="wishlist-badge">0</span>
+          </button>
+
           <button id="blockedButton" class="btn btn--ghost" title="Заблокированные зрители: их комментарии не обрабатываются">
             🚫 Блокировки
             <span id="blockedCount" class="wishlist-badge">0</span>
@@ -400,6 +405,26 @@
           </p>
           <div id="blockedList" class="blocked-list"></div>
           <div id="blockedEmpty" class="wishlist-empty">Список пуст.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="reviewModal" class="modal" hidden>
+      <div class="modal-card modal-card--wide">
+        <div class="modal-head">
+          <h3>🔎 Разбор после эфира</h3>
+          <button id="reviewClose" class="btn btn--ghost" aria-label="Закрыть">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="dim" style="margin-top:0;">
+            Покупатель написал код, а однозначного открытого лота под него не было:
+            лот уже закрыли, он был в другой день кампании или код подошёл нескольким
+            лотам сразу. Во время эфира такие строки разбирать некогда — здесь они
+            ждут, пока руки свободны. «Забронировать» создаёт позицию в МойСкладе тем
+            же путём, что и обычная бронь.
+          </p>
+          <div id="reviewList" class="blocked-list"></div>
+          <div id="reviewEmpty" class="wishlist-empty">Разбирать нечего.</div>
         </div>
       </div>
     </div>
