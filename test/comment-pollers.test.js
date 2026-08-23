@@ -47,7 +47,7 @@ async function settle(ticks = 60) {
   for (let i = 0; i < ticks; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
-function setup({ cycles, vkOptions, openLots = 1, stopAfter = 6 }) {
+function setup({ cycles, vkOptions, openLots = 1, stopAfter = 6, getLastReservationSignalAt = () => null }) {
   const driver = createDriver({ stopAfter });
   const comments = [];
   const notices = [];
@@ -59,6 +59,7 @@ function setup({ cycles, vkOptions, openLots = 1, stopAfter = 6 }) {
     connectionId: "ws-test",
     onComment: (c) => comments.push(c),
     getOpenLotCount: () => openLots,
+    getLastReservationSignalAt,
     notify: (p) => notices.push(p),
     sleep: driver.sleep,
   });
@@ -131,24 +132,65 @@ test("собственные комментарии бота отбрасыва�
   assert.deepEqual(comments.map((c) => c.viewerId), [6], "ответ бота нельзя принять за бронь");
 });
 
-test("интервал: активный чат опрашивается часто, тишина растягивает паузу", async () => {
+// Темп опроса задаёт ожидание БРОНЕЙ, а не объём ленты. Розыгрыш «угадай
+// число» даёт сотни комментариев в минуту при нуле броней — раньше опрос
+// залипал на 1.5 с и выбирал квоту VK ровно тогда, когда уходили подтверждения
+// броней (эфиры 24–25.07.2026: 14 из 22 минут с лимитами — минуты потока).
+test("интервал: поток комментариев БЕЗ броней опрос не разгоняет", async () => {
   const { pollers, delays } = setup({
     cycles: [
       { items: [comment(10, 5, "старый")], profiles: [] },
-      { items: [comment(11, 6, "бронь")], profiles: [] },
-      { items: [], profiles: [] },
-      { items: [], profiles: [] },
-      { items: [], profiles: [] },
+      { items: [comment(11, 6, "321")], profiles: [] },
+      { items: [comment(12, 7, "555")], profiles: [] },
+      { items: [comment(13, 8, "777")], profiles: [] },
+      { items: [comment(14, 9, "123")], profiles: [] },
     ],
     stopAfter: 5,
+    // сигнала о бронях нет вообще — как во время розыгрыша
   });
 
   pollers.startVk();
   await settle();
 
   assert.equal(delays[0], 2000, "после инициализации курсора — фиксированная пауза");
-  assert.equal(delays[1], 1500, "был новый комментарий — опрашиваем часто");
-  assert.deepEqual(delays.slice(2, 5), [3000, 4500, 6000], "в тишине интервал плавно растёт");
+  assert.deepEqual(delays.slice(1, 5), [3000, 4500, 6000, 7500],
+    "комментарии сыплются, но броней не ждём — интервал растёт");
+});
+
+test("интервал: пока ждём брони — опрашиваем часто, потом растягиваем", async () => {
+  let signalAt = Date.now();
+  const { pollers, delays } = setup({
+    cycles: [
+      { items: [comment(10, 5, "старый")], profiles: [] },
+      { items: [], profiles: [] },
+      { items: [], profiles: [] },
+      { items: [], profiles: [] },
+      { items: [], profiles: [] },
+    ],
+    stopAfter: 5,
+    getLastReservationSignalAt: () => signalAt,
+  });
+
+  pollers.startVk();
+  await settle();
+  assert.equal(delays[1], 1500, "лот только что открыли — опрашиваем часто");
+  assert.equal(delays[2], 1500, "и продолжаем, пока окно не истекло");
+
+  // Окно ожидания броней истекло — тишина в ленте роли не играет, но и
+  // держать частый опрос больше незачем.
+  signalAt = Date.now() - 5 * 60_000;
+  const tail = setup({
+    cycles: [
+      { items: [comment(20, 5, "старый")], profiles: [] },
+      { items: [], profiles: [] },
+      { items: [], profiles: [] },
+    ],
+    stopAfter: 3,
+    getLastReservationSignalAt: () => signalAt,
+  });
+  tail.pollers.startVk();
+  await settle();
+  assert.deepEqual(tail.delays.slice(1, 3), [3000, 4500], "броней не ждём — интервал растёт");
 });
 
 test("ошибки опроса дают экспоненциальный backoff и одно предупреждение", async () => {

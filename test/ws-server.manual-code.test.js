@@ -701,14 +701,8 @@ test("reservation reuses only today's broadcast order, not an old open order", a
   }
 });
 
-test("stream stop skips remaining lot-close publishes when VK video is gone", async () => {
-  const videoGoneError = new Error("VK API 15: Access denied: video not found");
-  videoGoneError.vkErrorCode = 15;
-  const vk = createVkMock({
-    publishLotClosed: async () => {
-      throw videoGoneError;
-    },
-  });
+test("конец эфира публикует одно объявление на все лоты", async () => {
+  const vk = createVkMock();
   const harness = await startHarness({
     cardsByCode: { "03204": CARD_03204, "03199": CARD_03199 },
     knownCodes: ["03204", "03199"],
@@ -726,21 +720,23 @@ test("stream stop skips remaining lot-close publishes when VK video is gone", as
     client.send({ type: "stop", stoppedAt: new Date().toISOString() });
     await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
 
-    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
+    assert.equal(harness.vk.callsTo("publishBroadcastClosed").length, 1, "одно объявление на эфир");
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 0, "поштучных «Лот закрыт» на конце эфира нет");
   } finally {
     await client.close();
     await harness.close();
   }
 });
 
-// Этап 7 (post-review): остальные stream-fatal коды VK (100 — bad params,
-// 801 — комментарии закрыты) тоже видео-уровневые. Раньше только код 15
-// пропускал оставшиеся лоты — остальные ушли бы серией error-логов.
-test("stream stop also skips remaining publishes for other stream-fatal VK errors", async () => {
+// Конец эфира публикует ОДИН комментарий на все лоты, а не «Лот закрыт» на
+// каждый (24.07.2026: 134 одинаковых комментария за четыре минуты). Поэтому
+// stream-fatal ошибка VK (15 — видео пропало, 801 — комментарии закрыты) не
+// может дать серию error-логов по определению: публикация ровно одна.
+test("недоступное видео на конце эфира не роняет закрытие лотов", async () => {
   const commentsClosed = new Error("VK API 801: Comments are disabled for this video");
   commentsClosed.vkErrorCode = 801;
   const vk = createVkMock({
-    publishLotClosed: async () => {
+    publishBroadcastClosed: async () => {
       throw commentsClosed;
     },
   });
@@ -761,7 +757,8 @@ test("stream stop also skips remaining publishes for other stream-fatal VK error
     client.send({ type: "stop", stoppedAt: new Date().toISOString() });
     await client.waitFor((m) => m.type === "state" && m.openLots?.length === 0, { timeoutMs: 6000 });
 
-    assert.equal(harness.vk.callsTo("publishLotClosed").length, 1);
+    assert.equal(harness.vk.callsTo("publishBroadcastClosed").length, 1, "одно объявление на эфир");
+    assert.equal(harness.vk.callsTo("publishLotClosed").length, 0, "поштучных «Лот закрыт» на конце эфира нет");
   } finally {
     await client.close();
     await harness.close();

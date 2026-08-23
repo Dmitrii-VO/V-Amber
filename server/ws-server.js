@@ -274,6 +274,16 @@ export function attachWsServer(httpServer, config, services = {}) {
     // generation и backoff живут внутри модуля; наружу он отдаёт комментарии
     // в ingestViewerComment и принимает два управляющих вызова — stopVk() при
     // отравлении лота и reset() при перезапуске эфира.
+    // Метка «сейчас идут брони» для темпа опроса комментариев. Ставится там,
+    // где брони реально начинаются: открылся или заново прозвучал лот, и когда
+    // бронь приняли. Раньше опрос разгоняли ЛЮБЫЕ комментарии, и розыгрыш
+    // «угадай число» держал его на максимуме при нуле броней, выбирая квоту VK.
+    let lastReservationSignalAt = null;
+
+    function noteReservationSignal() {
+      lastReservationSignalAt = Date.now();
+    }
+
     const commentPollers = createCommentPollers({
       vk,
       chatClient,
@@ -281,6 +291,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       connectionId,
       onComment: (comment) => ingestViewerComment(comment),
       getOpenLotCount: () => openLotsBySessionId.size,
+      getLastReservationSignalAt: () => lastReservationSignalAt,
       notify: (payload) => sendJson(websocket, payload),
     });
     let customerOrdersByViewerId = new Map();
@@ -508,6 +519,7 @@ export function attachWsServer(httpServer, config, services = {}) {
     function registerOpenLot(lot) {
       if (!lot?.lotSessionId) return;
       openLotsBySessionId.set(lot.lotSessionId, lot);
+      noteReservationSignal();
       handoffCompletedAttentionReservations(lot);
     }
 
@@ -616,47 +628,46 @@ export function attachWsServer(httpServer, config, services = {}) {
         openLotsBySessionId.clear();
         activeLot = null;
         await Promise.allSettled(alreadyClosing);
-        // Последовательно, чтобы при «video not found» на конце эфира можно
-        // было записать ровно один warning и пропустить публикацию закрытия
-        // оставшихся лотов вместо серии error publish failures в логе.
-        let vkStreamUnavailable = false;
+        // Бухгалтерия закрытия — по лоту, объявление в VK — одно на эфир.
+        // Поштучные «Лот закрыт» давали 134 одинаковых комментария за четыре
+        // минуты (24.07.2026) и жгли квоту VK ровно тогда, когда долетают
+        // последние брони. Покупателю сотня одинаковых строк ничего не
+        // сообщает, а одна — сообщает.
+        let announceableLots = 0;
         for (const lot of lots) {
           await settleReservationWorkAtClose(lot, reason);
           await flushOrphanWaitlist(lot, reason);
           logLotClosedOnce(lot, reason);
-          if (isLotPoisoned(lot.lotSessionId) || vkStreamUnavailable) {
-            closingReservationAdmission.delete(lot.lotSessionId);
-            continue;
-          }
-          try {
-            await vk.publishLotClosed(lot);
-          } catch (error) {
-            // Расширили классификатор: stream-fatal означает «дальше публикация
-            // под этим видео не пройдёт» (видео удалено/недоступно/комментарии
-            // закрыты/некорректные параметры) — для массового закрытия лотов
-            // условия видео-уровневые, поэтому останавливаем дальнейшие попытки.
-            if (isVkStreamFatalError(error)) {
-              vkStreamUnavailable = true;
-              logger.warn("vk", "lot_close_skipped_video_unavailable", {
-                connectionId,
-                code: lot.code,
-                lotSessionId: lot.lotSessionId,
-                reason,
-                vkErrorCode: error?.vkErrorCode ?? null,
-                error,
-              });
-            } else {
-              handleVkPublishError(lot, error);
-              logger.error("vk", "lot_close_publish_failed", {
-                connectionId,
-                code: lot.code,
-                lotSessionId: lot.lotSessionId,
-                reason,
-                error,
-              });
-            }
-          }
+          if (!isLotPoisoned(lot.lotSessionId)) announceableLots += 1;
           closingReservationAdmission.delete(lot.lotSessionId);
+        }
+
+        // Все лоты отравлены (у видео выключены комментарии) — публиковать
+        // некуда и незачем.
+        if (announceableLots === 0) return;
+
+        try {
+          await vk.publishBroadcastClosed({ lotCount: announceableLots, reason });
+        } catch (error) {
+          // stream-fatal — видео удалено/недоступно/комментарии закрыты. Раньше
+          // такой отказ приходилось гасить флагом, чтобы не получить серию
+          // ошибок на каждый лот; с одной публикацией серии не бывает.
+          if (isVkStreamFatalError(error)) {
+            logger.warn("vk", "broadcast_close_skipped_video_unavailable", {
+              connectionId,
+              reason,
+              lotCount: announceableLots,
+              vkErrorCode: error?.vkErrorCode ?? null,
+              error,
+            });
+          } else {
+            logger.error("vk", "broadcast_close_publish_failed", {
+              connectionId,
+              reason,
+              lotCount: announceableLots,
+              error,
+            });
+          }
         }
       })();
 
@@ -2463,6 +2474,10 @@ export function attachWsServer(httpServer, config, services = {}) {
         matchedWishlist,
       });
 
+      // Бронь пришла — значит по этому лоту идут покупатели, и следующие
+      // несколько минут опрашиваем часто, даже если лот открыт давно.
+      if (matchedReservation) noteReservationSignal();
+
       if (!matchedReservation) {
         if (matchedWishlist) {
           if (!comment.viewerName) {
@@ -3276,6 +3291,9 @@ export function attachWsServer(httpServer, config, services = {}) {
         }
       }
 
+      // Оператор назвал тот же артикул ещё раз — лот снова «в эфире», и брони
+      // по нему пойдут заново. Для темпа опроса это тот же сигнал, что открытие.
+      noteReservationSignal();
       logger.info("article", "article_redetection_same_code", {
         connectionId,
         code: lot.code,
