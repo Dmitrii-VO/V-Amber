@@ -15,7 +15,12 @@ async function readLocalVersion() {
 function parseVersion(value) {
   if (!value) return null;
   const cleaned = String(value).trim().replace(/^v/i, "");
-  const parts = cleaned.split(/[.+-]/)[0].split(".");
+  // Отрезаем pre-release и build-суффикс («1.2.3-beta», «1.2.3+ci»), но НЕ
+  // точку: раньше в классе был и ".", поэтому split()[0] от «0.1.104» давал
+  // «0», любая версия разбиралась как 0.0.0, сравнение всегда выходило
+  // «равны» — и баннер про обновление не печатался НИ РАЗУ. Именно так прод
+  // простоял на 0.1.71, пока в репозитории было 0.1.103.
+  const parts = cleaned.split(/[+-]/)[0].split(".");
   const nums = parts.map((p) => Number.parseInt(p, 10));
   if (nums.some((n) => !Number.isFinite(n))) return null;
   while (nums.length < 3) nums.push(0);
@@ -77,22 +82,56 @@ function printBanner(localVersion, remoteVersion, instructionLines) {
   console.log(`${border("╚")}${reset}`);
 }
 
-export async function checkForUpdates() {
-  if (process.env.DISABLE_UPDATE_CHECK === "1") return;
+// Последний результат проверки. Раньше checkForUpdates() только печатала
+// рамку в консоль и не возвращала ничего — а консоль оператор не видит: лаунчер
+// через 1.5 с открывает браузер поверх Терминала, и логгер тут же засыпает
+// рамку своим JSON. Именно поэтому в бою стояла 0.1.71, когда в репозитории
+// было 0.1.103 — тридцать версий. Теперь результат живёт здесь, отдаётся в
+// /health и показывается в дашборде, то есть там, где оператор работает.
+//
+// Проверка разовая, на старте: обновляться посреди эфира всё равно нельзя.
+let lastResult = {
+  status: "unknown",
+  localVersion: null,
+  remoteVersion: null,
+  releasesUrl: RELEASES_PAGE,
+  instructions: [],
+  checkedAt: null,
+};
 
-  let localVersion;
-  try {
-    localVersion = await readLocalVersion();
-  } catch (error) {
-    logger.warn("update-check", "read_local_version_failed", { error });
-    return;
+export function getUpdateStatus() {
+  return lastResult;
+}
+
+function finish(next) {
+  lastResult = { ...lastResult, ...next, checkedAt: new Date().toISOString() };
+  return lastResult;
+}
+
+// `fetchImpl` и `localVersion` — швы для тестов: без них проверить сравнение
+// версий можно было только сходив в сеть, поэтому она и не была покрыта вовсе.
+export async function checkForUpdates({ fetchImpl = fetch, localVersion: injectedVersion } = {}) {
+  if (process.env.DISABLE_UPDATE_CHECK === "1") {
+    return finish({ status: "disabled" });
+  }
+
+  let localVersion = injectedVersion;
+  if (!localVersion) {
+    try {
+      localVersion = await readLocalVersion();
+    } catch (error) {
+      logger.warn("update-check", "read_local_version_failed", { error });
+      return finish({ status: "check_failed", reason: "local_version_unreadable" });
+    }
   }
   const localParts = parseVersion(localVersion);
-  if (!localParts) return;
+  if (!localParts) {
+    return finish({ status: "check_failed", reason: "local_version_unparsable", localVersion });
+  }
 
   let response;
   try {
-    response = await fetch(RELEASES_API, {
+    response = await fetchImpl(RELEASES_API, {
       headers: {
         "User-Agent": "V-Amber-update-check",
         Accept: "application/vnd.github+json",
@@ -100,16 +139,21 @@ export async function checkForUpdates() {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (error) {
+    // Сеть, таймаут, DNS. Молчание тут неотличимо от «всё свежее», поэтому
+    // статус отдаём наружу: дашборд скажет «проверить не удалось».
     logger.warn("update-check", "check_failed", { error: error?.message || String(error) });
-    return;
+    return finish({ status: "check_failed", reason: "network", localVersion });
   }
 
+  // 404 — релизов нет вообще (свежий форк, приватный репозиторий). Это не сбой.
   if (response.status === 404) {
-    return;
+    return finish({ status: "current", localVersion, remoteVersion: null });
   }
+  // 403 с лимитом GitHub — самый частый отказ: API режет неавторизованные
+  // запросы по IP, и с одного адреса это ловится легко.
   if (!response.ok) {
     logger.warn("update-check", "check_failed", { status: response.status });
-    return;
+    return finish({ status: "check_failed", reason: `http_${response.status}`, localVersion });
   }
 
   let payload;
@@ -117,16 +161,21 @@ export async function checkForUpdates() {
     payload = await response.json();
   } catch (error) {
     logger.warn("update-check", "check_failed", { error: error?.message || String(error) });
-    return;
+    return finish({ status: "check_failed", reason: "bad_payload", localVersion });
   }
 
   const remoteVersion = typeof payload?.tag_name === "string" ? payload.tag_name.replace(/^v/i, "") : null;
   const remoteParts = parseVersion(remoteVersion);
-  if (!remoteParts) return;
-
-  if (compareVersions(remoteParts, localParts) > 0) {
-    const instructions = await buildUpdateInstructions();
-    printBanner(localVersion, remoteVersion, instructions);
-    logger.info("update-check", "update_available", { local: localVersion, remote: remoteVersion });
+  if (!remoteParts) {
+    return finish({ status: "check_failed", reason: "remote_version_unparsable", localVersion });
   }
+
+  if (compareVersions(remoteParts, localParts) <= 0) {
+    return finish({ status: "current", localVersion, remoteVersion });
+  }
+
+  const instructions = await buildUpdateInstructions();
+  printBanner(localVersion, remoteVersion, instructions);
+  logger.info("update-check", "update_available", { local: localVersion, remote: remoteVersion });
+  return finish({ status: "update_available", localVersion, remoteVersion, instructions });
 }
