@@ -647,6 +647,41 @@ export function createVkPublisher(config) {
         },
       );
     },
+    // Конец эфира — ОДИН комментарий на всё, а не «Лот закрыт» на каждый лот.
+    // Лоты держатся открытыми до конца эфира (их бывает больше сотни), и
+    // закрываются все разом: 24.07.2026 это дало 134 одинаковых комментария за
+    // четыре минуты, а по всем логам — 2034 штуки на 955 лотов. Покупателю они
+    // ничего не сообщают по одному, это дамп состояния в чужую ленту; вдобавок
+    // очередь публикаций упирается в лимит VK ровно тогда, когда долетают
+    // последние брони. Поштучное «Лот закрыт» осталось там, где оно осмысленно:
+    // оператор закрыл один лот посреди эфира (publishLotClosed).
+    async publishBroadcastClosed({ lotCount = 0 } = {}) {
+      if (!isEnabled) {
+        logger.info("vk", "publish_skipped_not_configured", {
+          kind: "broadcast_closed",
+          hasUserToken: Boolean(userToken),
+          ownerId: liveOwnerId || null,
+          videoId: liveVideoId || null,
+        });
+        return { ok: false, skipped: true };
+      }
+
+      const message = "Эфир завершён, брони закрыты. Спасибо всем!";
+
+      return sendWithRetry(
+        () => callVkApi("video.createComment", buildVideoCommentParams({
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+          message,
+        }), videoToken),
+        {
+          kind: "broadcast_closed",
+          lotCount,
+          ownerId: liveOwnerId,
+          videoId: liveVideoId,
+        },
+      );
+    },
     async publishReservationReply({ commentId, message, lotSessionId, code, viewerId, status }) {
       if (!isEnabled || !commentId || !message) {
         logger.info("vk", "publish_skipped_not_configured", {

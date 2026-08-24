@@ -41,6 +41,7 @@ export function createVkMock(overrides = {}) {
     publishLotCard: wrap("publishLotCard", overrides.publishLotCard
       || (async () => ({ comment_id: nextCommentId++ }))),
     publishLotClosed: wrap("publishLotClosed", overrides.publishLotClosed || (async () => {})),
+    publishBroadcastClosed: wrap("publishBroadcastClosed", overrides.publishBroadcastClosed || (async () => {})),
     publishPriceUpdate: wrap("publishPriceUpdate", overrides.publishPriceUpdate || (async () => {})),
     publishDiscountUpdate: wrap("publishDiscountUpdate", overrides.publishDiscountUpdate || (async () => {})),
     publishReservationReply: wrap("publishReservationReply", overrides.publishReservationReply || (async () => {})),

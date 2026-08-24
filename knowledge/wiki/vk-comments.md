@@ -62,12 +62,23 @@ lot cards, price updates, reservation replies, and wishlist activity.
 
 ## Comment polling cadence and queue priority
 
-- **Adaptive poll interval (since 2026-06-06).** The poller in
-  `server/ws-server.js` runs a single global `video.getComments(100)` per cycle
-  (not per-lot). The wait between cycles is now adaptive: ~1.5 s while new
-  comments are arriving, ramping to a max of 8 s when the chat is quiet
-  (`ACTIVE_POLL_MS` / `IDLE_POLL_STEP_MS` / `IDLE_POLL_MAX_MS`). It replaced a
-  fixed 2 s loop. Failure backoff is unchanged (2→4→…→32 s).
+- **Adaptive poll interval (since 2026-06-06, retuned 2026-08-24).** The poller
+  (`server/domain/comment-pollers.js`) runs a single global
+  `video.getComments(100)` per cycle (not per-lot). The wait between cycles is
+  adaptive: ~1.5 s while reservations are expected, ramping to a max of 8 s
+  otherwise (`ACTIVE_POLL_MS` / `IDLE_POLL_STEP_MS` / `IDLE_POLL_MAX_MS`).
+  Failure backoff is unchanged (2→4→…→32 s).
+
+  **What counts as "expected" changed.** Until 2026-08-24 the trigger was *any*
+  new comment, and that was wrong: a giveaway («угадай число») produces ~250
+  comments per minute with zero reservations, the poll sticks at 1.5 s and eats
+  the VK quota exactly when reservation replies need it. Measured on 24–25.07:
+  **0 of 166 rate limits coincided with publishing**, while 14 of the 22
+  rate-limited minutes were flood minutes — and there were only 16 flood minutes
+  in total. The trigger is now `getLastReservationSignalAt`, stamped by
+  `ws-server` when a lot opens or is re-announced and when a reservation is
+  accepted, with a 2-minute window (median reservation lands 31 s after the lot
+  opens, 64 % within the first minute). A giveaway no longer accelerates polling.
 - **Two-lane VK queue (publish priority).** `server/vk.js` serializes all VK API
   calls under one rate limiter (`minApiIntervalMs`, adaptive `backoffMultiplier`
   up to ×8). The queue now has two lanes: publishing (cards, price, reservation
@@ -75,6 +86,23 @@ lot cards, price updates, reservation replies, and wishlist activity.
   **low**-priority `video.getComments` poll. A polling burst therefore no longer
   delays a buyer's reservation reply. Routing is by method name
   (`vkCallPriority`: only `video.getComments` is low).
+
+## Broadcast close: one comment, not one per lot (2026-08-24)
+
+Lots stay open until the эфир ends ([[reservation-flow]]), so they all close at
+once — and until 2026-08-24 each one published its own «Лот закрыт». On
+24.07.2026 that meant **134 identical comments in four minutes**; across all
+logged эфиры, 2034 comments for 955 lots (the doubling was a separate bug, fixed
+by `allLotsClosePromise` on 05.08).
+
+`publishAllLotsClosed` now does the per-lot bookkeeping (settle, orphan waitlist,
+`logLotClosedOnce`) as before but publishes a single `vk.publishBroadcastClosed`
+— «Эфир завершён, брони закрыты. Спасибо всем!» — after the loop. Per-lot
+«Лот закрыт» (`vk.publishLotClosed`) survives only where it carries information:
+the operator closing one lot mid-эфир (1 occurrence in 13 эфиров).
+
+If every open lot is poisoned (comments disabled on the video, error 801) nothing
+is published at all.
 
 ## VK identity for service comments
 

@@ -24,6 +24,10 @@ import {
 //   reset()   — эфир перезапускается: гасим оба и обнуляем курсоры.
 
 const NO_OPEN_LOT_GRACE_MS = 30000;
+// Сколько после сигнала (открылся лот / принята бронь) считаем, что брони ещё
+// идут. Медиана брони — 31 с после открытия лота, 64 % приходят в первую
+// минуту; две минуты закрывают хвост, не растягивая частый опрос на весь эфир.
+const RESERVATION_WINDOW_MS = 120000;
 
 function defaultSleep(ms) {
   return new Promise((resolve) => {
@@ -38,6 +42,10 @@ export function createCommentPollers({
   connectionId,
   onComment,
   getOpenLotCount,
+  // Когда в последний раз случилось то, ради чего стоит опрашивать чаще:
+  // открылся (или был назван заново) лот, либо приняли бронь. Метку ставит
+  // ws-server — здесь мы только сравниваем её с окном. null = не ждём ничего.
+  getLastReservationSignalAt = () => null,
   notify,
   // Шов для тестов: подменяемая пауза между итерациями. В проде — обычный
   // setTimeout. Без него единственный способ проверить адаптивный интервал и
@@ -66,6 +74,11 @@ export function createCommentPollers({
     return { keep: Date.now() - since <= NO_OPEN_LOT_GRACE_MS, since };
   }
 
+  function expectingReservations() {
+    const at = getLastReservationSignalAt();
+    return Number.isFinite(at) && Date.now() - at <= RESERVATION_WINDOW_MS;
+  }
+
   function startVk() {
     if (vkActive) {
       return;
@@ -74,10 +87,17 @@ export function createCommentPollers({
     const generation = ++vkGeneration;
     vkActive = true;
 
-    // Адаптивная частота опроса: пока в чате идут новые комментарии — опрос
-    // частый (ACTIVE_POLL_MS), в тишине плавно растягивается до IDLE_*. Так
-    // в активной фазе брони ловятся быстрее, а в простое мы не жжём квоту VK
-    // и не толкаемся с публикациями. Раньше интервал был фиксированный 2с.
+    // Адаптивная частота опроса. Раньше её задавал ЛЮБОЙ новый комментарий, и
+    // это оказалось ошибкой: розыгрыш «угадай число» даёт 250 комментариев в
+    // минуту при нуле броней, опрос залипает на ACTIVE_POLL_MS и выбирает
+    // квоту VK ровно тогда, когда подтверждения броней уходят со 2–3 попытки
+    // (эфиры 24–25.07.2026: 14 из 22 минут с лимитами — минуты потока, а таких
+    // минут всего 16). Публикации при этом не виноваты вовсе: 0 из 166 лимитов
+    // совпали с ними.
+    //
+    // Теперь темп задаёт ожидание БРОНЕЙ, а не шум ленты: свежий лот (медиана
+    // брони — 31 с после открытия, 64 % в первую минуту) и только что принятая
+    // бронь. Розыгрыш опрос больше не разгоняет.
     const ACTIVE_POLL_MS = 1500;
     const IDLE_POLL_STEP_MS = 1500;
     const IDLE_POLL_MAX_MS = 8000;
@@ -102,7 +122,6 @@ export function createCommentPollers({
           break;
         }
 
-        let activityThisCycle = false;
         try {
           const comments = await vk.getComments(100);
           if (generation !== vkGeneration) {
@@ -127,9 +146,6 @@ export function createCommentPollers({
           const newItems = (comments.items || [])
             .filter((item) => item.id > vkLastCommentId && !vkSeenIds.has(item.id))
             .sort((left, right) => left.id - right.id);
-
-          // Был ли в этом цикле новый трафик — задаёт частоту следующего опроса.
-          activityThisCycle = newItems.length > 0;
 
           for (const comment of newItems) {
             vkLastCommentId = Math.max(vkLastCommentId, comment.id);
@@ -205,12 +221,12 @@ export function createCommentPollers({
         if (consecutiveFailures > 0) {
           // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
           delayMs = Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
-        } else if (activityThisCycle) {
-          // Чат активен — опрашиваем часто.
+        } else if (expectingReservations()) {
+          // Ждём броней — опрашиваем часто.
           quietCycles = 0;
           delayMs = ACTIVE_POLL_MS;
         } else {
-          // Тишина — плавно растягиваем интервал до потолка.
+          // Броней не ждём — плавно растягиваем интервал до потолка.
           quietCycles += 1;
           delayMs = Math.min(IDLE_POLL_MAX_MS, ACTIVE_POLL_MS + quietCycles * IDLE_POLL_STEP_MS);
         }

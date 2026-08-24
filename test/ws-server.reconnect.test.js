@@ -145,8 +145,8 @@ test("persistent stream errors exhaust retries and tear the session down", async
     await failLoop;
     assert.equal(errorMsg.type, "error");
     assert.ok(
-      harness.vk.callsTo("publishLotClosed").length >= 1,
-      "после исчерпания попыток лоты закрываются",
+      harness.vk.callsTo("publishBroadcastClosed").length >= 1,
+      "после исчерпания попыток лоты закрываются и эфир объявляется завершённым",
     );
   } finally {
     await client.close();
