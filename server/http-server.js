@@ -194,7 +194,7 @@ function serializeWishlistEntry(entry) {
 
 export function createStaticServer({
   vk, moysklad, productCodeCache, config,
-  wishlistStore, wishlistSubmissions, settingsStore, blockedViewersStore,
+  wishlistStore, wishlistSubmissions, settingsStore, blockedViewersStore, attentionStore,
   diagnosticRouter, packageVersion,
 } = {}) {
   function diag(kind, payload) {
@@ -831,6 +831,39 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
     // Мягкая блокировка: комментарии зрителя перестают обрабатываться в
     // ws-server (ingestViewerComment), в самом VK они остаются. Бана в
     // сообществе тут нет — см. server/blocked-viewers-store.js.
+
+    // -------------------- Разбор после эфира --------------------
+    //
+    // Строки «требует внимания» переживают эфир: во время трансляции оператор
+    // держит телефон как камеру и в баннер не смотрит — за 13 эфиров 6488 строк
+    // и ноль созданных из них броней. Разбор идёт после эфира, отсюда.
+    if (pathname === "/api/attention" && request.method === "GET") {
+      const includeResolved = urlObject.searchParams.get("all") === "1";
+      jsonResponse(response, 200, {
+        openCount: attentionStore?.openCount?.() || 0,
+        rows: attentionStore?.list?.({ includeResolved }) || [],
+      });
+      return;
+    }
+
+    // Снять строку без брони: покупатель передумал, код был чужой, разобрано
+    // руками в МойСкладе. Бронь по строке создаётся не здесь, а по WS
+    // (reserveFromAttention) — тем же денежным путём, что и живой баннер.
+    if (pathname === "/api/attention/dismiss" && request.method === "POST") {
+      if (!attentionStore) return jsonResponse(response, 503, { error: "store_unavailable" });
+      let body;
+      try { body = await readJsonBody(request, 4096); }
+      catch (error) { return jsonResponse(response, 400, { error: error.message || "bad_request" }); }
+
+      const id = String(body.id ?? "").trim();
+      if (!id) return jsonResponse(response, 400, { error: "id_required" });
+
+      const resolved = attentionStore.resolve(id, { status: "dismissed" });
+      if (!resolved) return jsonResponse(response, 404, { error: "row_not_open" });
+      logger.info("http", "attention_row_dismissed", { id });
+      diag("attention_row_dismissed", { id });
+      return jsonResponse(response, 200, { ok: true, openCount: attentionStore.openCount() });
+    }
 
     if (pathname === "/api/blocked-viewers" && request.method === "GET") {
       jsonResponse(response, 200, {

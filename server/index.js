@@ -20,6 +20,7 @@ import {
 import { createWishlistStore } from "./wishlist-store.js";
 import { createNameCacheStore } from "./name-cache-store.js";
 import { createBlockedViewersStore } from "./blocked-viewers-store.js";
+import { createAttentionStore } from "./attention-store.js";
 import { createWishlistSubmissions } from "./wishlist-submissions.js";
 import { createSettingsStore } from "./settings-store.js";
 import { wrapWithSafeMode, isSafeMode } from "./safe-mode.js";
@@ -229,6 +230,7 @@ async function main() {
   const wishlistStore = createWishlistStore();
   const nameCacheStore = createNameCacheStore();
   const blockedViewersStore = createBlockedViewersStore();
+  const attentionStore = createAttentionStore();
   const settingsStore = createSettingsStore({ fallbacks: config.wishlist });
 
   await Promise.all([
@@ -236,6 +238,7 @@ async function main() {
     wishlistStore.load(),
     nameCacheStore.load(),
     blockedViewersStore.load(),
+    attentionStore.load(),
     settingsStore.load(),
   ]);
 
@@ -345,6 +348,7 @@ async function main() {
     wishlistSubmissions,
     settingsStore,
     blockedViewersStore,
+    attentionStore,
     diagnosticRouter,
     packageVersion,
   });
@@ -356,6 +360,7 @@ async function main() {
     wishlistStore,
     nameCacheStore,
     blockedViewersStore,
+    attentionStore,
     diagnosticRouter,
     packageVersion,
     // Проба «своя площадка в эфире» для перекрёстных подсказок. Инжектится

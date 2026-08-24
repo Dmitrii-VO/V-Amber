@@ -25,6 +25,10 @@ export function createReservationAttention({
   nameCacheStore,
   getOpenLots,
   registerPendingReservation,
+  // Строки переживают эфир и разбираются после него: во время эфира оператор
+  // держит телефон как камеру и в баннер не смотрит — 6488 строк за 13 эфиров
+  // и ноль созданных из них броней. См. server/attention-store.js.
+  attentionStore,
   pendingReservationTtlMs = 30 * 60_000,
   notify,
   floodGuard = createCommentFloodGuard(),
@@ -134,6 +138,22 @@ export function createReservationAttention({
         : null;
       const attentionExpiresAt = attentionActionId ? Date.now() + pendingReservationTtlMs : null;
 
+      // Строка разбора. Пишется всегда — и когда бронь из неё создать можно,
+      // и когда нет (ambiguous): оператору после эфира полезно видеть оба
+      // случая, кнопка появится только у первого.
+      const attentionRowId = attentionStore?.add?.({
+        code: attentionCode,
+        originalCode: attentionCode !== probe.code ? probe.code : null,
+        viewerId: comment.viewerId,
+        viewerName: viewerNameForAttention,
+        commentId: comment.id,
+        text: comment.text,
+        quantity: probe.quantity,
+        source: comment.source,
+        reason,
+        bookable: Boolean(attentionActionId),
+      }) || null;
+
       notify({
         type: "reservationAttention",
         reason,
@@ -152,6 +172,7 @@ export function createReservationAttention({
         openLotCodes,
         source: comment.source,
         actionId: attentionActionId || undefined,
+        rowId: attentionRowId || undefined,
         quantity: probe.quantity || 1,
       });
       return true;

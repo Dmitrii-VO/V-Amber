@@ -265,6 +265,7 @@ export async function startHarness({
   chatClient,
   wishlistStore: wishlistStoreOverride,
   blockedViewersStore,
+  attentionStore,
   config: configOverride = {},
   createSessionLog: createSessionLogOverride,
 } = {}) {
@@ -298,6 +299,7 @@ export async function startHarness({
     productCodeCache,
     wishlistStore,
     ...(blockedViewersStore ? { blockedViewersStore } : {}),
+    ...(attentionStore ? { attentionStore } : {}),
     createSpeechKitSession,
     createSessionLog: createSessionLogOverride || ((...args) => {
       const sessionLog = createSessionLogMock(...args);
