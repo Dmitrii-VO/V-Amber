@@ -1617,7 +1617,16 @@ export function attachWsServer(httpServer, config, services = {}) {
         sendJson(websocket, {
           type: "warning",
           message: `Бронь ${lot.code} от ${event.viewerName || event.viewerId} ждёт цену — назовите или введите цену лота`,
+          // Звук, а не только строка: оператор ведёт эфир с телефона как камеры
+          // и в дашборд не смотрит — предупреждение, которое надо УВИДЕТЬ, за
+          // 13 эфиров не сработало ни разу (баннер броней: 0 из 6488).
+          // Гарнитура у оператора есть, сигнал уходит ему в ухо.
+          sound: "attention",
         });
+        // Покупателю тоже отвечаем сразу. Раньше он не получал ничего вообще:
+        // ответ на pending_reservation отсутствовал, и бронь была тихой для
+        // всех — покупатель считал, что забронировал, а заказа не было.
+        await notifyReservationStatus(lot, event);
         emitState();
         return;
       }
@@ -2670,6 +2679,9 @@ export function attachWsServer(httpServer, config, services = {}) {
 
           entry.wishlistEntryId = wishlistEntry.id;
           if (previousStatus !== "order_failed") {
+            // Ответ покупателю зависит от того, ПОЧЕМУ бронь сюда попала:
+            // «товара не хватило» или «цену так и не назвали».
+            entry.previousStatus = previousStatus;
             entry.status = "out_of_stock";
             sessionLog.logReservationOutOfStock({
               viewerName: entry.viewerName,
@@ -2687,6 +2699,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           migratedEntries.push(entry);
         } catch (error) {
           if (previousStatus !== "order_failed") {
+            entry.previousStatus = previousStatus;
             entry.status = "out_of_stock";
             entry.wishlistMigrationFailed = true;
             logReservationFinalized(lot, entry, {

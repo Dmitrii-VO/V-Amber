@@ -271,6 +271,53 @@ async function loadInputDevices() {
   }
 }
 
+// Звуковой сигнал оператору. Во время эфира он держит телефон как камеру и в
+// дашборд не смотрит — за 13 эфиров ни одна строка «требует внимания» не была
+// отработана (0 из 6488). Поэтому то, без чего бронь не станет заказом, обязано
+// звучать, а не подсвечиваться. Оператор работает в гарнитуре, сигнал уходит
+// ему в ухо, а не в эфир.
+//
+// Свой AudioContext, не капчурный: тот живёт ровно столько, сколько идёт
+// запись, и закрывается на паузе — а предупредить надо и в этот момент.
+let attentionAudioContext = null;
+let lastAttentionToneAt = 0;
+const ATTENTION_TONE_MIN_GAP_MS = 4000;
+
+function playAttentionTone() {
+  // Пачка броней по одному лоту без цены дала бы очередь из гудков — оператору
+  // достаточно одного на несколько секунд, чтобы посмотреть на экран.
+  const now = Date.now();
+  if (now - lastAttentionToneAt < ATTENTION_TONE_MIN_GAP_MS) return;
+  lastAttentionToneAt = now;
+  try {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return;
+    if (!attentionAudioContext || attentionAudioContext.state === "closed") {
+      attentionAudioContext = new AudioContextCtor();
+    }
+    if (attentionAudioContext.state === "suspended") void attentionAudioContext.resume();
+    const startAt = attentionAudioContext.currentTime;
+    // Две короткие ноты вверх: узнаётся на слух и не похоже на звук из эфира.
+    for (const [index, frequency] of [880, 1170].entries()) {
+      const oscillator = attentionAudioContext.createOscillator();
+      const gain = attentionAudioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      const noteAt = startAt + index * 0.16;
+      // Плавные фронты: щелчок на резком старте/стопе микрофон ловит охотнее
+      // самой ноты.
+      gain.gain.setValueAtTime(0.0001, noteAt);
+      gain.gain.exponentialRampToValueAtTime(0.12, noteAt + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteAt + 0.14);
+      oscillator.connect(gain).connect(attentionAudioContext.destination);
+      oscillator.start(noteAt);
+      oscillator.stop(noteAt + 0.16);
+    }
+  } catch {
+    // Звук — вспомогательный канал: любая ошибка тут не должна трогать эфир.
+  }
+}
+
 function logEvent(message, level = "info") {
   const row = document.createElement("div");
   row.className = "event";
@@ -1238,6 +1285,7 @@ function handleServerMessage(payload) {
 
   if (payload.type === "warning") {
     logEvent(payload.message || "Предупреждение", "warn");
+    if (payload.sound) playAttentionTone();
     return;
   }
 
