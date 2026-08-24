@@ -248,6 +248,16 @@ function extractQuantity(normalized, code) {
   return 1;
 }
 
+// `parseReservationComment().hasReservationKeyword` исторически означает «это
+// бронь», а не «здесь есть ключевое слово»: голый код тоже возвращает true.
+// Различать эти два случая понадобилось для допуска по ведущим нулям — «бронь
+// 246» это явное намерение человека, а голое «246» на розыгрыше «угадай число»
+// пишут сотнями, и дополнять его нулями до чужого артикула нельзя. Отдельный
+// предикат, а не поле в ответе: поле сравнивают deepEqual'ом двадцать тестов.
+export function hasReservationKeywordToken(text) {
+  return hasReservationKeyword(normalize(text));
+}
+
 export function parseReservationComment(text, options = {}) {
   const { preferredCode = null } = options;
   const normalized = normalize(text);

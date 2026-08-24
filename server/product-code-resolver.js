@@ -52,6 +52,48 @@ function isSafeZeroNormalization(rawCode, knownCode) {
   return stripLeadingZeros(knownCode).length >= MIN_SIGNIFICANT_DIGITS_FOR_ZERO_TRIM;
 }
 
+// Насколько снисходительно сопоставляем код ПОКУПАТЕЛЯ. Одна константа на оба
+// покупательских пути — матчинг открытых лотов и строку «требует внимания»:
+// разъехавшись, они дадут «бронь не создалась, а оператору предложили создать».
+export const BUYER_MAX_ZERO_PAD = 1;
+
+// Эквивалентность «код из речи/комментария ↔ код открытого лота». Раньше жила
+// отдельной наивной копией в ws-server.js (срезала нули с обеих сторон без
+// ограничений) — и именно через неё в МойСклад попадали чужие заказы. На
+// розыгрышах «угадай число» зрители пишут голые трёхзначные числа, а они
+// дополнялись нулями до артикула любого открытого лота: эфир 12.07.2026, пятеро
+// «забронировали» 00321, написав «321» в игре. По логам 13 эфиров настоящий
+// покупатель роняет максимум ОДИН ноль (медиана возраста лота 21 с), а обрезки
+// на два нуля не моложе четырёх минут — то есть это чужие числа.
+//
+// Строгость задаёт вызывающий, потому что цена ошибки у двух источников разная:
+// речь оператора ошибается дёшево (лот не открылся — назовёт ещё раз), а
+// комментарий покупателя — деньгами.
+//
+//   maxZeroPad = Infinity — как было: любое число нулей (речь оператора);
+//   maxZeroPad = 1        — недобор одного нуля (комментарий покупателя);
+//   maxZeroPad = 0        — только точное совпадение (каталога нет — не гадаем).
+//
+// `ambiguousCodes` — коды из класса коллизии каталога (см. deriveAmbiguousCodes
+// в product-code-cache.js): для них нормализация запрещена в любом режиме.
+export function codesEquivalent(buyerCode, lotCode, options = {}) {
+  const { maxZeroPad = Infinity, ambiguousCodes = null } = options;
+  const buyer = String(buyerCode || "").trim();
+  const lot = String(lotCode || "").trim();
+  if (!buyer || !lot) return false;
+  if (buyer === lot) return true;
+  if (!isNumericCode(buyer) || !isNumericCode(lot)) return false;
+  if (stripLeadingZeros(buyer) !== stripLeadingZeros(lot)) return false;
+  if (maxZeroPad <= 0) return false;
+  // Класс коллизии: в каталоге есть ДВА товара, которые срезание нулей склеивает
+  // в один («019» и «00019»). Выбирать между ними наугад в денежном пути нельзя.
+  if (ambiguousCodes?.has(lot)) return false;
+  // Опасное направление ровно одно — покупатель написал МЕНЬШЕ цифр, и мы
+  // дописываем нули. Лишние нули («00015» при лоте «015») случайным числом из
+  // розыгрыша не бывают, их пропускаем всегда.
+  return lot.length - buyer.length <= maxZeroPad;
+}
+
 export function resolveKnownCode(code, knownCodesValue) {
   const rawCode = String(code || "").trim();
   const knownCodes = normalizeKnownCodes(knownCodesValue);
