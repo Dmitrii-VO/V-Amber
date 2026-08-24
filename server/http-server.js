@@ -11,6 +11,7 @@ import { buildLogBundle, listBundleFiles } from "./log-bundle.js";
 import { createReservationDigestLog } from "./reservation-digest-log.js";
 import { createAuth } from "./auth.js";
 import { getStreamStatus } from "./stream-status.js";
+import { getUpdateStatus } from "./version-check.js";
 import { preflightBroadcast, startBroadcast, stopBroadcast, getRelayStatus } from "./stream-orchestrator.js";
 import { createChatClient } from "./chat-client.js";
 import { classifyWriteOutcome } from "./write-journal.js";
@@ -312,7 +313,12 @@ export function createStaticServer({
       };
       const ok = moyskladStatus !== "error" && vkStatus !== "missing_token" && speechkitStatus !== "missing_key";
       response.writeHead(ok ? 200 : 503, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok, version: packageVersion || null, subsystems }));
+      // update — результат стартовой проверки версии. Отдаём наружу, потому что
+      // консольную рамку оператор не видит: лаунчер открывает браузер поверх
+      // Терминала, и логгер тут же засыпает её своим JSON.
+      response.end(JSON.stringify({
+        ok, version: packageVersion || null, subsystems, update: getUpdateStatus(),
+      }));
       return;
     }
 

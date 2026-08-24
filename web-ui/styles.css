@@ -213,6 +213,27 @@ a { color: inherit; }
 .brand-sub { color: var(--text-dim); font-size: var(--fs-xs); font-family: var(--font-mono); }
 .brand-version { color: var(--amber); }
 
+/* Плашка обновления. Стоит в шапке, а не в консоли: консольную рамку оператор
+   не видит — лаунчер открывает браузер поверх Терминала. */
+.update-badge {
+  margin-top: 3px;
+  align-self: flex-start;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 7px;
+  border-radius: 999px;
+  text-decoration: none;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.update-badge:hover { background: color-mix(in srgb, var(--amber) 22%, transparent); }
+.update-badge--muted {
+  border-color: var(--text-dim);
+  color: var(--text-dim);
+  background: transparent;
+}
+
 .topbar-controls { display: flex; align-items: center; gap: var(--gap-3); flex: 1; min-width: 0; flex-wrap: wrap; }
 /* Микрофонный селектор не должен схлопываться до одной буквы, когда рядом
    тесно (узкие экраны MacBook): держим читаемый минимум, а поле VK-URL при

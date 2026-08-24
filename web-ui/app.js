@@ -13,6 +13,7 @@ const elements = {
   sessionDot: $("sessionDot"),
   sessionLabel: $("sessionLabel"),
   projectVersion: $("projectVersion"),
+  updateBadge: $("updateBadge"),
 
   socketDot: $("socketDot"),
   socketState: $("socketState"),
@@ -371,9 +372,46 @@ async function fetchProjectVersion() {
     if (data.version && elements.projectVersion) {
       elements.projectVersion.textContent = `v${data.version}`;
     }
+    renderUpdateBadge(data.update);
   } catch {
     // Version label is informational; keep the header quiet if /health is unavailable.
   }
+}
+
+// Плашка обновления в шапке. Приложение проверяет версию на старте и печатает
+// рамку в консоль, но оператор её не видит: лаунчер через полторы секунды
+// открывает браузер поверх Терминала, а логгер тут же засыпает рамку своим
+// JSON. Поэтому то же самое показываем там, где оператор работает.
+//
+// «Проверить не удалось» показываем отдельно и намеренно: молчание не должно
+// означать сразу и «всё свежее», и «GitHub не ответил» — с одного IP его лимит
+// ловится легко.
+function renderUpdateBadge(update) {
+  const badge = elements.updateBadge;
+  if (!badge) return;
+  badge.classList.remove("update-badge--muted");
+
+  if (update?.status === "update_available") {
+    badge.textContent = `↑ версия ${update.remoteVersion} — обновить`;
+    badge.title = [
+      `У вас ${update.localVersion}, вышла ${update.remoteVersion}.`,
+      ...(update.instructions || []),
+    ].join("\n");
+    badge.href = update.releasesUrl || badge.href;
+    badge.hidden = false;
+    return;
+  }
+
+  if (update?.status === "check_failed") {
+    badge.textContent = "обновления не проверены";
+    badge.title = "Не удалось спросить GitHub о свежей версии при запуске."
+      + " Проверьте вручную на странице релизов.";
+    badge.classList.add("update-badge--muted");
+    badge.hidden = false;
+    return;
+  }
+
+  badge.hidden = true;
 }
 
 function setSocketState(value) {
