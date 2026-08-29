@@ -12,6 +12,10 @@
 
 const MIN_NUMBER = 100;
 const MAX_NUMBER = 999;
+// Потолок на дедуп попыток. Конкурс без победителя и без «стоп» живёт до конца
+// эфира (таймаута нет — решение оператора), и множество id иначе росло бы
+// без границы.
+const SEEN_COMMENTS_LIMIT = 2000;
 
 // Числа в комментарии. Сравниваем ТОЛЬКО целые группы цифр: «1234» не должно
 // выигрывать конкурс на «123», а «+123» и «123!» — должны.
@@ -64,6 +68,9 @@ export function createContest({ random = Math.random, now = () => Date.now() } =
       if (commentId !== null) {
         if (current.seenCommentIds.has(commentId)) return null;
         current.seenCommentIds.add(commentId);
+      }
+      if (current.seenCommentIds.size > SEEN_COMMENTS_LIMIT) {
+        current.seenCommentIds.delete(current.seenCommentIds.values().next().value);
       }
       current.attempts += 1;
 

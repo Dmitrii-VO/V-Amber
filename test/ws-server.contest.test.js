@@ -36,6 +36,13 @@ test("во время конкурса комментарий с кодом ло
     const attempt = await client.waitFor((m) => m.type === "contest" && m.attempts === 1, { timeoutMs: 6000 });
     assert.equal(attempt.active, true, "конкурс продолжается: код лота — не то число");
 
+    // Лента зала во время конкурса не должна пропадать: оператор смотрит на
+    // дашборд именно в этот момент.
+    assert.ok(
+      client.messages.some((m) => m.type === "viewerComment" && m.commentId === 900),
+      "комментарий должен дойти до оператора",
+    );
+
     // Бронь не создаётся: ждём достаточно, чтобы обычный путь успел сходить
     // в МойСклад, будь он не заблокирован.
     await new Promise((resolve) => { setTimeout(resolve, 500); });
@@ -95,6 +102,31 @@ test("кнопка «стоп» завершает конкурс без поб�
     assert.equal(liveEvents(reserved).length, 1);
   } finally {
     await client.close();
+    await harness.close();
+  }
+});
+
+test("перезагрузка дашборда посреди конкурса не снимает торги с паузы", async () => {
+  const harness = await startHarness({ cardsByCode: { "03204": CARD }, knownCodes: ["03204"] });
+  const client = await harness.connect();
+  try {
+    await openLot(harness, client);
+    client.send({ type: "contestStart" });
+    const started = await client.waitFor((m) => m.type === "contest" && m.active, { timeoutMs: 6000 });
+    await client.close();
+
+    // Новое соединение — то же, что F5 в браузере оператора. Число он уже
+    // назвал вслух; если конкурс тихо кончится, числа зрителей снова поедут
+    // в брони — ровно то, ради чего фича делалась.
+    const reopened = await harness.connect();
+    try {
+      const restored = await reopened.waitFor((m) => m.type === "contest", { timeoutMs: 6000 });
+      assert.equal(restored.active, true);
+      assert.equal(restored.number, started.number, "то же число, а не новое");
+    } finally {
+      await reopened.close();
+    }
+  } finally {
     await harness.close();
   }
 });

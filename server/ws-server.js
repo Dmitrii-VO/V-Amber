@@ -86,6 +86,12 @@ export function attachWsServer(httpServer, config, services = {}) {
     || ((speechkitConfig, handlers, meta) =>
       new SpeechKitStreamingSession(speechkitConfig, handlers, meta));
 
+  // Конкурс в эфире: пока он идёт, торги стоят целиком — комментарии не
+  // разбираются как брони, а финалы распознавания не обрабатываются.
+  // Один на сервер, а не на соединение: переподключение дашборда конкурс не
+  // отменяет.
+  const contest = createContest();
+
   function broadcastWishlistCount(count) {
     const payload = JSON.stringify({ type: "wishlist_count_changed", count });
     for (const client of wsServer.clients) {
@@ -300,9 +306,9 @@ export function attachWsServer(httpServer, config, services = {}) {
     });
     let customerOrdersByViewerId = new Map();
 
-    // Конкурс в эфире: пока он идёт, торги стоят целиком — комментарии не
-    // разбираются как брони, а финалы распознавания не обрабатываются.
-    const contest = createContest();
+    // Конкурс живёт в области сервера (см. объявление выше), а не соединения:
+    // перезагрузка дашборда посреди конкурса не должна тихо снимать торги с
+    // паузы, пока оператор уже назвал число вслух.
     const broadcastContest = (extra = {}) => sendJson(websocket, {
       type: "contest",
       ...contest.getState(),
@@ -690,9 +696,6 @@ export function attachWsServer(httpServer, config, services = {}) {
     function resetCustomerOrders() {
       customerOrdersByViewerId = new Map();
       customerOrderSessionVersion += 1;
-      // Эфир кончился — конкурс не должен пережить его и оставить следующую
-      // сессию на паузе.
-      if (contest.stop("session_reset").stopped) broadcastContest();
       // Граcеful shutdown — стирать persisted state, чтобы следующий старт
       // не подхватил его как «брошенный после краша». Fire-and-forget:
       // ошибка disk-IO не должна блокировать остановку сессии.
@@ -2459,10 +2462,26 @@ export function attachWsServer(httpServer, config, services = {}) {
       // оператору отдельным событием, чтобы он читал зал на ноутбуке.
       // Стоит после фильтра блокировок (спамеры в ленту не попадают) и не
       // трогает логику броней ниже.
+      sendJson(websocket, {
+        type: "viewerComment",
+        commentId: comment.id,
+        viewerId: comment.viewerId,
+        viewerName: comment.viewerName
+          || nameCacheStore?.getName?.(comment.viewerId)
+          || "",
+        text: typeof comment.text === "string" ? comment.text.slice(0, 500) : "",
+        createdAt: comment.createdAt || new Date().toISOString(),
+        source: comment.source === "chat" ? "chat" : "vk",
+      });
+
       // Идёт конкурс — торги стоят: комментарий считается попыткой угадать
-      // число и НЕ разбирается как бронь. Так же снимается и та нагрузка,
-      // из-за которой 29.08 ВК ушёл в rate limit: 434 числа за десять минут
-      // больше не превращаются в 434 попытки найти лот.
+      // число и НЕ разбирается как бронь. Проверка стоит ПОСЛЕ отправки
+      // комментария оператору: во время конкурса он смотрит на дашборд, и
+      // лента зала ему нужна ровно тогда, а не «кроме тогда».
+      //
+      // Так же снимается нагрузка, из-за которой 29.08 ВК ушёл в rate limit:
+      // 434 числа за десять минут больше не превращаются в 434 попытки
+      // найти лот.
       if (contest.isActive()) {
         const winner = contest.submit({
           commentId: comment.id,
@@ -2476,18 +2495,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         broadcastContest(winner ? { winner } : {});
         return;
       }
-
-      sendJson(websocket, {
-        type: "viewerComment",
-        commentId: comment.id,
-        viewerId: comment.viewerId,
-        viewerName: comment.viewerName
-          || nameCacheStore?.getName?.(comment.viewerId)
-          || "",
-        text: typeof comment.text === "string" ? comment.text.slice(0, 500) : "",
-        createdAt: comment.createdAt || new Date().toISOString(),
-        source: comment.source === "chat" ? "chat" : "vk",
-      });
 
       // Отмена разбирается ДО брони: «отменяю бронь 03770» содержит и «отмена»,
       // и «бронь», и трактовать это как новую бронь нельзя.
@@ -3535,6 +3542,9 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     logger.info("ws", "client_connected", { connectionId });
+    // Дашборд мог перезагрузиться посреди конкурса — вернём ему панель с
+    // числом, иначе оператор увидит обычный экран, а торги при этом стоят.
+    if (contest.isActive()) broadcastContest();
 
     // Однократное (на эфир) предупреждение «говорите в пустоту»: клиент шлёт
     // аудио, а STT-сессии нет (упала и не переподнялась, или start не прошёл).
@@ -4979,6 +4989,14 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         if (payload.type === "stop") {
           logger.info("ws", "stream_stop_requested", { connectionId });
+          // Эфир кончился — конкурс не должен пережить его и оставить
+          // следующий на паузе. Именно здесь, а не в resetCustomerOrders:
+          // тот зовётся ещё и на закрытии последнего лота, и на обрыве
+          // сокета, а перезагрузку дашборда конкурс переживать обязан.
+          if (contest.stop("stream_stop").stopped) {
+            logger.info("contest", "contest_stopped", { connectionId, reason: "stream_stop" });
+            broadcastContest();
+          }
           await publishAllLotsClosed("stream_stop");
           await wishlistStore?.flush?.();
           sessionLog.logSessionEnd({ reason: "stream_stop" });
