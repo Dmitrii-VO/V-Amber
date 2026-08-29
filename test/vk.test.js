@@ -58,9 +58,6 @@ const ACTIVE_LOT = {
   product: { name: "Брошь", hasPhoto: true, availableStock: 3 },
 };
 
-const USABLE_PHOTO = {
-  photo: { buffer: Buffer.from("x"), contentType: "image/jpeg", filename: "p.jpg" },
-};
 
 test("buildVideoCommentParams omits undefined attachments", () => {
   assert.deepEqual(
