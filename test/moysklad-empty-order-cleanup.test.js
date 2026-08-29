@@ -10,13 +10,16 @@ function response(payload) {
 }
 
 // remainingPositions — сколько позиций осталось в заказе после удаления.
-function stubFetch(calls, { remainingPositions = 0, positionsLookupFails = false } = {}) {
+function stubFetch(calls, { remainingPositions = 0, positionsLookupFails = false, positionGone = false } = {}) {
   return async (input, init) => {
     const url = typeof input === "string" ? new URL(input) : input;
     const path = url.pathname;
     calls.push({ method: init?.method || "GET", path });
 
-    if (init?.method === "DELETE") return { ok: true, status: 200, async json() { return {}; } };
+    if (init?.method === "DELETE") {
+      if (positionGone && path.includes("/positions/")) return { ok: false, status: 404, async json() { return {}; } };
+      return { ok: true, status: 200, async json() { return {}; } };
+    }
     if (path.endsWith("/positions")) {
       if (positionsLookupFails) return { ok: false, status: 500, async json() { return {}; } };
       return response({ meta: { size: remainingPositions }, rows: [] });
@@ -61,4 +64,14 @@ test("проверка позиций не удалась — заказ не у
 
   assert.equal(result.orderDeleted, false, "неизвестно, пуст ли заказ — значит не трогаем");
   assert.equal(calls.filter((c) => c.method === "DELETE").length, 1);
+});
+
+test("позицию сняли не мы (404) — заказ не трогаем", async () => {
+  // Пустым заказ мог стать в чужих руках: менеджер чистит его, чтобы тут же
+  // набрать заново. Удалять его из-под них нельзя.
+  const { result, calls } = await removePosition({ remainingPositions: 0, positionGone: true });
+
+  assert.equal(result.alreadyGone, true);
+  assert.equal(result.orderDeleted, false);
+  assert.equal(calls.filter((c) => c.path.endsWith("/positions")).length, 0, "даже не проверяем");
 });

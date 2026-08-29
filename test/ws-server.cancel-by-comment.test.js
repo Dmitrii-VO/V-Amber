@@ -205,6 +205,28 @@ test("«отмена» без артикула снимает единствен
   }
 });
 
+test("«отмена» без артикула молчит, если в заказе есть бронь с закрытого лота", async () => {
+  // Открытых лотов у покупателя один, но в заказе позиций две: вторая — с
+  // лота, который уже закрыт, и в памяти её нет. Снять «единственную» бронь
+  // тут значит снять не тот товар, чего покупатель не заметит.
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03770": CARD },
+    overrides: { countCustomerOrderPositions: async () => 2 },
+  });
+  const harness = await startHarness({ knownCodes: ["03770"], moysklad });
+  const client = await harness.connect();
+  try {
+    await openLotAndReserve(harness, client);
+
+    harness.vk.pushComment({ id: 601, fromId: 5001, text: "отмена", firstName: "Марина" });
+    await client.waitFor((m) => m.type === "warning" && /не назвал артикул/.test(m.message || ""), { timeoutMs: 6000 });
+    assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
 test("«отмена» без артикула при двух бронях спрашивает артикул", async () => {
   const harness = await startHarness({
     cardsByCode: { "03770": CARD, "03999": OTHER_CARD },
