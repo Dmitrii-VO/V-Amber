@@ -46,7 +46,18 @@ ZIP_URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.zip"
 ZIP_PATH="${TMPDIR}/v-amber.zip"
 curl -fsSL -o "$ZIP_PATH" "$ZIP_URL" || fail "Не удалось скачать ${ZIP_URL}"
 
-say "Распаковываю..."
+# Скачанное — точно ZIP? Провайдер/корпоративный прокси/капча Wi-Fi отдают
+# HTML-страницу с кодом 200, curl её честно сохраняет, и дальше распаковщик
+# говорит «повреждён» — хотя архив на GitHub целый. Проверяем сигнатуру «PK»
+# и показываем, что реально приехало.
+ZIP_SIZE="$(wc -c < "$ZIP_PATH" | tr -d ' ')"
+if [ "$(head -c 2 "$ZIP_PATH")" != "PK" ]; then
+  warn "Скачанный файл не ZIP (${ZIP_SIZE} байт). Первые строки:"
+  head -c 300 "$ZIP_PATH"; echo ""
+  fail "Похоже, скачался не архив, а страница-заглушка (VPN/прокси/Wi-Fi с авторизацией). Проверь сеть и запусти снова, либо скачай ZIP вручную: ${ZIP_URL}"
+fi
+
+say "Распаковываю (${ZIP_SIZE} байт)..."
 if command -v ditto >/dev/null 2>&1; then
   ditto -x -k "$ZIP_PATH" "$TMPDIR" || fail "ZIP повреждён или не удалось распаковать."
 elif command -v bsdtar >/dev/null 2>&1; then
