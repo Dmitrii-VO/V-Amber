@@ -14,3 +14,10 @@ HANDOFF.md
 
 # Локальные настройки агентов
 /.claude
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Локальные инструменты (graft)
+/.ignore
+/.mcp.json
