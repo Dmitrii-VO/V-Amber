@@ -65,8 +65,7 @@ function getLotPrice(activeLot) {
     : salePrice;
 }
 
-function buildLotCardMessage(activeLot, placeholderImageUrl = "", options = {}) {
-  const { forcePlaceholder = false } = options;
+function buildLotCardMessage(activeLot, placeholderImageUrl = "") {
   const product = activeLot?.product;
   const discountAmount = activeLot?.discountAmount || 0;
   const lines = [];
@@ -97,7 +96,9 @@ function buildLotCardMessage(activeLot, placeholderImageUrl = "", options = {}) 
     }
   }
 
-  if (placeholderImageUrl && (forcePlaceholder || !activeLot?.product?.hasPhoto)) {
+  // Карточка всегда без вложения, поэтому заглушка печатается всегда, когда
+  // она задана.
+  if (placeholderImageUrl) {
     lines.push(`Фото: ${placeholderImageUrl}`);
   }
 
@@ -120,21 +121,8 @@ async function parseVkResponse(response) {
   return payload.response;
 }
 
-function buildPhotoAttachment(photo) {
-  const accessKey = photo?.access_key ? `_${photo.access_key}` : "";
-  return `photo${photo.owner_id}_${photo.id}${accessKey}`;
-}
-
 function isVkRateLimitError(error) {
   return error?.vkErrorCode === 6;
-}
-
-// VK 100 «One of the parameters … was missing or invalid» — это как раз
-// «photo is undefined»: само вложение оказалось битым. Текст карточки при
-// этом валиден, поэтому такую ошибку лечим повторной публикацией без фото,
-// а не отказом от карточки.
-function isVkAttachmentError(error) {
-  return error?.vkErrorCode === 100;
 }
 
 // Ошибки, которые не лечатся ретраем: повторный запрос даст то же самое,
@@ -151,10 +139,6 @@ const VK_FATAL_ERROR_CODES = new Set([14, 15, 100, 801]);
 // и ретраи sendWithRetry, и массовое закрытие лотов на конце эфира.
 export function isVkStreamFatalError(error) {
   return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
-}
-
-export function isUsableCommentPhoto(photo) {
-  return Boolean(photo?.buffer && photo?.contentType && photo?.filename);
 }
 
 export function buildVideoCommentParams({ ownerId, videoId, message, attachments, replyToComment }) {
@@ -309,40 +293,6 @@ export function createVkPublisher(config) {
       const response = await fetch(`https://api.vk.com/method/${method}`, { method: "POST", body });
       return parseVkResponse(response);
     }, { priority: vkCallPriority(method) });
-  }
-
-  async function uploadCommentPhoto(photo) {
-    const groupId = String(config?.groupId || "").replace(/^-/, "");
-    const uploadServer = await callVkApi("photos.getWallUploadServer", {
-      group_id: groupId || undefined,
-    }, videoToken);
-
-    const formData = new FormData();
-    formData.set("photo", new Blob([photo.buffer], { type: photo.contentType }), photo.filename);
-
-    const uploadResponse = await fetch(uploadServer.upload_url, {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!uploadResponse.ok) {
-      throw new Error(`VK upload HTTP ${uploadResponse.status}`);
-    }
-
-    const uploadPayload = await uploadResponse.json();
-    const savedPhoto = await callVkApi("photos.saveWallPhoto", {
-      group_id: groupId || undefined,
-      photo: uploadPayload.photo,
-      server: String(uploadPayload.server),
-      hash: uploadPayload.hash,
-    }, videoToken);
-
-    const photoItem = Array.isArray(savedPhoto) ? savedPhoto[0] : null;
-    if (!photoItem?.owner_id || !photoItem?.id) {
-      throw new Error("VK saved photo payload is incomplete");
-    }
-
-    return buildPhotoAttachment(photoItem);
   }
 
   async function fetchComments(count = 20) {
@@ -568,52 +518,19 @@ export function createVkPublisher(config) {
         videoId: liveVideoId,
       };
 
-      // 1. Готовим вложение заранее и ОТДЕЛЬНО от публикации. Если загрузка
-      //    фото упала (битый/недоступный файл) — карточка всё равно должна
-      //    выйти, поэтому переходим в текстовый режим, а не валим публикацию.
-      let attachments;
-      let photoBroken = false;
-      if (isUsableCommentPhoto(productCard?.photo)) {
-        try {
-          attachments = await uploadCommentPhoto(productCard.photo);
-        } catch (error) {
-          photoBroken = true;
-          logger.warn("vk", "lot_card_photo_upload_failed", { ...meta, error });
-        }
-      }
-
-      const message = buildLotCardMessage(activeLot, placeholderImageUrl, {
-        forcePlaceholder: photoBroken,
-      });
-
-      const publish = (text, withPhoto, extraMeta = {}) => sendWithRetry(
+      // Карточка лота уходит текстом, без вложения. Фото у товара в МойСкладе
+      // есть далеко не всегда (29.08 — у 22 из 143), а загрузка в ВК регулярно
+      // отваливалась с «photo is undefined»: 8 карточек без картинки и одна
+      // не опубликованная вовсе за эфир. Товар зритель и так видит в эфире —
+      // карточка нужна ради артикула и цены.
+      return sendWithRetry(
         () => callVkApi("video.createComment", buildVideoCommentParams({
           ownerId: liveOwnerId,
           videoId: liveVideoId,
-          message: text,
-          attachments: withPhoto ? attachments : undefined,
+          message: buildLotCardMessage(activeLot, placeholderImageUrl),
         }), videoToken),
-        { ...meta, withPhoto, ...extraMeta },
+        meta,
       );
-
-      try {
-        return await publish(message, Boolean(attachments));
-      } catch (error) {
-        // 2. Текст карточки валиден, отклонено именно вложение (VK 100
-        //    «photo is undefined») — перепубликуем без фото с плейсхолдером,
-        //    чтобы покупатели всё-таки увидели лот.
-        if (attachments && isVkAttachmentError(error)) {
-          logger.warn("vk", "lot_card_photo_rejected_retry_text_only", {
-            ...meta,
-            vkErrorCode: error.vkErrorCode,
-          });
-          const textMessage = buildLotCardMessage(activeLot, placeholderImageUrl, {
-            forcePlaceholder: true,
-          });
-          return publish(textMessage, false, { fallback: "text_only" });
-        }
-        throw error;
-      }
     },
     async publishLotClosed(activeLot) {
       if (!isEnabled || !activeLot?.lotSessionId) {

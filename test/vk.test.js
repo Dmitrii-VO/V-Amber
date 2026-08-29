@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildVideoCommentParams,
-  isUsableCommentPhoto,
   createVkPublisher,
 } from "../server/vk.js";
 
@@ -98,34 +97,24 @@ test("buildVideoCommentParams includes attachments and reply only when present",
   );
 });
 
-test("isUsableCommentPhoto requires buffer, content type, and filename", () => {
-  assert.equal(isUsableCommentPhoto({
-    buffer: Buffer.from("x"),
-    contentType: "image/jpeg",
-    filename: "product.jpg",
-  }), true);
-  assert.equal(isUsableCommentPhoto({ contentType: "image/jpeg", filename: "product.jpg" }), false);
-  assert.equal(isUsableCommentPhoto({ buffer: Buffer.from("x"), filename: "product.jpg" }), false);
-  assert.equal(isUsableCommentPhoto(null), false);
-});
-
-test("publishLotCard republishes text-only when VK rejects the photo (error 100)", async () => {
+test("карточка лота уходит текстом, без вложения", async () => {
   const stub = installVkFetchStub({
-    createComment: (hasAttachment) => (hasAttachment
-      ? { error: { error_code: 100, error_msg: "photo is undefined" } }
-      : { response: { comment_id: 555 } }),
+    createComment: () => ({ response: { comment_id: 555 } }),
   });
   try {
     const vk = createVkPublisher(PUBLISHER_CONFIG);
+    // Второй аргумент — карточка товара с фото. Оно намеренно игнорируется:
+    // загрузка в ВК регулярно отваливалась «photo is undefined» (8 карточек
+    // без картинки и одна непубликованная за эфир 2026-08-29), а товар зритель
+    // и так видит в эфире.
     const result = await vk.publishLotCard(ACTIVE_LOT, USABLE_PHOTO);
     assert.equal(result.comment_id, 555);
 
     const commentCalls = stub.calls.filter((c) => c.method === "video.createComment");
-    assert.equal(commentCalls.length, 2, "should retry once without the photo");
-    assert.equal(commentCalls[0].params.has("attachments"), true);
-    assert.equal(commentCalls[1].params.has("attachments"), false);
-    // Текстовый фолбэк показывает плейсхолдер-ссылку, хотя у товара hasPhoto.
-    assert.match(commentCalls[1].params.get("message"), /placeholder\.jpg/);
+    assert.equal(commentCalls.length, 1, "никаких повторных публикаций без фото");
+    assert.equal(commentCalls[0].params.has("attachments"), false);
+    // Заглушка печатается всегда, когда задана в конфиге.
+    assert.match(commentCalls[0].params.get("message"), /placeholder\.jpg/);
   } finally {
     stub.restore();
   }
