@@ -3441,6 +3441,26 @@ export function attachWsServer(httpServer, config, services = {}) {
         productCard.priceSource = "voice";
       }
 
+      // Товар числится только в «Брак(на ремонт)», а оператор держит его в
+      // руках и называет в эфире — значит он продаваемый. Переносим единицу
+      // на основной склад, иначе лот открывается с нулевым остатком и вторая
+      // бронь уходит в хотелки на товар, который есть. Условие узкое (в
+      // каталоге на 29.08 таких 16 SKU), так что задержку открытия лота это
+      // почти никогда не трогает.
+      if (productCard
+        && Number(productCard.availableStock) <= 0
+        && Number(productCard.excludedStoreStock) > 0) {
+        const moved = await moysklad.moveOneFromExcludedStore?.({
+          productId: productCard.id,
+          sourceStoreHref: productCard.excludedStoreHref,
+          code: selectedCode,
+        });
+        if (Number(moved) > 0) {
+          productCard.availableStock = Number(productCard.availableStock) + Number(moved);
+          productCard.excludedStoreStock = Number(productCard.excludedStoreStock) - Number(moved);
+        }
+      }
+
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
         return;
       }

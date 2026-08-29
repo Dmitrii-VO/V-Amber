@@ -937,21 +937,76 @@ export function createMoySkladClient(config, options = {}) {
     let stock = 0;
     let reserve = 0;
     let excludedStoreStock = 0;
+    let excludedStoreHref = null;
+    let excludedStoreBest = 0;
     for (const row of rows) {
       const rowStock = Number(row?.stock) || 0;
       const rowReserve = Number(row?.reserve) || 0;
       if (excluded.has(extractEntityIdFromHref(row?.meta?.href, "store"))) {
-        excludedStoreStock += Math.max(0, rowStock - rowReserve);
+        const rowAvailable = Math.max(0, rowStock - rowReserve);
+        excludedStoreStock += rowAvailable;
+        // Складов-исключений может быть несколько; переносить будем с того,
+        // где товара больше всего.
+        if (rowAvailable > excludedStoreBest) {
+          excludedStoreBest = rowAvailable;
+          excludedStoreHref = row.meta.href;
+        }
         continue;
       }
       stock += rowStock;
       reserve += rowReserve;
     }
-    return { stock, reserve, availableStock: stock - reserve, excludedStoreStock };
+    return {
+      stock,
+      reserve,
+      availableStock: stock - reserve,
+      excludedStoreStock,
+      excludedStoreHref,
+    };
   }
 
   return {
     isEnabled,
+    // Оператор назвал артикул в эфире — значит товар у него в руках и он
+    // продаётся, даже если по учёту лежит в «Брак(на ремонт)». Переносим
+    // ОДНУ единицу на основной склад: остальное в браке может быть браком
+    // по-настоящему. Возвращает перенесённое количество (0 — не переносили).
+    async moveOneFromExcludedStore({ productId, sourceStoreHref, code }) {
+      if (!isEnabled || !productId || !sourceStoreHref) return 0;
+      const { organizationId, storeId } = await resolveDefaults();
+      const sourceStoreId = extractEntityIdFromHref(sourceStoreHref, "store");
+      if (!organizationId || !storeId || !sourceStoreId || sourceStoreId === storeId) return 0;
+
+      try {
+        const move = await postJson("entity/move", {
+          organization: buildEntityMeta(config.baseUrl, "organization", organizationId),
+          sourceStore: buildEntityMeta(config.baseUrl, "store", sourceStoreId),
+          targetStore: buildEntityMeta(config.baseUrl, "store", storeId),
+          description: "Автоперенос V-Amber: товар показан в эфире как продаваемый",
+          positions: [{
+            quantity: 1,
+            assortment: buildEntityMeta(config.baseUrl, "product", productId),
+          }],
+        }, { source: "move_from_excluded_store" });
+        logger.info("moysklad", "stock_moved_from_excluded_store", {
+          code: code || null,
+          productId,
+          sourceStoreId,
+          targetStoreId: storeId,
+          moveId: move?.id || null,
+        });
+        return 1;
+      } catch (error) {
+        // Перенос — удобство, а не условие продажи: лот всё равно открывается.
+        logger.warn("moysklad", "stock_move_from_excluded_store_failed", {
+          code: code || null,
+          productId,
+          sourceStoreId,
+          error,
+        });
+        return 0;
+      }
+    },
     async getProductCardByCode(code) {
       if (!isEnabled) {
         logger.info("moysklad", "lookup_skipped_not_configured", { code });
