@@ -3609,7 +3609,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // привязывается к лоту по КОДУ (findCommentTarget). Лотовый
       // lastCommentId, который заполнялся из publicationCommentId, ни на что
       // не влиял — он нигде не читается.
-      const publication = vk.publishLotCard(confirmedLot, productCard);
+      const publication = vk.publishLotCard(confirmedLot);
 
       activateConfirmedLot(detection, confirmedLot, source);
       sessionLog.logLotOpened({

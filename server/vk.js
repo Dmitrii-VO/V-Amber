@@ -497,7 +497,7 @@ export function createVkPublisher(config) {
 
       return fetchComments(count);
     },
-    async publishLotCard(activeLot, productCard = null) {
+    async publishLotCard(activeLot) {
       if (!isEnabled) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "lot_card",

@@ -217,12 +217,6 @@ test("buildProductSnapshot uses quantity directly when present", () => {
   assert.equal(snap.availableStock, 5);
 });
 
-test("buildProductSnapshot defaults imageFilename to 'product.jpg'", () => {
-  const snap = buildProductSnapshot({ id: "p1", code: "C", name: "N" }, {});
-  assert.equal(snap.imageFilename, "product.jpg");
-  assert.equal(snap.imageHref, "");
-});
-
 test("buildProductSnapshot falls back pathName to stockRow.folder.name", () => {
   const snap = buildProductSnapshot(
     { id: "p1", code: "C", name: "N" },

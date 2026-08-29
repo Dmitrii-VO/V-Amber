@@ -107,7 +107,7 @@ test("карточка лота уходит текстом, без вложен
     // загрузка в ВК регулярно отваливалась «photo is undefined» (8 карточек
     // без картинки и одна непубликованная за эфир 2026-08-29), а товар зритель
     // и так видит в эфире.
-    const result = await vk.publishLotCard(ACTIVE_LOT, USABLE_PHOTO);
+    const result = await vk.publishLotCard(ACTIVE_LOT);
     assert.equal(result.comment_id, 555);
 
     const commentCalls = stub.calls.filter((c) => c.method === "video.createComment");
@@ -171,7 +171,7 @@ test("publishLotCard still publishes when photo upload fails", async () => {
   };
   try {
     const vk = createVkPublisher(PUBLISHER_CONFIG);
-    const result = await vk.publishLotCard(ACTIVE_LOT, USABLE_PHOTO);
+    const result = await vk.publishLotCard(ACTIVE_LOT);
     assert.equal(result.comment_id, 777);
     const commentCalls = calls.filter((c) => c.method === "video.createComment");
     assert.equal(commentCalls.length, 1);
