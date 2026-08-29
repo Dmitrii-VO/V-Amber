@@ -901,6 +901,22 @@ export function createMoySkladClient(config, options = {}) {
     }
   }
 
+  // Заказ без позиций — мусор в списке отгрузок. Удаляем только когда позиций
+  // реально не осталось; любая ошибка проверки означает «не трогаем».
+  async function deleteOrderIfEmpty(orderId, source) {
+    try {
+      const positions = await requestJson(`entity/customerorder/${orderId}/positions`, { limit: 1 });
+      const size = Number(positions?.meta?.size);
+      if (!Number.isFinite(size) || size > 0) return false;
+      await deleteJson(`entity/customerorder/${orderId}`, { source });
+      logger.info("moysklad", "empty_customer_order_deleted", { orderId });
+      return true;
+    } catch (error) {
+      logger.warn("moysklad", "empty_customer_order_delete_failed", { orderId, error });
+      return false;
+    }
+  }
+
   return {
     isEnabled,
     async getProductCardByCode(code) {
@@ -1547,7 +1563,13 @@ export function createMoySkladClient(config, options = {}) {
         positionId,
         alreadyGone: Boolean(result?.alreadyGone),
       });
-      return { ok: true, alreadyGone: Boolean(result?.alreadyGone) };
+
+      // Покупатель отменил ВСЁ, что бронировал — шапка заказа на 0 ₽ остаётся
+      // висеть в списке отгрузок мусором. За эфир 2026-08-29 таких осталось
+      // два (VK03154, VK03163). Удаляем сам заказ, а не переводим в «Отменён»:
+      // решение оператора.
+      const orderDeleted = await deleteOrderIfEmpty(orderId, source);
+      return { ok: true, alreadyGone: Boolean(result?.alreadyGone), orderDeleted };
     },
 
     // Пересчёт цены/скидки уже существующей позиции заказа.

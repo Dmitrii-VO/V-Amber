@@ -2252,14 +2252,58 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (processedCancelCommentIds.has(comment.id)) return;
       addBoundedId(processedCancelCommentIds, comment.id);
 
+      // Снимает бронь с ОТКРЫТОГО лота: откатывает счётчик стока лота, чего
+      // путь через МойСклад не умеет. Общая для «отмена 03204» и «отмена»
+      // с одной-единственной бронью.
+      const cancelOnOpenLot = async (lot, event, code, path) => {
+        const { status } = await cancelReservationEvent(lot, event, { reason: "buyer_comment" });
+        logger.info(logSource, "reservation_cancelled_by_comment", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName,
+          code,
+          path,
+          status,
+        });
+        notifyOperator(
+          status === "cancelled" ? "info" : "warning",
+          status === "cancelled"
+            ? `${viewerName || "Покупатель"} отменил бронь ${code} — позиция снята`
+            : `${viewerName || "Покупатель"} просит отмену ${code}, снять не удалось (${status}) — проверьте МойСклад`,
+        );
+        replyToBuyer(status === "cancelled" ? "cancelled" : "failed", { code, lot });
+      };
+
       if (!parsed.code) {
-        // «отмена» без кода: у покупателя может быть несколько броней, гадать
-        // нельзя. Отдаём оператору — он видит ленту комментариев.
+        // «отмена» без кода. Если во всём эфире у покупателя ровно одна живая
+        // бронь — гадать не о чем, снимаем её. За эфир 2026-08-29 таких
+        // комментариев было шесть, и покупателям приходилось писать второй раз.
+        const own = [];
+        for (const lot of openLotsBySessionId.values()) {
+          const events = ensureReservationState(lot).events;
+          if (!Array.isArray(events)) continue;
+          for (const event of events) {
+            if (String(event.viewerId) !== String(comment.viewerId)) continue;
+            if (event.status !== "reserved" && event.status !== "reserved_appended") continue;
+            own.push({ lot, event });
+          }
+        }
+
+        if (own.length === 1) {
+          const { lot, event } = own[0];
+          await cancelOnOpenLot(lot, event, lot.code, "no_code_single");
+          return;
+        }
+
+        // Ноль или несколько — тут угадывать нельзя: снимем не тот товар, и
+        // покупатель этого не заметит. Спрашиваем артикул.
         logger.warn(logSource, "cancel_comment_without_code", {
           connectionId,
           commentId: comment.id,
           viewerId: comment.viewerId,
           viewerName,
+          ownOpenReservations: own.length,
           text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
         });
         notifyOperator("warning", `${viewerName || "Покупатель"} просит отмену, но не назвал артикул — уточните`);
@@ -2281,23 +2325,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           String(candidate.viewerId) === String(comment.viewerId)
           && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
         if (event) {
-          const { status } = await cancelReservationEvent(lot, event, { reason: "buyer_comment" });
-          logger.info(logSource, "reservation_cancelled_by_comment", {
-            connectionId,
-            commentId: comment.id,
-            viewerId: comment.viewerId,
-            viewerName,
-            code,
-            path: "open_lot",
-            status,
-          });
-          notifyOperator(
-            status === "cancelled" ? "info" : "warning",
-            status === "cancelled"
-              ? `${viewerName || "Покупатель"} отменил бронь ${code} — позиция снята`
-              : `${viewerName || "Покупатель"} просит отмену ${code}, снять не удалось (${status}) — проверьте МойСклад`,
-          );
-          replyToBuyer(status === "cancelled" ? "cancelled" : "failed", { code, lot });
+          await cancelOnOpenLot(lot, event, code, "open_lot");
           return;
         }
       }
@@ -2380,6 +2408,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           replyToBuyer("failed", { code });
           return;
         }
+
+        // Заказ опустел и удалён — следующая бронь этого покупателя должна
+        // создать новый, а не дописаться в несуществующий.
+        if (result?.orderDeleted) deleteCustomerOrderCacheForViewer(comment.viewerId);
 
         logger.info(logSource, "reservation_cancelled_by_comment", {
           connectionId,
@@ -2851,6 +2883,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       let result;
       try {
         result = await moysklad.removePositionFromOrder({ orderId, positionId });
+        if (result?.orderDeleted) deleteCustomerOrderCacheForViewer(event.viewerId);
       } catch (error) {
         logger.error("moysklad", "reservation_cancel_failed", {
           connectionId,
