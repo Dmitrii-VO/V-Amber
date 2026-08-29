@@ -948,14 +948,22 @@ export function createMoySkladClient(config, options = {}) {
     }
 
     const { excludedStoreHrefs } = await resolveDefaults();
-    const excluded = new Set(Array.isArray(excludedStoreHrefs) ? excludedStoreHrefs : []);
+    // Сверяем по ИЗВЛЕЧЁННОМУ id склада, а не по строке href: МойСклад
+    // приписывает query-параметры к части meta-ссылок (в этом же ответе href
+    // товара приходит как «…/entity/product/<id>?expand=supplier»), и точное
+    // сравнение промахнулось бы молча — брак снова стал бы продаваемым.
+    const excluded = new Set(
+      (Array.isArray(excludedStoreHrefs) ? excludedStoreHrefs : [])
+        .map((href) => extractEntityIdFromHref(href, "store"))
+        .filter(Boolean),
+    );
     let stock = 0;
     let reserve = 0;
     let excludedStoreStock = 0;
     for (const row of rows) {
       const rowStock = Number(row?.stock) || 0;
       const rowReserve = Number(row?.reserve) || 0;
-      if (excluded.has(row?.meta?.href)) {
+      if (excluded.has(extractEntityIdFromHref(row?.meta?.href, "store"))) {
         excludedStoreStock += Math.max(0, rowStock - rowReserve);
         continue;
       }
@@ -997,20 +1005,33 @@ export function createMoySkladClient(config, options = {}) {
       // «Брак»). report/stock/all агрегирует одну строку на продукт, а
       // несколько `store=...` сегментов в filter работают как OR — поэтому
       // отфильтрованный ответ возвращает уже сумму по нужным складам.
-      // report/stock/all нужен только ради цены, картинки и папки: остаток он
-      // отдаёт агрегатом по всем складам и по части товаров молча возвращает
-      // пустой ответ (03878, 03888, 00258, 03927 в эфире 2026-08-29 — а bystore
-      // по ним отвечал корректно). Фильтр по складам здесь больше не ставим:
-      // он только увеличивал шанс пустого ответа, а остаток теперь считается
-      // ниже по bystore.
+      const { stockStoreHrefs } = await resolveDefaults();
+      const stockFilterParts = [`product=${product.meta?.href}`];
+      if (Array.isArray(stockStoreHrefs) && stockStoreHrefs.length > 0) {
+        for (const href of stockStoreHrefs) {
+          stockFilterParts.push(`store=${href}`);
+        }
+      }
       const stockPayload = await requestJson("report/stock/all", {
-        filter: `product=${product.meta?.href}`,
+        filter: stockFilterParts.join(";"),
         limit: 1,
       });
 
       const stockRow = stockPayload.rows?.[0] || null;
       const productCard = buildProductSnapshot(product, stockRow);
-      Object.assign(productCard, await resolveStockByStore(product.meta?.href));
+
+      // report/stock/all по части товаров молча возвращает пустой ответ (в
+      // эфире 2026-08-29 так вышло по 03878, 03888, 00258, 03927), и тогда
+      // остаток оказывался null, а гейт `typeof stock === "number"` его не
+      // ловил. report/stock/bystore по тем же товарам отвечает корректно.
+      //
+      // Зовём его НЕ всегда: лишний round-trip на открытии лота стоит ~280 мс,
+      // а карточка грузится 143 раза за эфир. Он нужен ровно в двух случаях —
+      // когда агрегат промолчал и когда продавать нечего (тогда из разбивки
+      // видно, лежит ли товар на исключённом складе).
+      if (!stockRow || !(Number(productCard.availableStock) > 0)) {
+        Object.assign(productCard, await resolveStockByStore(product.meta?.href));
+      }
 
       if (productCard.imageHref) {
         try {

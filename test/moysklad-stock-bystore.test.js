@@ -13,7 +13,7 @@ function response(payload) {
 
 // Отвечает на все запросы карточки товара. stockByStore задаётся тестом,
 // null → report/stock/bystore падает (остаток честно неизвестен).
-function stubFetch(stockByStore, { byStoreFails = false } = {}) {
+function stubFetch(stockByStore, { byStoreFails = false, aggregateRow = null } = {}) {
   return async (input) => {
     const url = typeof input === "string" ? new URL(input) : input;
     const path = url.pathname;
@@ -33,8 +33,8 @@ function stubFetch(stockByStore, { byStoreFails = false } = {}) {
       });
     }
     if (path.endsWith("/report/stock/all")) {
-      // Ровно тот случай из эфира 2026-08-29: агрегат молчит.
-      return response({ rows: [] });
+      // По умолчанию — ровно тот случай из эфира 2026-08-29: агрегат молчит.
+      return response({ rows: aggregateRow ? [aggregateRow] : [] });
     }
     if (path.endsWith("/report/stock/bystore")) {
       if (byStoreFails) return { ok: false, status: 500, async json() { return {}; } };
@@ -87,4 +87,37 @@ test("товара нет ни на одном складе — это ноль,
 test("bystore недоступен — остаток остаётся неизвестным, а не нулём", async () => {
   const card = await loadCard([], { byStoreFails: true });
   assert.equal(card.availableStock, null, "иначе оператор потеряет бронь на товар, который держит в руках");
+});
+
+test("агрегат ответил положительным остатком — bystore не дёргаем", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  const inner = stubFetch([], { aggregateRow: { stock: 3, reserve: 0, quantity: 3 } });
+  globalThis.fetch = async (input, init) => {
+    calls.push((typeof input === "string" ? new URL(input) : input).pathname);
+    return inner(input, init);
+  };
+  try {
+    const moysklad = createMoySkladClient({
+      baseUrl: BASE, login: "u", password: "p",
+      excludedStoreNames: ["Брак"], getRetryAttempts: 1, getRetryBaseDelayMs: 1,
+    });
+    const card = await moysklad.getProductCardByCode("03878");
+    assert.equal(card.availableStock, 3);
+    // Лишний round-trip на открытии лота стоит ~280 мс, а карточка грузится
+    // 143 раза за эфир — в обычном случае bystore не нужен.
+    assert.equal(calls.filter((p) => p.endsWith("/report/stock/bystore")).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("агрегат ответил, но bystore упал — остаток берётся из агрегата, уже без брака", async () => {
+  // Фильтр store= на агрегате оставлен именно ради этого пути: иначе при
+  // сбое bystore в остаток молча вернулся бы склад брака.
+  const card = await loadCard([], {
+    byStoreFails: true,
+    aggregateRow: { stock: 1, reserve: 1, quantity: 0 },
+  });
+  assert.equal(card.availableStock, 0);
 });
