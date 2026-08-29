@@ -907,6 +907,25 @@ export function createMoySkladClient(config, options = {}) {
     }
   }
 
+  // Склад-приёмник для переноса из брака: первый разрешённый склад, а не
+  // defaults.storeId — тот при пустом MOYSKLAD_STORE_ID берётся из stores[0]
+  // и в боевом аккаунте оказывается складом брака.
+  function pickSellableStoreId(stockStoreHrefs, excludedStoreHrefs) {
+    const excluded = new Set(
+      (Array.isArray(excludedStoreHrefs) ? excludedStoreHrefs : [])
+        .map((href) => extractEntityIdFromHref(href, "store"))
+        .filter(Boolean),
+    );
+    const configured = extractEntityIdFromHref(config.storeId ? `entity/store/${config.storeId}` : "", "store")
+      || (config.storeId || "");
+    if (configured && !excluded.has(configured)) return configured;
+    for (const href of Array.isArray(stockStoreHrefs) ? stockStoreHrefs : []) {
+      const id = extractEntityIdFromHref(href, "store");
+      if (id && !excluded.has(id)) return id;
+    }
+    return "";
+  }
+
   // Остаток по складам. Возвращает поля для productCard, либо {} — если запрос
   // не удался и остаток честно остаётся неизвестным. Пустой ответ (товара нет
   // ни на одном складе) — это НЕ «неизвестно», это ноль.
@@ -973,15 +992,28 @@ export function createMoySkladClient(config, options = {}) {
     // по-настоящему. Возвращает перенесённое количество (0 — не переносили).
     async moveOneFromExcludedStore({ productId, sourceStoreHref, code }) {
       if (!isEnabled || !productId || !sourceStoreHref) return 0;
-      const { organizationId, storeId } = await resolveDefaults();
+      const { organizationId, stockStoreHrefs, excludedStoreHrefs } = await resolveDefaults();
       const sourceStoreId = extractEntityIdFromHref(sourceStoreHref, "store");
-      if (!organizationId || !storeId || !sourceStoreId || sourceStoreId === storeId) return 0;
+      // Приёмник — обязательно РАЗРЕШЁННЫЙ склад. defaults.storeId при пустом
+      // MOYSKLAD_STORE_ID падает на stores[0], а в боевом аккаунте первым
+      // идёт как раз брак: перенос ушёл бы из брака в брак.
+      const targetStoreId = pickSellableStoreId(stockStoreHrefs, excludedStoreHrefs);
+      if (!organizationId || !targetStoreId || !sourceStoreId || sourceStoreId === targetStoreId) {
+        logger.warn("moysklad", "stock_move_skipped_no_store", {
+          code: code || null, productId, sourceStoreId, targetStoreId: targetStoreId || null,
+        });
+        return 0;
+      }
 
       try {
         const move = await postJson("entity/move", {
           organization: buildEntityMeta(config.baseUrl, "organization", organizationId),
           sourceStore: buildEntityMeta(config.baseUrl, "store", sourceStoreId),
-          targetStore: buildEntityMeta(config.baseUrl, "store", storeId),
+          targetStore: buildEntityMeta(config.baseUrl, "store", targetStoreId),
+          // Непроведённый документ остаток НЕ меняет — а весь смысл переноса
+          // именно в остатке. Все 281 существующих перемещения в боевом
+          // аккаунте проведены, полагаться на умолчание API не станем.
+          applicable: true,
           description: "Автоперенос V-Amber: товар показан в эфире как продаваемый",
           positions: [{
             quantity: 1,
@@ -992,7 +1024,7 @@ export function createMoySkladClient(config, options = {}) {
           code: code || null,
           productId,
           sourceStoreId,
-          targetStoreId: storeId,
+          targetStoreId,
           moveId: move?.id || null,
         });
         return 1;
