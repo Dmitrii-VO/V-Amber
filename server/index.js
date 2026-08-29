@@ -312,6 +312,9 @@ async function main() {
       "removePositionFromOrder",
       "updateCustomerOrderPositionPricing",
       "createPurchaseOrder",
+      // Перемещение из брака — тоже запись в боевой учёт: без этой строки
+      // safe mode его не останавливал.
+      "moveOneFromExcludedStore",
     ],
     "moysklad",
   );
