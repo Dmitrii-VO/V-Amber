@@ -6,6 +6,7 @@ import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount, matchesDiscountTrigger } from "./discount-detector.js";
 import { detectPrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
+import { createContest } from "./contest.js";
 import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
@@ -298,6 +299,15 @@ export function attachWsServer(httpServer, config, services = {}) {
       notify: (payload) => sendJson(websocket, payload),
     });
     let customerOrdersByViewerId = new Map();
+
+    // Конкурс в эфире: пока он идёт, торги стоят целиком — комментарии не
+    // разбираются как брони, а финалы распознавания не обрабатываются.
+    const contest = createContest();
+    const broadcastContest = (extra = {}) => sendJson(websocket, {
+      type: "contest",
+      ...contest.getState(),
+      ...extra,
+    });
     let customerOrderSessionVersion = 1;
     // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
     // другая неустранимая ошибка. Любые публикации/опрос для такого лота —
@@ -680,6 +690,9 @@ export function attachWsServer(httpServer, config, services = {}) {
     function resetCustomerOrders() {
       customerOrdersByViewerId = new Map();
       customerOrderSessionVersion += 1;
+      // Эфир кончился — конкурс не должен пережить его и оставить следующую
+      // сессию на паузе.
+      if (contest.stop("session_reset").stopped) broadcastContest();
       // Граcеful shutdown — стирать persisted state, чтобы следующий старт
       // не подхватил его как «брошенный после краша». Fire-and-forget:
       // ошибка disk-IO не должна блокировать остановку сессии.
@@ -2446,6 +2459,24 @@ export function attachWsServer(httpServer, config, services = {}) {
       // оператору отдельным событием, чтобы он читал зал на ноутбуке.
       // Стоит после фильтра блокировок (спамеры в ленту не попадают) и не
       // трогает логику броней ниже.
+      // Идёт конкурс — торги стоят: комментарий считается попыткой угадать
+      // число и НЕ разбирается как бронь. Так же снимается и та нагрузка,
+      // из-за которой 29.08 ВК ушёл в rate limit: 434 числа за десять минут
+      // больше не превращаются в 434 попытки найти лот.
+      if (contest.isActive()) {
+        const winner = contest.submit({
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName: comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "",
+          text: comment.text,
+        });
+        if (winner) {
+          logger.info("contest", "contest_winner", { connectionId, ...winner });
+        }
+        broadcastContest(winner ? { winner } : {});
+        return;
+      }
+
       sendJson(websocket, {
         type: "viewerComment",
         commentId: comment.id,
@@ -3679,6 +3710,17 @@ export function attachWsServer(httpServer, config, services = {}) {
               // Реплика закончилась — нумерация партиалов начинается заново.
               lastPartialText = null;
               partialSeq = 0;
+
+              // Конкурс останавливает и распознавание: пока идёт розыгрыш,
+              // оператор говорит про число, а не про товар, и любой артикул
+              // или цена из этой речи — ложные.
+              // ponytail: поток SpeechKit при этом продолжает работать и жечь
+              // квоту. Рвать и поднимать его заново — риск потерять первые
+              // секунды после конкурса; если квота станет заметной, глушить
+              // на уровне отправки аудио.
+              if (contest.isActive()) {
+                return;
+              }
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs, confidence });
               sessionLog.logTranscriptFinal({ text, latencyMs, confidence });
               sendJson(websocket, { type: "final", text, latencyMs });
@@ -4099,6 +4141,30 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
             }
           }
+          return;
+        }
+
+        if (payload.type === "contestStart") {
+          const started = contest.start();
+          if (started.started) {
+            logger.info("contest", "contest_started", { connectionId, number: started.number });
+          }
+          // Число уходит ТОЛЬКО оператору на дашборд: если его увидят зрители,
+          // угадывать станет нечего.
+          broadcastContest();
+          return;
+        }
+
+        if (payload.type === "contestStop") {
+          const stopped = contest.stop("operator");
+          if (stopped.stopped) {
+            logger.info("contest", "contest_stopped", {
+              connectionId,
+              number: stopped.number,
+              attempts: stopped.attempts,
+            });
+          }
+          broadcastContest({ stopped: stopped.stopped });
           return;
         }
 

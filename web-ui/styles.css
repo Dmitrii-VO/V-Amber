@@ -1121,3 +1121,23 @@ a { color: inherit; }
 /* Строка внимания, по которой действие уже недоступно: причина в title
    кнопки, а сама строка притушена, чтобы не выглядела рабочей. */
 .attention-row--stale { opacity: 0.55; }
+
+/* Конкурс. Число загадывает сервер, видит его только оператор — зрителям он
+   называет его вслух. Панель намеренно крупная и заметная: пока она на
+   экране, торги стоят целиком, и это не должно теряться среди лотов. */
+.contest {
+  display: flex; align-items: center; gap: var(--gap-4);
+  padding: var(--gap-3) var(--gap-5);
+  background: var(--surface);
+  border-bottom: 1px solid var(--amber);
+  flex-wrap: wrap;
+}
+.contest__label {
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--amber);
+}
+.contest__number {
+  font-size: 2.4rem; font-weight: 700; letter-spacing: 0.06em; color: var(--amber);
+  font-variant-numeric: tabular-nums;
+}
+.contest__status { color: var(--text-dim); font-size: var(--fs-sm); flex: 1 1 240px; }

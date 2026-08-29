@@ -157,9 +157,19 @@
                   <input id="manualCodeInput" class="manual-code__input mono" type="text" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="код вручную" />
                   <button id="manualCodeButton" class="btn btn--ghost" type="submit">→ применить</button>
                 </form>
+                <button id="contestButton" class="btn btn--ghost" type="button" hidden title="Загадать трёхзначное число и поставить торги на паузу">🎲 старт конкурса</button>
                 <button id="closeLotButton" class="btn btn--ghost" type="button" hidden title="Закрыть активный лот">× закрыть лот</button>
                 <div id="lotStockPill"></div>
               </div>
+            </div>
+
+            <!-- Конкурс: число видит ТОЛЬКО оператор. Панель поверх лота,
+                 потому что пока она открыта, торги стоят целиком. -->
+            <div id="contestPanel" class="contest" hidden>
+              <div class="contest__label">Конкурс идёт · торги на паузе</div>
+              <div id="contestNumber" class="contest__number mono">—</div>
+              <div id="contestStatus" class="contest__status">Назовите число вслух. Победит первый, кто напишет его в комментариях.</div>
+              <button id="contestStopButton" class="btn btn--ghost" type="button">■ стоп</button>
             </div>
 
             <div id="detectionInset" class="detection" hidden>

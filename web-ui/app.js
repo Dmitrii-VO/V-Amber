@@ -458,6 +458,10 @@ function setLifecycle(next) {
   if (manualCodeForm) {
     manualCodeForm.hidden = !(next === "streaming" || next === "starting");
   }
+  const contestButton = document.getElementById("contestButton");
+  if (contestButton) {
+    contestButton.hidden = !(next === "streaming" || next === "starting");
+  }
 
   if (next === "streaming") {
     setSessionPill("live", "Live");
@@ -1281,7 +1285,40 @@ function renderArticleAmbiguity(payload) {
   logEvent(`Спорный артикул: ${(payload.candidates || []).map((c) => c.code).join(" / ")} — выберите код`, "warn");
 }
 
+// Конкурс. Число приходит с сервера и показывается ТОЛЬКО здесь: оператор
+// называет его вслух, зрители угадывают в комментариях.
+function renderContest(payload) {
+  const panel = document.getElementById("contestPanel");
+  const button = document.getElementById("contestButton");
+  const numberEl = document.getElementById("contestNumber");
+  const statusEl = document.getElementById("contestStatus");
+  if (!panel || !button) return;
+
+  if (payload.winner) {
+    const name = payload.winner.viewerName || `id ${payload.winner.viewerId}`;
+    logEvent(`Конкурс: победил(а) ${name} — число ${payload.winner.number}, попыток ${payload.winner.attempts}`, "info");
+  } else if (payload.stopped) {
+    logEvent("Конкурс остановлен — торги продолжаются", "info");
+  }
+
+  panel.hidden = !payload.active;
+  button.disabled = Boolean(payload.active);
+  if (payload.active) {
+    if (numberEl) numberEl.textContent = String(payload.number);
+    if (statusEl) {
+      statusEl.textContent = payload.attempts > 0
+        ? `Назовите число вслух. Попыток: ${payload.attempts}`
+        : "Назовите число вслух. Победит первый, кто напишет его в комментариях.";
+    }
+  }
+}
+
 function handleServerMessage(payload) {
+  if (payload.type === "contest") {
+    renderContest(payload);
+    return;
+  }
+
   if (payload.type === "articleAmbiguous") {
     renderArticleAmbiguity(payload);
     return;
@@ -2880,6 +2917,17 @@ document.getElementById("closeLotButton")?.addEventListener("click", () => {
 // "manualCode"). Gated by the active STT stream (Variant A) — the form is
 // hidden otherwise, and the server re-checks. Server validates the code
 // against the MoySklad catalog and replies with a warning if it is unknown.
+function sendContest(type) {
+  if (!(state.websocket && state.websocket.readyState === 1)) {
+    logEvent("Связь с сервером не установлена — конкурс не запущен", "warn");
+    return;
+  }
+  state.websocket.send(JSON.stringify({ type }));
+}
+
+document.getElementById("contestButton")?.addEventListener("click", () => sendContest("contestStart"));
+document.getElementById("contestStopButton")?.addEventListener("click", () => sendContest("contestStop"));
+
 document.getElementById("manualCodeForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
   const input = document.getElementById("manualCodeInput");
