@@ -6,6 +6,7 @@ import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount, matchesDiscountTrigger } from "./discount-detector.js";
 import { detectPrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
+import { createContest } from "./contest.js";
 import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
 import { isSafeMode, setSafeMode, onSafeModeChange } from "./safe-mode.js";
 import { saveActiveState, clearActiveState } from "./state-store.js";
@@ -84,6 +85,12 @@ export function attachWsServer(httpServer, config, services = {}) {
   const createSpeechKitSession = services.createSpeechKitSession
     || ((speechkitConfig, handlers, meta) =>
       new SpeechKitStreamingSession(speechkitConfig, handlers, meta));
+
+  // Конкурс в эфире: пока он идёт, торги стоят целиком — комментарии не
+  // разбираются как брони, а финалы распознавания не обрабатываются.
+  // Один на сервер, а не на соединение: переподключение дашборда конкурс не
+  // отменяет.
+  const contest = createContest();
 
   function broadcastWishlistCount(count) {
     const payload = JSON.stringify({ type: "wishlist_count_changed", count });
@@ -298,6 +305,15 @@ export function attachWsServer(httpServer, config, services = {}) {
       notify: (payload) => sendJson(websocket, payload),
     });
     let customerOrdersByViewerId = new Map();
+
+    // Конкурс живёт в области сервера (см. объявление выше), а не соединения:
+    // перезагрузка дашборда посреди конкурса не должна тихо снимать торги с
+    // паузы, пока оператор уже назвал число вслух.
+    const broadcastContest = (extra = {}) => sendJson(websocket, {
+      type: "contest",
+      ...contest.getState(),
+      ...extra,
+    });
     let customerOrderSessionVersion = 1;
     // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
     // другая неустранимая ошибка. Любые публикации/опрос для такого лота —
@@ -2542,6 +2558,28 @@ export function attachWsServer(httpServer, config, services = {}) {
         source: comment.source === "chat" ? "chat" : "vk",
       });
 
+      // Идёт конкурс — торги стоят: комментарий считается попыткой угадать
+      // число и НЕ разбирается как бронь. Проверка стоит ПОСЛЕ отправки
+      // комментария оператору: во время конкурса он смотрит на дашборд, и
+      // лента зала ему нужна ровно тогда, а не «кроме тогда».
+      //
+      // Так же снимается нагрузка, из-за которой 29.08 ВК ушёл в rate limit:
+      // 434 числа за десять минут больше не превращаются в 434 попытки
+      // найти лот.
+      if (contest.isActive()) {
+        const winner = contest.submit({
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName: comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "",
+          text: comment.text,
+        });
+        if (winner) {
+          logger.info("contest", "contest_winner", { connectionId, ...winner });
+        }
+        broadcastContest(winner ? { winner } : {});
+        return;
+      }
+
       // Отмена разбирается ДО брони: «отменяю бронь 03770» содержит и «отмена»,
       // и «бронь», и трактовать это как новую бронь нельзя.
       const cancelComment = parseCancelComment(comment.text, { preferredCode: activeLot?.code || null });
@@ -3589,6 +3627,9 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     logger.info("ws", "client_connected", { connectionId });
+    // Дашборд мог перезагрузиться посреди конкурса — вернём ему панель с
+    // числом, иначе оператор увидит обычный экран, а торги при этом стоят.
+    if (contest.isActive()) broadcastContest();
 
     // Однократное (на эфир) предупреждение «говорите в пустоту»: клиент шлёт
     // аудио, а STT-сессии нет (упала и не переподнялась, или start не прошёл).
@@ -3764,6 +3805,17 @@ export function attachWsServer(httpServer, config, services = {}) {
               // Реплика закончилась — нумерация партиалов начинается заново.
               lastPartialText = null;
               partialSeq = 0;
+
+              // Конкурс останавливает и распознавание: пока идёт розыгрыш,
+              // оператор говорит про число, а не про товар, и любой артикул
+              // или цена из этой речи — ложные.
+              // ponytail: поток SpeechKit при этом продолжает работать и жечь
+              // квоту. Рвать и поднимать его заново — риск потерять первые
+              // секунды после конкурса; если квота станет заметной, глушить
+              // на уровне отправки аудио.
+              if (contest.isActive()) {
+                return;
+              }
               logger.info("speechkit", "final_transcript", { connectionId, text, latencyMs, confidence });
               sessionLog.logTranscriptFinal({ text, latencyMs, confidence });
               sendJson(websocket, { type: "final", text, latencyMs });
@@ -4184,6 +4236,30 @@ export function attachWsServer(httpServer, config, services = {}) {
               });
             }
           }
+          return;
+        }
+
+        if (payload.type === "contestStart") {
+          const started = contest.start();
+          if (started.started) {
+            logger.info("contest", "contest_started", { connectionId, number: started.number });
+          }
+          // Число уходит ТОЛЬКО оператору на дашборд: если его увидят зрители,
+          // угадывать станет нечего.
+          broadcastContest();
+          return;
+        }
+
+        if (payload.type === "contestStop") {
+          const stopped = contest.stop("operator");
+          if (stopped.stopped) {
+            logger.info("contest", "contest_stopped", {
+              connectionId,
+              number: stopped.number,
+              attempts: stopped.attempts,
+            });
+          }
+          broadcastContest({ stopped: stopped.stopped });
           return;
         }
 
@@ -4998,6 +5074,14 @@ export function attachWsServer(httpServer, config, services = {}) {
 
         if (payload.type === "stop") {
           logger.info("ws", "stream_stop_requested", { connectionId });
+          // Эфир кончился — конкурс не должен пережить его и оставить
+          // следующий на паузе. Именно здесь, а не в resetCustomerOrders:
+          // тот зовётся ещё и на закрытии последнего лота, и на обрыве
+          // сокета, а перезагрузку дашборда конкурс переживать обязан.
+          if (contest.stop("stream_stop").stopped) {
+            logger.info("contest", "contest_stopped", { connectionId, reason: "stream_stop" });
+            broadcastContest();
+          }
           await publishAllLotsClosed("stream_stop");
           await wishlistStore?.flush?.();
           sessionLog.logSessionEnd({ reason: "stream_stop" });
