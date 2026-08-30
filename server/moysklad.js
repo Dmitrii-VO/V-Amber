@@ -910,15 +910,17 @@ export function createMoySkladClient(config, options = {}) {
   // Склад-приёмник для переноса из брака: первый разрешённый склад, а не
   // defaults.storeId — тот при пустом MOYSKLAD_STORE_ID берётся из stores[0]
   // и в боевом аккаунте оказывается складом брака.
-  function pickSellableStoreId(stockStoreHrefs, excludedStoreHrefs) {
+  function pickSellableStoreId(defaultStoreId, stockStoreHrefs, excludedStoreHrefs) {
     const excluded = new Set(
       (Array.isArray(excludedStoreHrefs) ? excludedStoreHrefs : [])
         .map((href) => extractEntityIdFromHref(href, "store"))
         .filter(Boolean),
     );
-    const configured = extractEntityIdFromHref(config.storeId ? `entity/store/${config.storeId}` : "", "store")
-      || (config.storeId || "");
-    if (configured && !excluded.has(configured)) return configured;
+    // Основной кандидат — уже разрешённый defaults.storeId: он учитывает и
+    // MOYSKLAD_STORE_ID, и preferredStoreName («Основной склад»). Список
+    // разрешённых складов — только запасной путь: в боевом аккаунте первым
+    // в нём идёт «Аукцион», а не склад продаж.
+    if (defaultStoreId && !excluded.has(defaultStoreId)) return defaultStoreId;
     for (const href of Array.isArray(stockStoreHrefs) ? stockStoreHrefs : []) {
       const id = extractEntityIdFromHref(href, "store");
       if (id && !excluded.has(id)) return id;
@@ -992,12 +994,12 @@ export function createMoySkladClient(config, options = {}) {
     // по-настоящему. Возвращает перенесённое количество (0 — не переносили).
     async moveOneFromExcludedStore({ productId, sourceStoreHref, code }) {
       if (!isEnabled || !productId || !sourceStoreHref) return 0;
-      const { organizationId, stockStoreHrefs, excludedStoreHrefs } = await resolveDefaults();
+      const { organizationId, storeId, stockStoreHrefs, excludedStoreHrefs } = await resolveDefaults();
       const sourceStoreId = extractEntityIdFromHref(sourceStoreHref, "store");
       // Приёмник — обязательно РАЗРЕШЁННЫЙ склад. defaults.storeId при пустом
       // MOYSKLAD_STORE_ID падает на stores[0], а в боевом аккаунте первым
       // идёт как раз брак: перенос ушёл бы из брака в брак.
-      const targetStoreId = pickSellableStoreId(stockStoreHrefs, excludedStoreHrefs);
+      const targetStoreId = pickSellableStoreId(storeId, stockStoreHrefs, excludedStoreHrefs);
       if (!organizationId || !targetStoreId || !sourceStoreId || sourceStoreId === targetStoreId) {
         logger.warn("moysklad", "stock_move_skipped_no_store", {
           code: code || null, productId, sourceStoreId, targetStoreId: targetStoreId || null,
