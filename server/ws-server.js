@@ -314,6 +314,9 @@ export function attachWsServer(httpServer, config, services = {}) {
       ...contest.getState(),
       ...extra,
     });
+    // Товары, уже перенесённые из брака в этом эфире. См. комментарий на месте
+    // использования: перемещение не идемпотентно.
+    const movedFromExcludedStoreProductIds = new Set();
     let customerOrderSessionVersion = 1;
     // «Битые» лоты: у видео в VK отключены комментарии (errorCode 801) или
     // другая неустранимая ошибка. Любые публикации/опрос для такого лота —
@@ -695,6 +698,7 @@ export function attachWsServer(httpServer, config, services = {}) {
 
     function resetCustomerOrders() {
       customerOrdersByViewerId = new Map();
+      movedFromExcludedStoreProductIds.clear();
       customerOrderSessionVersion += 1;
       // Граcеful shutdown — стирать persisted state, чтобы следующий старт
       // не подхватил его как «брошенный после краша». Fire-and-forget:
@@ -3562,6 +3566,32 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (productCard && !hasUsableSalePrice(productCard) && voicePrice?.value) {
         productCard.voicePrice = voicePrice.value;
         productCard.priceSource = "voice";
+      }
+
+      // Товар числится только в «Брак(на ремонт)», а оператор держит его в
+      // руках и называет в эфире — значит он продаваемый. Переносим единицу
+      // на основной склад, иначе лот открывается с нулевым остатком и вторая
+      // бронь уходит в хотелки на товар, который есть. Условие узкое (в
+      // каталоге на 29.08 таких 16 SKU), так что задержку открытия лота это
+      // почти никогда не трогает.
+      if (productCard
+        && Number(productCard.availableStock) <= 0
+        && Number(productCard.excludedStoreStock) > 0
+        // Один перенос на товар за эфир. Перемещение не проходит через
+        // write-журнал и не идемпотентно: потерянный по таймауту ответ на
+        // успевшем POST иначе увёл бы вторую единицу при повторном открытии
+        // того же кода (29.08 так открывали 03903, 03643, 03921).
+        && !movedFromExcludedStoreProductIds.has(productCard.id)) {
+        movedFromExcludedStoreProductIds.add(productCard.id);
+        const moved = await moysklad.moveOneFromExcludedStore?.({
+          productId: productCard.id,
+          sourceStoreHref: productCard.excludedStoreHref,
+          code: selectedCode,
+        });
+        if (Number(moved) > 0) {
+          productCard.availableStock = Number(productCard.availableStock) + Number(moved);
+          productCard.excludedStoreStock = Number(productCard.excludedStoreStock) - Number(moved);
+        }
       }
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {

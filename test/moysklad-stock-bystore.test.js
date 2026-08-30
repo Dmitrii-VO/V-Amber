@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { createMoySkladClient } from "../server/moysklad.js";
 
 const BASE = "https://example.test/api/remap/1.2/";
-const MAIN_STORE = `${BASE}entity/store/main`;
-const BRAK_STORE = `${BASE}entity/store/brak`;
+const MAIN_STORE = `${BASE}entity/store/a544473c-dc8f-11ef-0a80-009b002c995c`;
+const BRAK_STORE = `${BASE}entity/store/0b82e30e-dfd2-11ef-0a80-0791000e5db4`;
 
 function response(payload) {
   return { ok: true, status: 200, async json() { return payload; } };
@@ -21,8 +21,8 @@ function stubFetch(stockByStore, { byStoreFails = false, aggregateRow = null } =
     if (path.endsWith("/entity/store")) {
       return response({
         rows: [
-          { id: "main", name: "Основной склад", meta: { href: MAIN_STORE } },
-          { id: "brak", name: "Брак(на ремонт)", meta: { href: BRAK_STORE } },
+          { id: "a544473c-dc8f-11ef-0a80-009b002c995c", name: "Основной склад", meta: { href: MAIN_STORE } },
+          { id: "0b82e30e-dfd2-11ef-0a80-0791000e5db4", name: "Брак(на ремонт)", meta: { href: BRAK_STORE } },
         ],
       });
     }
