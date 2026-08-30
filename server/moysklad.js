@@ -867,46 +867,6 @@ export function createMoySkladClient(config, options = {}) {
     });
   }
 
-  async function downloadImage(imageHref) {
-    if (!imageHref) {
-      return null;
-    }
-
-    const timeoutMs = Math.max(1000, Number(config?.imageDownloadTimeoutMs || 10000));
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-    }, timeoutMs);
-
-    try {
-      const response = await fetch(imageHref, {
-        headers: {
-          Authorization: authHeader,
-        },
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`MoySklad image HTTP ${response.status}`);
-      }
-
-      const arrayBuffer = await response.arrayBuffer();
-
-      return {
-        buffer: Buffer.from(arrayBuffer),
-        contentType: response.headers.get("content-type") || "application/octet-stream",
-      };
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        throw new Error(`MoySklad image download timed out after ${timeoutMs}ms`);
-      }
-
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
   // Сколько позиций в заказе. Нужно отмене без артикула: снимать единственную
   // бронь можно только убедившись, что она действительно единственная.
   async function countOrderPositions(orderId, source) {
@@ -1122,27 +1082,6 @@ export function createMoySkladClient(config, options = {}) {
         Object.assign(productCard, await resolveStockByStore(product.meta?.href));
       }
 
-      if (productCard.imageHref) {
-        try {
-          const image = await downloadImage(productCard.imageHref);
-          productCard.photo = image
-            ? {
-              ...image,
-              filename: productCard.imageFilename,
-            }
-            : null;
-        } catch (error) {
-          logger.warn("moysklad", "product_image_download_failed", {
-            code,
-            productId: product.id,
-            error,
-          });
-          productCard.photo = null;
-        }
-      } else {
-        productCard.photo = null;
-      }
-
       logger.info("moysklad", "product_card_loaded", {
         code,
         productId: product.id,
@@ -1153,7 +1092,6 @@ export function createMoySkladClient(config, options = {}) {
         reserve: productCard.reserve,
         availableStock: productCard.availableStock,
         excludedStoreStock: productCard.excludedStoreStock ?? null,
-        hasPhoto: Boolean(productCard.photo),
       });
 
       return productCard;

@@ -3311,7 +3311,6 @@ export function attachWsServer(httpServer, config, services = {}) {
           voicePrice: productCard.voicePrice ?? null,
           priceSource: productCard.priceSource || (productCard.voicePrice ? "voice" : "moysklad"),
           availableStock: productCard.availableStock,
-          hasPhoto: Boolean(productCard.photo),
         } : null,
         discountAmount: 0,
         // Окно голосовой правки открывается вместе с лотом и сбрасывается
@@ -3412,8 +3411,7 @@ export function attachWsServer(httpServer, config, services = {}) {
               voicePrice: productCard.voicePrice ?? voicePrice?.value ?? null,
               priceSource: productCard.priceSource || (voicePrice?.value ? "voice" : "moysklad"),
               availableStock: productCard.availableStock,
-              hasPhoto: Boolean(productCard.photo),
-            };
+                };
           }
         } catch (error) {
           logger.warn("moysklad", "product_card_lookup_failed_on_redetection", {
@@ -3611,7 +3609,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       // привязывается к лоту по КОДУ (findCommentTarget). Лотовый
       // lastCommentId, который заполнялся из publicationCommentId, ни на что
       // не влиял — он нигде не читается.
-      const publication = vk.publishLotCard(confirmedLot, productCard);
+      const publication = vk.publishLotCard(confirmedLot);
 
       activateConfirmedLot(detection, confirmedLot, source);
       sessionLog.logLotOpened({

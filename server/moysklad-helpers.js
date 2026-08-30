@@ -160,7 +160,5 @@ export function buildProductSnapshot(product, stockRow) {
     stock,
     reserve,
     availableStock,
-    imageHref: stockRow?.image?.meta?.href || "",
-    imageFilename: stockRow?.image?.filename || "product.jpg",
   };
 }
