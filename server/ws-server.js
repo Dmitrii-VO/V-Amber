@@ -2191,6 +2191,43 @@ export function attachWsServer(httpServer, config, services = {}) {
     // Безопасность держится на контрагенте: заказ находится по viewerId автора
     // комментария, поэтому снять можно ТОЛЬКО собственную бронь — чужой или
     // шуточный комментарий физически не дотянется до чужого заказа.
+    // Сколько живых позиций у покупателя в заказе эфира. null — выяснить не
+    // удалось (нет контрагента, нет заказа, МойСклад молчит); тогда автоотмену
+    // не делаем и спрашиваем артикул.
+    async function countBuyerOrderPositions(viewerId, viewerName, logSource) {
+      try {
+        // Заказ этого покупателя обычно уже в сессионном кеше — тем же путём
+        // его находит и бронь. Лезем в МойСклад только если там пусто.
+        let orderId = null;
+        const prefix = `${String(viewerId)}`;
+        for (const [key, value] of customerOrdersByViewerId) {
+          if (String(key) === prefix || String(key).startsWith(`${prefix}:`)) {
+            orderId = value?.id || null;
+            if (orderId) break;
+          }
+        }
+        if (!orderId) {
+          const counterparty = await moysklad.ensureCounterparty({
+            viewerId,
+            viewerName,
+            createIfMissing: false,
+          });
+          if (!counterparty?.id) return null;
+          const order = await moysklad.findBroadcastCustomerOrderForCounterparty(counterparty.id, {
+            broadcastDate: new Date(),
+            source: logSource,
+          });
+          orderId = order?.id || null;
+        }
+        if (!orderId) return null;
+        const count = await moysklad.countCustomerOrderPositions?.({ orderId, source: logSource });
+        return typeof count === "number" ? count : null;
+      } catch (error) {
+        logger.warn(logSource, "cancel_comment_position_count_failed", { connectionId, viewerId, error });
+        return null;
+      }
+    }
+
     async function handleBuyerCancelComment(comment, parsed, logSource) {
       const viewerName = comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "";
       const notifyOperator = (type, message) => sendJson(websocket, { type, message });
@@ -2252,14 +2289,73 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (processedCancelCommentIds.has(comment.id)) return;
       addBoundedId(processedCancelCommentIds, comment.id);
 
+      // Снимает бронь с ОТКРЫТОГО лота: откатывает счётчик стока лота, чего
+      // путь через МойСклад не умеет. Общая для «отмена 03204» и «отмена»
+      // с одной-единственной бронью.
+      const cancelOnOpenLot = async (lot, event, code, path) => {
+        const { status } = await cancelReservationEvent(lot, event, { reason: "buyer_comment" });
+        logger.info(logSource, "reservation_cancelled_by_comment", {
+          connectionId,
+          commentId: comment.id,
+          viewerId: comment.viewerId,
+          viewerName,
+          code,
+          path,
+          status,
+        });
+        notifyOperator(
+          status === "cancelled" ? "info" : "warning",
+          status === "cancelled"
+            ? `${viewerName || "Покупатель"} отменил бронь ${code} — позиция снята`
+            : `${viewerName || "Покупатель"} просит отмену ${code}, снять не удалось (${status}) — проверьте МойСклад`,
+        );
+        replyToBuyer(status === "cancelled" ? "cancelled" : "failed", { code, lot });
+      };
+
       if (!parsed.code) {
-        // «отмена» без кода: у покупателя может быть несколько броней, гадать
-        // нельзя. Отдаём оператору — он видит ленту комментариев.
+        // «отмена» без кода. Если во всём эфире у покупателя ровно одна живая
+        // бронь — гадать не о чем, снимаем её. За эфир 2026-08-29 таких
+        // комментариев было шесть, и покупателям приходилось писать второй раз.
+        const own = [];
+        for (const lot of openLotsBySessionId.values()) {
+          const events = ensureReservationState(lot).events;
+          if (!Array.isArray(events)) continue;
+          for (const event of events) {
+            if (String(event.viewerId) !== String(comment.viewerId)) continue;
+            if (event.status !== "reserved" && event.status !== "reserved_appended") continue;
+            own.push({ lot, event });
+          }
+        }
+
+        // Открытых лотов мало не бывает (29.08 к концу эфира их было 69), но
+        // бронь покупателя могла остаться и на ЗАКРЫТОМ лоте — в памяти её
+        // нет, а в заказе есть. Снять «единственную» бронь, не проверив это,
+        // значит снять не тот товар, чего покупатель не заметит. Поэтому
+        // подтверждаем единственность по самому заказу.
+        if (own.length === 1 && !isSafeMode()) {
+          const positionCount = await countBuyerOrderPositions(comment.viewerId, viewerName, logSource);
+          if (positionCount === 1) {
+            const { lot, event } = own[0];
+            await cancelOnOpenLot(lot, event, lot.code, "no_code_single");
+            return;
+          }
+          logger.info(logSource, "cancel_comment_without_code_not_single", {
+            connectionId,
+            commentId: comment.id,
+            viewerId: comment.viewerId,
+            openLotReservations: own.length,
+            orderPositions: positionCount,
+          });
+        }
+
+        // Ноль или несколько — тут угадывать нельзя: снимем не тот товар, и
+        // покупатель этого не заметит. Спрашиваем артикул.
         logger.warn(logSource, "cancel_comment_without_code", {
           connectionId,
           commentId: comment.id,
           viewerId: comment.viewerId,
           viewerName,
+          ownOpenReservations: own.length,
           text: typeof comment.text === "string" ? comment.text.slice(0, 200) : "",
         });
         notifyOperator("warning", `${viewerName || "Покупатель"} просит отмену, но не назвал артикул — уточните`);
@@ -2281,23 +2377,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           String(candidate.viewerId) === String(comment.viewerId)
           && (candidate.status === "reserved" || candidate.status === "reserved_appended"));
         if (event) {
-          const { status } = await cancelReservationEvent(lot, event, { reason: "buyer_comment" });
-          logger.info(logSource, "reservation_cancelled_by_comment", {
-            connectionId,
-            commentId: comment.id,
-            viewerId: comment.viewerId,
-            viewerName,
-            code,
-            path: "open_lot",
-            status,
-          });
-          notifyOperator(
-            status === "cancelled" ? "info" : "warning",
-            status === "cancelled"
-              ? `${viewerName || "Покупатель"} отменил бронь ${code} — позиция снята`
-              : `${viewerName || "Покупатель"} просит отмену ${code}, снять не удалось (${status}) — проверьте МойСклад`,
-          );
-          replyToBuyer(status === "cancelled" ? "cancelled" : "failed", { code, lot });
+          await cancelOnOpenLot(lot, event, code, "open_lot");
           return;
         }
       }
@@ -2380,6 +2460,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           replyToBuyer("failed", { code });
           return;
         }
+
+        // Заказ опустел и удалён — следующая бронь этого покупателя должна
+        // создать новый, а не дописаться в несуществующий.
+        if (result?.orderDeleted) deleteCustomerOrderCacheForViewer(comment.viewerId);
 
         logger.info(logSource, "reservation_cancelled_by_comment", {
           connectionId,
@@ -2851,6 +2935,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       let result;
       try {
         result = await moysklad.removePositionFromOrder({ orderId, positionId });
+        if (result?.orderDeleted) deleteCustomerOrderCacheForViewer(event.viewerId);
       } catch (error) {
         logger.error("moysklad", "reservation_cancel_failed", {
           connectionId,

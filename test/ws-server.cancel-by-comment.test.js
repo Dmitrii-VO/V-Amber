@@ -178,13 +178,72 @@ test("проведённый заказ не трогаем: нет открыт
   }
 });
 
-test("«отмена» без артикула ничего не снимает, а спрашивает оператора", async () => {
+test("«отмена» без артикула снимает единственную бронь покупателя", async () => {
   const harness = await startHarness({ cardsByCode: { "03770": CARD }, knownCodes: ["03770"] });
   const client = await harness.connect();
   try {
     await openLotAndReserve(harness, client);
 
+    // Гадать не о чем: во всём эфире у покупателя одна живая бронь. За эфир
+    // 2026-08-29 таких комментариев было шесть, и людям приходилось писать
+    // второй раз с артикулом.
     harness.vk.pushComment({ id: 501, fromId: 5001, text: "отмена", firstName: "Марина" });
+    const cancelled = await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.reservations?.events?.some((e) => e.status === "cancelled"),
+      { timeoutMs: 6000 },
+    );
+
+    assert.equal(cancelled.activeLot.reservations.committedReservationCount, 0);
+    assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 1);
+    assert.ok(
+      replyTexts(harness).some((t) => /бронь снята \(код 03770\)/.test(t)),
+      `ожидали ответ об отмене, получили: ${JSON.stringify(replyTexts(harness))}`,
+    );
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("«отмена» без артикула молчит, если в заказе есть бронь с закрытого лота", async () => {
+  // Открытых лотов у покупателя один, но в заказе позиций две: вторая — с
+  // лота, который уже закрыт, и в памяти её нет. Снять «единственную» бронь
+  // тут значит снять не тот товар, чего покупатель не заметит.
+  const moysklad = createMoyskladMock({
+    cardsByCode: { "03770": CARD },
+    overrides: { countCustomerOrderPositions: async () => 2 },
+  });
+  const harness = await startHarness({ knownCodes: ["03770"], moysklad });
+  const client = await harness.connect();
+  try {
+    await openLotAndReserve(harness, client);
+
+    harness.vk.pushComment({ id: 601, fromId: 5001, text: "отмена", firstName: "Марина" });
+    await client.waitFor((m) => m.type === "warning" && /не назвал артикул/.test(m.message || ""), { timeoutMs: 6000 });
+    assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("«отмена» без артикула при двух бронях спрашивает артикул", async () => {
+  const harness = await startHarness({
+    cardsByCode: { "03770": CARD, "03999": OTHER_CARD },
+    knownCodes: ["03770", "03999"],
+  });
+  const client = await harness.connect();
+  try {
+    await openLotAndReserve(harness, client);
+
+    // Второй лот того же покупателя. Теперь угадывать нельзя: снимем не тот
+    // товар, и покупатель этого не заметит.
+    client.send({ type: "manualCode", code: "03999" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03999");
+    harness.vk.pushComment({ id: 502, fromId: 5001, text: "03999", firstName: "Марина" });
+    await client.waitFor((m) => m.type === "state" && liveEvents(m).length > 0, { timeoutMs: 6000 });
+
+    harness.vk.pushComment({ id: 503, fromId: 5001, text: "отмена", firstName: "Марина" });
     await client.waitFor((m) => m.type === "warning" && /не назвал артикул/.test(m.message || ""), { timeoutMs: 6000 });
     assert.equal(harness.moysklad.callsTo("removePositionFromOrder").length, 0);
 

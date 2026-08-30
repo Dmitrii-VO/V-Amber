@@ -901,8 +901,40 @@ export function createMoySkladClient(config, options = {}) {
     }
   }
 
+  // Сколько позиций в заказе. Нужно отмене без артикула: снимать единственную
+  // бронь можно только убедившись, что она действительно единственная.
+  async function countOrderPositions(orderId, source) {
+    const positions = await requestJson(`entity/customerorder/${orderId}/positions`, { limit: 1 }, { source });
+    const size = Number(positions?.meta?.size);
+    return Number.isFinite(size) ? size : null;
+  }
+
+  // Заказ без позиций — мусор в списке отгрузок. Удаляем только когда позиций
+  // реально не осталось; любая ошибка проверки означает «не трогаем».
+  async function deleteOrderIfEmpty(orderId, source) {
+    try {
+      const size = await countOrderPositions(orderId, source);
+      if (size === null || size > 0) return false;
+      await deleteJson(`entity/customerorder/${orderId}`, { source });
+      logger.info("moysklad", "empty_customer_order_deleted", { orderId });
+      return true;
+    } catch (error) {
+      logger.warn("moysklad", "empty_customer_order_delete_failed", { orderId, error });
+      return false;
+    }
+  }
+
   return {
     isEnabled,
+    async countCustomerOrderPositions({ orderId, source } = {}) {
+      if (!isEnabled || !orderId) return null;
+      try {
+        return await countOrderPositions(orderId, source);
+      } catch (error) {
+        logger.warn("moysklad", "customer_order_positions_count_failed", { orderId, error });
+        return null;
+      }
+    },
     async getProductCardByCode(code) {
       if (!isEnabled) {
         logger.info("moysklad", "lookup_skipped_not_configured", { code });
@@ -1547,7 +1579,19 @@ export function createMoySkladClient(config, options = {}) {
         positionId,
         alreadyGone: Boolean(result?.alreadyGone),
       });
-      return { ok: true, alreadyGone: Boolean(result?.alreadyGone) };
+
+      // Покупатель отменил ВСЁ, что бронировал — шапка заказа на 0 ₽ остаётся
+      // висеть в списке отгрузок мусором. За эфир 2026-08-29 таких осталось
+      // два (VK03154, VK03163). Удаляем сам заказ, а не переводим в «Отменён»:
+      // решение оператора.
+      //
+      // При 404 (позицию сняли не мы) заказ не трогаем: пустым он мог стать
+      // в чужих руках — например менеджер чистит его, чтобы тут же набрать
+      // заново, — и удалять его из-под них нельзя.
+      const orderDeleted = result?.alreadyGone
+        ? false
+        : await deleteOrderIfEmpty(orderId, source);
+      return { ok: true, alreadyGone: Boolean(result?.alreadyGone), orderDeleted };
     },
 
     // Пересчёт цены/скидки уже существующей позиции заказа.

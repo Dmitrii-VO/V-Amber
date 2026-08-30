@@ -95,6 +95,11 @@ export function createMoyskladMock({ cardsByCode = {}, overrides = {} } = {}) {
       overrides.hasPositionForProduct || (async () => ({ inOpenOrder: false }))),
     hasPositionInOrder: wrap("hasPositionInOrder",
       overrides.hasPositionInOrder || (async () => ({ present: false }))),
+    // По умолчанию считаем позиции честно: сколько создали минус сколько сняли.
+    countCustomerOrderPositions: wrap("countCustomerOrderPositions",
+      overrides.countCustomerOrderPositions || (async () => calls.filter(
+        (c) => c.name === "createCustomerOrderReservation" || c.name === "appendPositionToCustomerOrder",
+      ).length - calls.filter((c) => c.name === "removePositionFromOrder").length)),
   };
   moysklad.calls = calls;
   moysklad.callsTo = (name) => calls.filter((c) => c.name === name);
