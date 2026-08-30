@@ -409,22 +409,28 @@ export function createMoySkladClient(config, options = {}) {
       defaults.storeId = preferredStore?.id || "";
     }
 
-    const excluded = new Set(
-      (Array.isArray(config.excludedStoreNames) ? config.excludedStoreNames : [])
-        .map((name) => String(name || "").trim())
-        .filter(Boolean),
-    );
-    defaults.stockStoreHrefs = stores
-      .filter((item) => item?.name && !excluded.has(item.name))
+    // Сравнение по ПРЕФИКСУ, а не по полному имени: склад в боевом аккаунте
+    // называется «Брак(на ремонт)», а в списке исключений стоит «Брак» —
+    // строгое равенство не срабатывало, и брак считался продаваемым остатком
+    // (23 SKU, из них 16 не лежат больше нигде; аудит эфира 2026-08-29).
+    const excluded = (Array.isArray(config.excludedStoreNames) ? config.excludedStoreNames : [])
+      .map((name) => normalizeStateName(name))
+      .filter(Boolean);
+    const isExcludedStore = (name) => {
+      const normalized = normalizeStateName(name);
+      return excluded.some((prefix) => normalized.startsWith(prefix));
+    };
+    const includedStores = stores.filter((item) => item?.name && !isExcludedStore(item.name));
+    defaults.stockStoreHrefs = includedStores.map((item) => item.meta?.href).filter(Boolean);
+    defaults.excludedStoreHrefs = stores
+      .filter((item) => item?.name && isExcludedStore(item.name))
       .map((item) => item.meta?.href)
       .filter(Boolean);
 
     logger.info("moysklad", "stock_stores_resolved", {
       includedCount: defaults.stockStoreHrefs.length,
-      excludedNames: [...excluded],
-      includedNames: stores
-        .filter((item) => item?.name && !excluded.has(item.name))
-        .map((item) => item.name),
+      excludedNames: stores.filter((item) => item?.name && isExcludedStore(item.name)).map((item) => item.name),
+      includedNames: includedStores.map((item) => item.name),
     });
 
     // Статусы заказа клиента из метаданных. Нужны для трёх вещей:
@@ -924,6 +930,49 @@ export function createMoySkladClient(config, options = {}) {
     }
   }
 
+  // Остаток по складам. Возвращает поля для productCard, либо {} — если запрос
+  // не удался и остаток честно остаётся неизвестным. Пустой ответ (товара нет
+  // ни на одном складе) — это НЕ «неизвестно», это ноль.
+  async function resolveStockByStore(productHref) {
+    if (!productHref) return {};
+    let rows = null;
+    try {
+      const payload = await requestJson("report/stock/bystore", {
+        filter: `product=${productHref}`,
+        limit: 1,
+      });
+      rows = payload.rows?.[0]?.stockByStore || [];
+    } catch (error) {
+      logger.warn("moysklad", "stock_bystore_failed", { productHref, error });
+      return {};
+    }
+
+    const { excludedStoreHrefs } = await resolveDefaults();
+    // Сверяем по ИЗВЛЕЧЁННОМУ id склада, а не по строке href: МойСклад
+    // приписывает query-параметры к части meta-ссылок (в этом же ответе href
+    // товара приходит как «…/entity/product/<id>?expand=supplier»), и точное
+    // сравнение промахнулось бы молча — брак снова стал бы продаваемым.
+    const excluded = new Set(
+      (Array.isArray(excludedStoreHrefs) ? excludedStoreHrefs : [])
+        .map((href) => extractEntityIdFromHref(href, "store"))
+        .filter(Boolean),
+    );
+    let stock = 0;
+    let reserve = 0;
+    let excludedStoreStock = 0;
+    for (const row of rows) {
+      const rowStock = Number(row?.stock) || 0;
+      const rowReserve = Number(row?.reserve) || 0;
+      if (excluded.has(extractEntityIdFromHref(row?.meta?.href, "store"))) {
+        excludedStoreStock += Math.max(0, rowStock - rowReserve);
+        continue;
+      }
+      stock += rowStock;
+      reserve += rowReserve;
+    }
+    return { stock, reserve, availableStock: stock - reserve, excludedStoreStock };
+  }
+
   return {
     isEnabled,
     async countCustomerOrderPositions({ orderId, source } = {}) {
@@ -971,6 +1020,19 @@ export function createMoySkladClient(config, options = {}) {
       const stockRow = stockPayload.rows?.[0] || null;
       const productCard = buildProductSnapshot(product, stockRow);
 
+      // report/stock/all по части товаров молча возвращает пустой ответ (в
+      // эфире 2026-08-29 так вышло по 03878, 03888, 00258, 03927), и тогда
+      // остаток оказывался null, а гейт `typeof stock === "number"` его не
+      // ловил. report/stock/bystore по тем же товарам отвечает корректно.
+      //
+      // Зовём его НЕ всегда: лишний round-trip на открытии лота стоит ~280 мс,
+      // а карточка грузится 143 раза за эфир. Он нужен ровно в двух случаях —
+      // когда агрегат промолчал и когда продавать нечего (тогда из разбивки
+      // видно, лежит ли товар на исключённом складе).
+      if (!stockRow || !(Number(productCard.availableStock) > 0)) {
+        Object.assign(productCard, await resolveStockByStore(product.meta?.href));
+      }
+
       if (productCard.imageHref) {
         try {
           const image = await downloadImage(productCard.imageHref);
@@ -1001,6 +1063,7 @@ export function createMoySkladClient(config, options = {}) {
         stock: productCard.stock,
         reserve: productCard.reserve,
         availableStock: productCard.availableStock,
+        excludedStoreStock: productCard.excludedStoreStock ?? null,
         hasPhoto: Boolean(productCard.photo),
       });
 
