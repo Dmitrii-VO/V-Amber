@@ -46,6 +46,11 @@ export function createCommentPollers({
   // открылся (или был назван заново) лот, либо приняли бронь. Метку ставит
   // ws-server — здесь мы только сравниваем её с окном. null = не ждём ничего.
   getLastReservationSignalAt = () => null,
+  // Идёт конкурс — опрашивать нужно даже без открытых лотов: торги на паузе,
+  // лоты закрыты, а угаданное число всё равно приходит комментарием. Без
+  // этого конкурс без живого лота глохнет целиком (эфир 30.08: два старта
+  // подряд, attempts=0, оператор решил, что кнопка не работает).
+  isContestActive = () => false,
   notify,
   // Шов для тестов: подменяемая пауза между итерациями. В проде — обычный
   // setTimeout. Без него единственный способ проверить адаптивный интервал и
@@ -67,7 +72,7 @@ export function createCommentPollers({
   // Опрашивать больше нечего — но не рвём сразу: покупатель дописывает бронь
   // ещё несколько секунд после закрытия последнего лота.
   function shouldKeepPolling(noOpenLotsSince) {
-    if (getOpenLotCount() > 0) {
+    if (getOpenLotCount() > 0 || isContestActive()) {
       return { keep: true, since: null };
     }
     const since = noOpenLotsSince || Date.now();

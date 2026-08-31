@@ -130,3 +130,34 @@ test("перезагрузка дашборда посреди конкурса 
     await harness.close();
   }
 });
+
+// Эфир 30.08.2026: оператор дважды нажал «старт» между лотами и оба раза
+// получил attempts=0 — поллеры комментариев без открытого лота не крутятся, а
+// конкурс как раз и идёт при закрытых торгах. Решил, что кнопка не работает,
+// и провёл розыгрыш вручную: 24 числа снова разобрались как брони, ВК ушёл в
+// rate limit.
+test("конкурс без открытого лота слышит комментарии и объявляет победителя в ВК", async () => {
+  const harness = await startHarness({ cardsByCode: { "03204": CARD }, knownCodes: ["03204"] });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+
+    client.send({ type: "contestStart" });
+    const started = await client.waitFor((m) => m.type === "contest" && m.active, { timeoutMs: 6000 });
+
+    harness.vk.pushComment({ id: 910, fromId: 5003, text: String(started.number), firstName: "Ирина" });
+    const won = await client.waitFor((m) => m.type === "contest" && m.winner, { timeoutMs: 10000 });
+    assert.equal(won.winner.viewerId, 5003);
+
+    // Зал узнаёт исход только из комментариев: оператор ведёт эфир с телефона.
+    const announcements = harness.vk.callsTo("publishViewerInstruction")
+      .filter((c) => c.args[1] === "contest_winner");
+    assert.equal(announcements.length, 1);
+    assert.match(announcements[0].args[0], /Ирина/);
+    assert.match(announcements[0].args[0], new RegExp(String(started.number)));
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
