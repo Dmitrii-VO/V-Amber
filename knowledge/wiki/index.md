@@ -111,3 +111,8 @@ change.
   and the open variant-lookup risk. CI gate, axios, LAN-auth warning, and
   README drift fixed same day; variant lookup remains. The god-module split is
   under way — see the 2026-08-06 progress note in [[documentation-drift]].
+- [[../raw/log-review-2026-08-29|log-review-2026-08-29]] — разбор двух эфирных
+  сессий 29.08 на `0.1.105` со сверкой против боевого МойСклада: 21 заказ сошёлся
+  позиция в позицию, но нашлись две двойные продажи и склад брака, считавшийся
+  продаваемым остатком. Десять находок, решения оператора по каждой и итог —
+  пять PR, вмерженных к `0.1.110`.
