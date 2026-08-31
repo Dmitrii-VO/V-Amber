@@ -302,6 +302,7 @@ export function attachWsServer(httpServer, config, services = {}) {
       onComment: (comment) => ingestViewerComment(comment),
       getOpenLotCount: () => openLotsBySessionId.size,
       getLastReservationSignalAt: () => lastReservationSignalAt,
+      isContestActive: () => contest.isActive(),
       notify: (payload) => sendJson(websocket, payload),
     });
     let customerOrdersByViewerId = new Map();
@@ -2579,6 +2580,17 @@ export function attachWsServer(httpServer, config, services = {}) {
         });
         if (winner) {
           logger.info("contest", "contest_winner", { connectionId, ...winner });
+          // Победа объявляется В КОММЕНТАРИЯХ, а не только на дашборде:
+          // оператор ведёт эфир с телефона и зал узнаёт исход только отсюда.
+          // Отдельным комментарием, а не ответом победителю: угадать могли и
+          // из чата /efir/, там commentId не вкшный.
+          const winnerName = winner.viewerName || `id ${winner.viewerId}`;
+          vk.publishViewerInstruction(
+            `Конкурс окончен! Победитель — ${winnerName}, число ${winner.number}. Возвращаемся к торгам.`,
+            "contest_winner",
+          ).catch((error) => {
+            logger.error("contest", "contest_winner_publish_failed", { connectionId, error });
+          });
         }
         broadcastContest(winner ? { winner } : {});
         return;
@@ -3657,7 +3669,14 @@ export function attachWsServer(httpServer, config, services = {}) {
     logger.info("ws", "client_connected", { connectionId });
     // Дашборд мог перезагрузиться посреди конкурса — вернём ему панель с
     // числом, иначе оператор увидит обычный экран, а торги при этом стоят.
-    if (contest.isActive()) broadcastContest();
+    // И поднимем опрос: закрытие прошлого сокета погасило поллеры
+    // (resetDetectionState), а лотов при конкурсе нет — поднять их больше
+    // некому, и угаданное число до сервера не дойдёт.
+    if (contest.isActive()) {
+      broadcastContest();
+      commentPollers.startVk();
+      commentPollers.startChat();
+    }
 
     // Однократное (на эфир) предупреждение «говорите в пустоту»: клиент шлёт
     // аудио, а STT-сессии нет (упала и не переподнялась, или start не прошёл).
@@ -4271,6 +4290,10 @@ export function attachWsServer(httpServer, config, services = {}) {
           const started = contest.start();
           if (started.started) {
             logger.info("contest", "contest_started", { connectionId, number: started.number });
+            // Конкурс идёт при закрытых лотах — поллеры без открытого лота
+            // не крутятся, и угаданное число просто некому услышать.
+            commentPollers.startVk();
+            commentPollers.startChat();
           }
           // Число уходит ТОЛЬКО оператору на дашборд: если его увидят зрители,
           // угадывать станет нечего.

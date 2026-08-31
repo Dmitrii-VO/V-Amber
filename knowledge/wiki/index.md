@@ -111,3 +111,8 @@ change.
   and the open variant-lookup risk. CI gate, axios, LAN-auth warning, and
   README drift fixed same day; variant lookup remains. The god-module split is
   under way — see the 2026-08-06 progress note in [[documentation-drift]].
+- [[../raw/log-review-2026-08-30|log-review-2026-08-30]] — разбор эфиров
+  30.08 на `0.1.111`: торговая часть без расхождений (0 ошибок МойСклада, 30
+  броней → 18 заказов), но первый боевой конкурс кнопкой оказался глухим без
+  открытого лота и не объявлял победителя — оператор вернулся к ручному
+  розыгрышу и снова упёрся в rate limit ВК. Починено там же.
