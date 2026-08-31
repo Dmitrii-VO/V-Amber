@@ -123,6 +123,12 @@ test("перезагрузка дашборда посреди конкурса 
       const restored = await reopened.waitFor((m) => m.type === "contest", { timeoutMs: 6000 });
       assert.equal(restored.active, true);
       assert.equal(restored.number, started.number, "то же число, а не новое");
+
+      // Закрытие прошлого сокета погасило поллеры, а лотов при конкурсе нет:
+      // если новое соединение их не поднимет, конкурс уже не выиграть.
+      harness.vk.pushComment({ id: 920, fromId: 5004, text: String(started.number), firstName: "Оксана" });
+      const won = await reopened.waitFor((m) => m.type === "contest" && m.winner, { timeoutMs: 10000 });
+      assert.equal(won.winner.viewerId, 5004);
     } finally {
       await reopened.close();
     }
