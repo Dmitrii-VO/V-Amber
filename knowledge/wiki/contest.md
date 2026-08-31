@@ -58,3 +58,5 @@ limit: 29 ответов «Too many requests», 28 неудачных опрос
 
 - [[reservation-flow]]
 - [[vk-comments]]
+- [[../raw/log-review-2026-08-29|log-review-2026-08-29]] — разбор эфира, из
+  которого выросла эта фича
