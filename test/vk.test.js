@@ -301,3 +301,27 @@ test("новый эфир забывает запись прошлого", async
 
   assert.equal(vk.getLivePostId(), 0, "иначе карточки сегодняшних лотов уйдут под вчерашнее видео");
 });
+
+test("свои же комментарии от имени сообщества не возвращаются как брони", async () => {
+  const vk = publisherWith({ livePostId: "301049" });
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        ts: "2",
+        updates: [
+          { type: "video_comment_new", object: { id: 1, from_id: -183296442, text: "Аня, бронь принята (код 03900)", date: 1, video_id: 456245462, video_owner_id: -183296442 } },
+          { type: "video_comment_new", object: { id: 2, from_id: 5001, text: "бронь", date: 1, video_id: 456245462, video_owner_id: -183296442 } },
+        ],
+      };
+    },
+  });
+  try {
+    const update = await vk.fetchCommentLongPollUpdates({ server: "https://lp.vk.com/whp/1", key: "k", ts: "1" });
+    assert.deepEqual(update.comments.map((c) => c.id), [2], "иначе фантомный заказ в МойСкладе на сообщество");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
