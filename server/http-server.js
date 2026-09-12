@@ -918,7 +918,7 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
     //
     // Слой поверх мягкой блокировки: groups.ban (бан из сообщества эфира) и
     // video.deleteComment (удаление коммента из эфира), оба под user-токеном —
-    // см. server/vk.js banViewer/deleteVideoComment и knowledge/wiki/vk-comments.md.
+    // см. server/vk.js banViewer/deleteLiveComment и knowledge/wiki/vk-comments.md.
     // Это запись в VK, поэтому в safe mode блокируем, как и остальные VK-записи.
     // VK-порог реального id: чат-зрители (id ≥ 9e9) в VK не банятся.
     const VK_MAX_REAL_ID = 2 ** 31;
@@ -949,7 +949,7 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
       let deleted = null;
       const commentId = body.commentId != null ? String(body.commentId).trim() : "";
       if (commentId && isVkViewer) {
-        deleted = await vk.deleteVideoComment({ commentId });
+        deleted = await vk.deleteLiveComment({ commentId });
       }
 
       // Локальная мягкая блокировка ставится ВСЕГДА — даже если VK-бан не
@@ -981,11 +981,11 @@ ${errored ? '<div class="err">Неверный токен. Проверьте з
 
       const commentId = String(body.commentId ?? "").trim();
       if (!commentId) return jsonResponse(response, 400, { error: "commentId_required" });
-      if (!vk?.deleteVideoComment) return jsonResponse(response, 503, { error: "vk_unavailable" });
+      if (!vk?.deleteLiveComment) return jsonResponse(response, 503, { error: "vk_unavailable" });
       if (isSafeMode()) {
         return jsonResponse(response, 200, { ok: false, status: "safe_mode_blocked", message: "Safe mode: удаление в ВК заблокировано" });
       }
-      const result = await vk.deleteVideoComment({ commentId });
+      const result = await vk.deleteLiveComment({ commentId });
       logger.info("http", "comment_delete_requested", { commentId, ok: result.ok, code: result.code || null });
       diag("comment_delete_requested", { commentId, ok: result.ok });
       return jsonResponse(response, 200, result);

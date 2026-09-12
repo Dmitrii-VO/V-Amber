@@ -2,19 +2,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { startHarness, createVkMock } from "./helpers/ws-harness.js";
 
-// Регрессия: бот публикует ответы («бронь подтверждена (код …)») под своим
-// VK-аккаунтом, и опрос комментариев не должен переисследовать их как новые
-// брони от имени бота. Иначе — ложный out_of_stock, мусор в wishlist, а при
-// остатке ≥2 фантомный заказ в МойСкладе. См. лог-ревью 2026-06-03 (сессия
-// 22:33, аккаунт «Amber Standard» id 816076245 бронировал каждый лот сам у
-// себя). Фильтр по comment.from_id === selfUserId в ws-server.
+// Регрессия: бот публикует ответы («бронь подтверждена (код …)») и они не
+// должны переисследоваться как новые брони. Иначе — ложный out_of_stock,
+// мусор в wishlist, а при остатке ≥2 фантомный заказ в МойСкладе. См.
+// лог-ревью 2026-06-03 (аккаунт «Amber Standard» бронировал каждый лот сам у
+// себя). С 13.09.2026 бот пишет ОТ ИМЕНИ СООБЩЕСТВА, то есть с отрицательным
+// from_id, и фильтр стоит в vk.js на разборе события.
 
 const CARD_03204 = {
   id: "p-03204", name: "Серьги янтарь", code: "03204",
   pathName: "Украшения/Серьги", salePrice: 4500, availableStock: 7,
 };
 
-const SELF_ID = 816076245;
+// id сообщества: именно от него теперь уходят все наши комментарии.
+const SELF_ID = -183296442;
 
 const hasReservedFrom = (viewerId) => (m) =>
   m.type === "state"
@@ -25,7 +26,7 @@ const hasReservedFrom = (viewerId) => (m) =>
   );
 
 test("poller ignores the bot's own comments (no self-reservation)", async () => {
-  const vk = createVkMock({ selfUserId: SELF_ID });
+  const vk = createVkMock();
   const harness = await startHarness({
     cardsByCode: { "03204": CARD_03204 },
     knownCodes: ["03204"],

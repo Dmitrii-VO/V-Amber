@@ -84,17 +84,34 @@ operator can handle late or between-lot bookings manually.
 
 ## Token routing (critical)
 
-All `video.*` methods — `video.getComments`, `video.createComment`,
-`video.get` — must use a **user token**, never a community/group token. VK
-rejects video methods under group auth with `error_code 27`. С 2026-09-13
-эфир по этим методам больше не ходит: приём переехал на Long Poll, публикация
-— на `wall.createComment` (оба под групповым токеном, см. разделы выше).
-Ниже — как это устроено на запасном пути и почему группе нельзя. `server/vk.js`
-derives `videoToken = VK_USER_TOKEN || VK_GROUP_TOKEN || VK_ACCESS_TOKEN` for
-these calls. `VK_GROUP_TOKEN` is used only for `messages.*` (community DMs).
-Service comments therefore post from the user-token account's identity, not the
-community page — posting video comments "as the community" is not possible via
-the VK API. Full rationale and regression history in [[vk-comments]].
+**`VK_GROUP_TOKEN` — единственный VK-токен.** Пользовательский убран
+13.09.2026 вместе со всеми `video.*` вызовами.
+
+| что | метод | почему сообществу можно |
+|---|---|---|
+| комментарии зрителей | Long Poll `wall_reply_new` | событие, а не чтение |
+| карточки, брони, конкурс | `wall.createComment` (+`from_group=1`) | стена сообществу открыта |
+| удаление комментария | `wall.deleteComment` | там же |
+| бан спамера | `groups.ban` | право `manage` |
+| имена зрителей | `users.get` | доступен и групповому |
+| ЛС покупателю | `messages.send` | профильный метод сообщества |
+
+`video.*` сообществу закрыт целиком: чтение и публикация отвечают
+`error_code 27`, `video.get` — `error_code 5`. Поэтому:
+
+- **зал принимаем из `wall_reply_new`**, а не из `video_comment_new`: id
+  комментария к записи — то же пространство, что публикация, ответ веткой и
+  удаление. Событие видео осталось опознавателем записи (см. выше);
+- **ссылку эфира больше не валидируем через API** — разбираем только текст.
+  Закрытые комментарии всплывут ошибкой 214 при первой публикации и поднимут
+  баннер оператору;
+- **запасного пути нет**: опрос `video.getComments` удалён. Выключенное
+  событие Long Poll = глухой эфир, поэтому проверка перед эфиром
+  (`node scripts/vk-token-check.js`) обязательна.
+
+Исторический контекст (почему когда-то был user-токен и как он умер) —
+[[vk-comments]] и разделы выше про эфир 12.09.2026.
+
 
 ## Приём комментариев: Long Poll сообщества (с 2026-09-12)
 

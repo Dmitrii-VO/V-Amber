@@ -22,8 +22,8 @@ function recorder() {
 // Мок VK-издателя: записывает каждый вызов и его аргументы. publishLotCard
 // по умолчанию выдаёт инкрементный commentId, чтобы лот считался
 // опубликованным (иначе ws-server не запустит поллер и не сохранит лот).
-// getComments отдаёт накопленную очередь комментариев (vk.pushComment) —
-// так тест драйвит путь броней без реального VK API.
+// Комментарии зрителей приходят тем же путём, что и в проде, — событиями
+// Long Poll сообщества (vk.pushComment кладёт их в очередь событий).
 export function createVkMock(overrides = {}) {
   let nextCommentId = 100;
   const calls = [];
@@ -35,9 +35,6 @@ export function createVkMock(overrides = {}) {
   };
   const vk = {
     isEnabled: true,
-    selfUserId: overrides.selfUserId ?? 0,
-    getSelfUserId: wrap("getSelfUserId", overrides.getSelfUserId
-      || (async () => vk.selfUserId)),
     publishLotCard: wrap("publishLotCard", overrides.publishLotCard
       || (async () => ({ comment_id: nextCommentId++ }))),
     publishLotClosed: wrap("publishLotClosed", overrides.publishLotClosed || (async () => {})),
@@ -46,12 +43,26 @@ export function createVkMock(overrides = {}) {
     publishDiscountUpdate: wrap("publishDiscountUpdate", overrides.publishDiscountUpdate || (async () => {})),
     publishReservationReply: wrap("publishReservationReply", overrides.publishReservationReply || (async () => {})),
     publishViewerInstruction: wrap("publishViewerInstruction", overrides.publishViewerInstruction || (async () => ({ ok: true }))),
-    getComments: wrap("getComments", overrides.getComments
-      || (async () => ({ items: [...commentItems], profiles: [...profiles] }))),
+    commentLongPollConfigured: true,
+    getCommentLongPollSettings: wrap("getCommentLongPollSettings", overrides.getCommentLongPollSettings
+      || (async () => ({ longPollEnabled: true, videoCommentEventEnabled: true }))),
+    openCommentLongPoll: wrap("openCommentLongPoll", overrides.openCommentLongPoll
+      || (async () => ({ server: "https://lp.test/1", key: "k", ts: "1" }))),
+    fetchCommentLongPollUpdates: wrap("fetchCommentLongPollUpdates", overrides.fetchCommentLongPollUpdates
+      || (async () => {
+        // Повторяем правило vk.js: комментарии самого сообщества (from_id < 0
+        // — это наши карточки и подтверждения) залом не считаются.
+        const batch = commentItems.splice(0, commentItems.length).filter((item) => item.from_id > 0);
+        return { ts: "2", comments: batch, reconnect: false };
+      })),
+    fetchViewerNames: wrap("fetchViewerNames", overrides.fetchViewerNames
+      || (async (ids) => new Map(ids.map((id) => [id, profiles.find((p) => p.id === id)
+        ? [profiles.find((p) => p.id === id).first_name, profiles.find((p) => p.id === id).last_name].filter(Boolean).join(" ")
+        : ""])))),
     setLiveVideoUrl: wrap("setLiveVideoUrl", overrides.setLiveVideoUrl || (() => {})),
   };
-  // Кладёт комментарий в очередь, которую возвращает getComments. Поллер
-  // дедупит по id/lastCommentId, поэтому повторные опросы безопасны.
+  // Кладёт комментарий в очередь событий Long Poll. Цикл забирает пачку
+  // целиком, дедуп по id остаётся на стороне поллера.
   vk.pushComment = ({ id, fromId, text, firstName = "Покупатель", lastName = "" }) => {
     commentItems.push({ id, from_id: fromId, text, date: Math.floor(Date.now() / 1000) });
     if (!profiles.some((p) => p.id === fromId)) {

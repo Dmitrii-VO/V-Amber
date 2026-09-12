@@ -128,11 +128,14 @@ export function createCommentPollers({
       if (!longPollUnavailableWarned) {
         longPollUnavailableWarned = true;
         logger.warn("vk", "comment_longpoll_disabled", { connectionId, ...settings });
-        notify({
-          type: "warning",
-          message: "Long Poll ВК выключен — комменты читаются опросом. Включите событие «Комментарий к видео: добавлен» в настройках сообщества.",
-        });
       }
+      // Запасного пути больше нет: опрос video.getComments убран вместе с
+      // пользовательским токеном (ВК его всё равно не пускает). Выключенное
+      // событие = глухой эфир, поэтому это баннер, а не тост.
+      reportVkIntake(false, {
+        reason: "longpoll_disabled",
+        hint: "Не включено событие «Комментарий к видео: добавлен» — брони и конкурс не принимаются",
+      });
       return false;
     } catch (error) {
       longPollProbe = false;
@@ -140,6 +143,10 @@ export function createCommentPollers({
         longPollUnavailableWarned = true;
         logger.warn("vk", "comment_longpoll_probe_failed", { connectionId, error });
       }
+      reportVkIntake(false, {
+        reason: "longpoll_probe_failed",
+        hint: "ВК не отдаёт очередь событий — брони и конкурс не принимаются",
+      });
       return false;
     }
   }
@@ -155,11 +162,9 @@ export function createCommentPollers({
     let keptTs = null;
     let consecutiveFailures = 0;
     let noOpenLotsSince = null;
-    // Собственные комментарии бота фильтруем так же, как в опросе. 0 =
-    // определить не удалось → фильтр выключен; тогда помогает VK_SELF_USER_ID.
-    const selfUserId = (await vk.getSelfUserId?.()) || 0;
-
-    logger.info("vk", "comment_longpoll_started", { connectionId, selfUserId });
+    // Собственные комментарии сообщества отфильтрованы в vk.js по from_id:
+    // публикуем мы теперь от имени группы, а у неё id отрицательный.
+    logger.info("vk", "comment_longpoll_started", { connectionId });
 
     while (generation === vkGeneration) {
       const grace = shouldKeepPolling(noOpenLotsSince);
@@ -201,7 +206,6 @@ export function createCommentPollers({
           Number.isFinite(item.id)
           && item.id > vkLastCommentId
           && !vkSeenIds.has(item.id)
-          && !(selfUserId && item.from_id === selfUserId)
         ));
 
         // Имён в событии нет — дотягиваем их пачкой на новых авторов.
@@ -263,197 +267,10 @@ export function createCommentPollers({
     const generation = ++vkGeneration;
     vkActive = true;
 
-    // Адаптивная частота опроса. Раньше её задавал ЛЮБОЙ новый комментарий, и
-    // это оказалось ошибкой: розыгрыш «угадай число» даёт 250 комментариев в
-    // минуту при нуле броней, опрос залипает на ACTIVE_POLL_MS и выбирает
-    // квоту VK ровно тогда, когда подтверждения броней уходят со 2–3 попытки
-    // (эфиры 24–25.07.2026: 14 из 22 минут с лимитами — минуты потока, а таких
-    // минут всего 16). Публикации при этом не виноваты вовсе: 0 из 166 лимитов
-    // совпали с ними.
-    //
-    // Теперь темп задаёт ожидание БРОНЕЙ, а не шум ленты: свежий лот (медиана
-    // брони — 31 с после открытия, 64 % в первую минуту) и только что принятая
-    // бронь. Розыгрыш опрос больше не разгоняет.
-    const ACTIVE_POLL_MS = 1500;
-    const IDLE_POLL_STEP_MS = 1500;
-    const IDLE_POLL_MAX_MS = 8000;
-    // Пока в high-полосе VK-очереди ждут публикации (закрытия лотов,
-    // ответы о брони) — опрос комментариев не чаще этого интервала.
-    const PUBLISH_PRESSURE_POLL_MS = 4000;
-    // Пауза после ошибки 9 (Flood control): блок висит на аккаунте часами.
-    const FLOOD_BLOCK_RETRY_MS = 300000;
-
-    void (async function pollLoop() {
-      // Есть событийный канал — идём им. Опрос остаётся запасным путём:
-      // Long Poll включается вручную в сообществе и может быть недоступен.
+    void (async () => {
       if (await canUseCommentLongPoll()) {
         await runVkLongPollLoop(generation);
-        // Только если нас не сменил новый цикл: иначе флаг погаснет под
-        // живым поллером и следующий startVk поднимет второй.
-        if (generation === vkGeneration) {
-          vkActive = false;
-        }
-        return;
       }
-
-      let initialized = false;
-      let consecutiveFailures = 0;
-      let floodBlockedUntil = 0;
-      let quietCycles = 0;
-      let noOpenLotsSince = null;
-      // VK user id самого бота: его комментарии (карточки, обновления цены,
-      // подтверждения броней) нельзя переисследовать как чужие брони. 0 =
-      // не удалось определить → фильтр выключен (поведение как раньше).
-      const selfUserId = (await vk.getSelfUserId?.()) || 0;
-
-      while (generation === vkGeneration) {
-        const grace = shouldKeepPolling(noOpenLotsSince);
-        noOpenLotsSince = grace.since;
-        if (!grace.keep) {
-          break;
-        }
-
-        try {
-          const comments = await vk.getComments(100);
-          if (generation !== vkGeneration) {
-            break;
-          }
-
-          const profileMap = new Map((comments.profiles || []).map((profile) => [profile.id, profile]));
-          const sortedItems = (comments.items || []).sort((left, right) => left.id - right.id);
-
-          if (!initialized) {
-            initialized = true;
-            consecutiveFailures = 0;
-
-            if (vkLastCommentId <= 0) {
-              vkLastCommentId = sortedItems.at(-1)?.id || vkLastCommentId;
-
-              await sleep(2000);
-              continue;
-            }
-          }
-
-          const newItems = (comments.items || [])
-            // from_id > 0 — только люди: комментарии от имени сообщества
-            // (наши же карточки и подтверждения) разбирать как брони нельзя.
-            .filter((item) => item.id > vkLastCommentId && !vkSeenIds.has(item.id) && item.from_id > 0)
-            .sort((left, right) => left.id - right.id);
-
-          for (const comment of newItems) {
-            vkLastCommentId = Math.max(vkLastCommentId, comment.id);
-            addBoundedId(vkSeenIds, comment.id);
-
-            // Игнорируем собственные комментарии бота: иначе ответ «бронь
-            // подтверждена (код …)» переисследуется как новая бронь от имени
-            // бота → ложный out_of_stock, мусор в wishlist, а при остатке ≥2
-            // — фантомный заказ в МойСкладе на аккаунт бота.
-            if (selfUserId && comment.from_id === selfUserId) {
-              continue;
-            }
-
-            const profile = profileMap.get(comment.from_id);
-            onComment({
-              id: comment.id,
-              viewerId: comment.from_id,
-              viewerName: profile
-                ? [profile.first_name, profile.last_name].filter(Boolean).join(" ")
-                : "",
-              text: comment.text,
-              createdAt: new Date(comment.date * 1000).toISOString(),
-              source: "vk",
-            });
-          }
-          reportVkIntake(true);
-          if (consecutiveFailures > 0) {
-            logger.info("vk", "comment_poll_recovered", {
-              connectionId,
-              openLotCount: getOpenLotCount(),
-              afterFailures: consecutiveFailures,
-            });
-            notify({ type: "info", message: "VK комменты снова приходят" });
-          }
-          consecutiveFailures = 0;
-        } catch (error) {
-          consecutiveFailures += 1;
-          const errorCode = getVkApiErrorCode(error);
-          if (errorCode === 9) {
-            floodBlockedUntil = Date.now() + FLOOD_BLOCK_RETRY_MS;
-          }
-          logger.warn("vk", "comment_poll_failed", {
-            connectionId,
-            openLotCount: getOpenLotCount(),
-            consecutiveFailures,
-            errorCode,
-            error,
-          });
-
-          if (isFatalCommentReadError(error)) {
-            logger.warn("vk", "comment_poll_stopped", {
-              connectionId,
-              openLotCount: getOpenLotCount(),
-              reason: "fatal_api_error",
-              errorCode,
-            });
-            notify({
-              type: "error",
-              message: `VK comments недоступны для этого видео: ${error?.message || "unknown"}`,
-            });
-            break;
-          }
-
-          // Баннер, а не тост: эфир 2026-09-12 шёл два часа со стопроцентно
-          // падающим опросом, и разовое предупреждение с первой минуты
-          // оператор уже не видел. Флуд-блок (ошибка 9) поднимает баннер
-          // сразу — ждать пяти попыток незачем, он не проходит сам.
-          if (errorCode === 9 || consecutiveFailures === 5) {
-            reportVkIntake(false, {
-              reason: errorCode === 9 ? "flood_control" : `poll_failed_${consecutiveFailures}`,
-              hint: errorCode === 9
-                ? "ВК заблокировал аккаунт по флуду — брони и конкурс не принимаются, нужен другой VK_USER_TOKEN"
-                : errorCode === 5
-                  ? "истёк VK-токен — обновите VK_USER_TOKEN в .env и перезапустите"
-                  : "ВК не отдаёт комментарии эфира — брони и конкурс сейчас не принимаются",
-            });
-          }
-        }
-
-        let delayMs;
-        if (floodBlockedUntil > Date.now()) {
-          // Флуд-блок ВК держится часами и от повторов только продлевается:
-          // 12.09 мы отстучали в стену 249 запросов за два часа. Ходим раз в
-          // пять минут — ровно чтобы заметить, когда блок снимут.
-          delayMs = FLOOD_BLOCK_RETRY_MS;
-        } else if (consecutiveFailures > 0) {
-          // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
-          delayMs = Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
-        } else if (expectingReservations()) {
-          // Ждём броней — опрашиваем часто.
-          quietCycles = 0;
-          delayMs = ACTIVE_POLL_MS;
-        } else {
-          // Броней не ждём — плавно растягиваем интервал до потолка.
-          quietCycles += 1;
-          delayMs = Math.min(IDLE_POLL_MAX_MS, ACTIVE_POLL_MS + quietCycles * IDLE_POLL_STEP_MS);
-        }
-
-        // Опрос — low-priority: под rate-limit'ом (адаптивный backoff после
-        // VK 6) или при очереди публикаций отступаем, чтобы квота уходила
-        // ответам покупателям, а не чтению (эфир 2026-07-25: 52 из 63
-        // rate-limit'ов пришлись на video.getComments, и в этот момент
-        // подтверждения броней уходили со 2–3 попытки).
-        const pressure = vk.getQueuePressure?.();
-        if (pressure && consecutiveFailures === 0) {
-          if (pressure.backoffMultiplier > 1) {
-            delayMs = Math.max(delayMs, ACTIVE_POLL_MS * pressure.backoffMultiplier);
-          }
-          if (pressure.highPending > 0) {
-            delayMs = Math.max(delayMs, PUBLISH_PRESSURE_POLL_MS);
-          }
-        }
-        await sleep(delayMs);
-      }
-
       if (generation === vkGeneration) {
         vkActive = false;
       }

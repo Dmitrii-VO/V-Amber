@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { createVkPublisher } from "../server/vk.js";
 
 // Реальная модерация ВК: groups.ban (бан из сообщества эфира) и
-// video.deleteComment (удаление коммента), обе под user-токеном. Эфир — видео
-// сообщества (owner_id отрицательный), поэтому group_id = -liveOwnerId.
-// См. server/vk.js banViewer/deleteVideoComment.
+// wall.deleteComment (удаление коммента под записью эфира), обе под ТОКЕНОМ
+// СООБЩЕСТВА — пользовательского у нас больше нет. Эфир — видео сообщества
+// (owner_id отрицательный), поэтому group_id = -liveOwnerId.
+// См. server/vk.js banViewer/deleteLiveComment.
 
 function installStub() {
   const original = globalThis.fetch;
@@ -21,9 +22,9 @@ function installStub() {
   return { calls, restore() { globalThis.fetch = original; } };
 }
 
-const BASE = { userToken: "user-tok", groupToken: "grp-tok", liveOwnerId: "-221975350", liveVideoId: "456", apiMinIntervalMs: 1 };
+const BASE = { groupToken: "grp-tok", liveOwnerId: "-221975350", liveVideoId: "456", livePostId: "789", apiMinIntervalMs: 1 };
 
-test("banViewer банит в сообществе эфира: group_id = -liveOwnerId, owner_id = зритель, user-токен", async () => {
+test("banViewer банит в сообществе эфира: group_id = -liveOwnerId, owner_id = зритель", async () => {
   const stub = installStub();
   try {
     const pub = createVkPublisher(BASE);
@@ -34,7 +35,7 @@ test("banViewer банит в сообществе эфира: group_id = -liveO
     assert.ok(ban, "groups.ban должен быть вызван");
     assert.equal(ban.params.get("group_id"), "221975350");
     assert.equal(ban.params.get("owner_id"), "5001");
-    assert.equal(ban.params.get("access_token"), "user-tok");
+    assert.equal(ban.params.get("access_token"), "grp-tok");
   } finally { stub.restore(); }
 });
 
@@ -60,27 +61,27 @@ test("banViewer отклоняет пустой/некорректный id зр
   } finally { stub.restore(); }
 });
 
-test("deleteVideoComment удаляет на owner_id эфирного видео", async () => {
+test("deleteLiveComment удаляет комментарий под записью эфира", async () => {
   const stub = installStub();
   try {
     const pub = createVkPublisher(BASE);
-    const res = await pub.deleteVideoComment({ commentId: 777 });
+    const res = await pub.deleteLiveComment({ commentId: 777 });
     assert.equal(res.ok, true);
-    const del = stub.calls.find((c) => c.method === "video.deleteComment");
-    assert.ok(del, "video.deleteComment должен быть вызван");
+    const del = stub.calls.find((c) => c.method === "wall.deleteComment");
+    assert.ok(del, "wall.deleteComment должен быть вызван");
     assert.equal(del.params.get("owner_id"), "-221975350");
     assert.equal(del.params.get("comment_id"), "777");
-    assert.equal(del.params.get("access_token"), "user-tok");
+    assert.equal(del.params.get("access_token"), "grp-tok");
   } finally { stub.restore(); }
 });
 
-test("модерация недоступна без user-токена", async () => {
+test("модерация недоступна без токена сообщества", async () => {
   const stub = installStub();
   try {
-    const pub = createVkPublisher({ ...BASE, userToken: "" });
+    const pub = createVkPublisher({ ...BASE, groupToken: "" });
     const ban = await pub.banViewer({ userId: 5001 });
-    const del = await pub.deleteVideoComment({ commentId: 777 });
-    assert.equal(ban.code, "no_user_token");
-    assert.equal(del.code, "no_user_token");
+    const del = await pub.deleteLiveComment({ commentId: 777 });
+    assert.equal(ban.code, "no_group_token");
+    assert.equal(del.code, "no_group_token");
   } finally { stub.restore(); }
 });
