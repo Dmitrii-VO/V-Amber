@@ -158,6 +158,18 @@ one эфир that crossed local midnight) ends up with two orders. The day-agnos
 lookup (`findLatestOpenCustomerOrder`) exists but the live flow does not call it.
 Dry-run by default. See [[log-verification-checklist]] and [[reservation-flow]].
 
+## `scripts/vk-token-check.js`
+
+Проверка VK-токенов перед эфиром: `users.get`, `video.get`,
+`video.getComments` под user-токеном и `messages.*` под групповым. Только
+чтение, ничего не публикует и не меняет. Нужна, чтобы флуд-блок аккаунта
+(`ошибка 9`) обнаруживался до эфира, а не по логам после него — см.
+[[runbooks-and-troubleshooting]] и [[vk-integration]].
+
+```bash
+node scripts/vk-token-check.js
+```
+
 ## Related pages
 
 - [[order-recovery-from-logs]]

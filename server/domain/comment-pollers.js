@@ -84,6 +84,168 @@ export function createCommentPollers({
     return Number.isFinite(at) && Date.now() - at <= RESERVATION_WINDOW_MS;
   }
 
+  // Здоровье приёма комментариев из ВК — для оператора, а не для логов.
+  // Эфир 2026-09-12 шёл два часа при ста процентах упавших опросов: ВК
+  // заблокировал user-аккаунт по флуду (ошибка 9), зал не доходил вообще,
+  // а единственное предупреждение всплыло тостом на первой минуте и
+  // исчезло. Поэтому теперь дашборд получает состояние (а не разовое
+  // сообщение) и держит баннер, пока комментарии не пойдут снова.
+  let vkIntakeHealthy = true;
+  function reportVkIntake(ok, { reason = "", hint = "" } = {}) {
+    if (ok === vkIntakeHealthy) {
+      return;
+    }
+    vkIntakeHealthy = ok;
+    logger.info("vk", ok ? "comment_intake_recovered" : "comment_intake_down", {
+      connectionId,
+      reason,
+    });
+    notify({ type: "vkCommentsHealth", ok, reason, hint });
+  }
+
+  // Long Poll включают руками в настройках сообщества (см. server/vk.js).
+  // Если он не включён — работаем опросом, как раньше, но говорим об этом
+  // один раз за жизнь поллера, а не на каждом открытии лота.
+  let longPollUnavailableWarned = false;
+  // Ответ запоминаем на всё соединение: startVk зовётся на каждом открытии
+  // лота (за эфир — под три сотни раз), а настройки сообщества посреди эфира
+  // не меняются. Включили событие на живом эфире — увидим после
+  // переподключения дашборда.
+  let longPollProbe = null;
+  async function canUseCommentLongPoll() {
+    if (!vk?.commentLongPollConfigured || typeof vk.openCommentLongPoll !== "function") {
+      return false;
+    }
+    if (longPollProbe !== null) {
+      return longPollProbe;
+    }
+    try {
+      const settings = await vk.getCommentLongPollSettings();
+      longPollProbe = Boolean(settings?.longPollEnabled && settings?.videoCommentEventEnabled);
+      if (longPollProbe) {
+        return true;
+      }
+      if (!longPollUnavailableWarned) {
+        longPollUnavailableWarned = true;
+        logger.warn("vk", "comment_longpoll_disabled", { connectionId, ...settings });
+        notify({
+          type: "warning",
+          message: "Long Poll ВК выключен — комменты читаются опросом. Включите событие «Комментарий к видео: добавлен» в настройках сообщества.",
+        });
+      }
+      return false;
+    } catch (error) {
+      longPollProbe = false;
+      if (!longPollUnavailableWarned) {
+        longPollUnavailableWarned = true;
+        logger.warn("vk", "comment_longpoll_probe_failed", { connectionId, error });
+      }
+      return false;
+    }
+  }
+
+  // Приём комментариев событиями. Запрос к lp.vk.com висит до 25 секунд и
+  // возвращается сам, поэтому пауз между итерациями здесь нет — темпом
+  // управляет ВК. Дедуп общий с опросом (vkSeenIds/vkLastCommentId): если
+  // Long Poll отвалится и мы уедем на опрос, старое не переиграется.
+  async function runVkLongPollLoop(generation) {
+    const LONG_POLL_WAIT_SEC = 25;
+    const viewerNames = new Map();
+    let connection = null;
+    let consecutiveFailures = 0;
+    let noOpenLotsSince = null;
+    // Собственные комментарии бота фильтруем так же, как в опросе. 0 =
+    // определить не удалось → фильтр выключен; тогда помогает VK_SELF_USER_ID.
+    const selfUserId = (await vk.getSelfUserId?.()) || 0;
+
+    logger.info("vk", "comment_longpoll_started", { connectionId, selfUserId });
+
+    while (generation === vkGeneration) {
+      const grace = shouldKeepPolling(noOpenLotsSince);
+      noOpenLotsSince = grace.since;
+      if (!grace.keep) {
+        break;
+      }
+
+      try {
+        if (!connection) {
+          connection = await vk.openCommentLongPoll();
+        }
+        const startedAt = Date.now();
+        const update = await vk.fetchCommentLongPollUpdates({
+          ...connection,
+          waitSec: LONG_POLL_WAIT_SEC,
+        });
+        if (generation !== vkGeneration) {
+          break;
+        }
+        if (update?.reconnect) {
+          connection = null;
+          await sleep(1000);
+          continue;
+        }
+        connection = { ...connection, ts: update.ts };
+        consecutiveFailures = 0;
+        reportVkIntake(true);
+
+        const fresh = (update.comments || []).filter((item) => (
+          Number.isFinite(item.id)
+          && item.id > vkLastCommentId
+          && !vkSeenIds.has(item.id)
+          && !(selfUserId && item.from_id === selfUserId)
+        ));
+
+        // Имён в событии нет — дотягиваем их пачкой на новых авторов.
+        const unknownIds = fresh
+          .map((item) => item.from_id)
+          .filter((id) => !viewerNames.has(id));
+        if (unknownIds.length > 0 && typeof vk.fetchViewerNames === "function") {
+          try {
+            for (const [id, name] of await vk.fetchViewerNames(unknownIds)) {
+              viewerNames.set(id, name);
+            }
+          } catch (error) {
+            logger.warn("vk", "comment_longpoll_names_failed", { connectionId, error });
+          }
+        }
+
+        for (const item of fresh.sort((left, right) => left.id - right.id)) {
+          vkLastCommentId = Math.max(vkLastCommentId, item.id);
+          addBoundedId(vkSeenIds, item.id);
+          onComment({
+            id: item.id,
+            viewerId: item.from_id,
+            viewerName: viewerNames.get(item.from_id) || "",
+            text: item.text,
+            createdAt: new Date(item.date * 1000).toISOString(),
+            source: "vk",
+          });
+        }
+
+        // Страховка от сервера, который отвечает мгновенно и пусто: без неё
+        // такой цикл крутится на полной скорости.
+        if (fresh.length === 0 && Date.now() - startedAt < 1000) {
+          await sleep(1000);
+        }
+      } catch (error) {
+        consecutiveFailures += 1;
+        logger.warn("vk", "comment_longpoll_failed", {
+          connectionId,
+          consecutiveFailures,
+          error,
+        });
+        if (consecutiveFailures >= 3) {
+          reportVkIntake(false, {
+            reason: "longpoll_failed",
+            hint: "ВК не отдаёт комментарии эфира — брони и конкурс сейчас не принимаются",
+          });
+        }
+        connection = null;
+        await sleep(Math.min(30000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4)));
+      }
+    }
+  }
+
   function startVk() {
     if (vkActive) {
       return;
@@ -109,10 +271,21 @@ export function createCommentPollers({
     // Пока в high-полосе VK-очереди ждут публикации (закрытия лотов,
     // ответы о брони) — опрос комментариев не чаще этого интервала.
     const PUBLISH_PRESSURE_POLL_MS = 4000;
+    // Пауза после ошибки 9 (Flood control): блок висит на аккаунте часами.
+    const FLOOD_BLOCK_RETRY_MS = 300000;
 
     void (async function pollLoop() {
+      // Есть событийный канал — идём им. Опрос остаётся запасным путём:
+      // Long Poll включается вручную в сообществе и может быть недоступен.
+      if (await canUseCommentLongPoll()) {
+        await runVkLongPollLoop(generation);
+        vkActive = false;
+        return;
+      }
+
       let initialized = false;
       let consecutiveFailures = 0;
+      let floodBlockedUntil = 0;
       let quietCycles = 0;
       let noOpenLotsSince = null;
       // VK user id самого бота: его комментарии (карточки, обновления цены,
@@ -176,6 +349,7 @@ export function createCommentPollers({
               source: "vk",
             });
           }
+          reportVkIntake(true);
           if (consecutiveFailures > 0) {
             logger.info("vk", "comment_poll_recovered", {
               connectionId,
@@ -188,6 +362,9 @@ export function createCommentPollers({
         } catch (error) {
           consecutiveFailures += 1;
           const errorCode = getVkApiErrorCode(error);
+          if (errorCode === 9) {
+            floodBlockedUntil = Date.now() + FLOOD_BLOCK_RETRY_MS;
+          }
           logger.warn("vk", "comment_poll_failed", {
             connectionId,
             openLotCount: getOpenLotCount(),
@@ -210,20 +387,29 @@ export function createCommentPollers({
             break;
           }
 
-          // Notify operator ONCE per outage instead of breaking the loop.
-          if (consecutiveFailures === 5) {
-            const hint = errorCode === 5
-              ? "истёк VK-токен — обновите VK_TOKEN в .env и перезапустите"
-              : "проверьте сеть/VK API";
-            notify({
-              type: "warning",
-              message: `VK комменты не приходят (${consecutiveFailures} ошибок подряд): ${hint}`,
+          // Баннер, а не тост: эфир 2026-09-12 шёл два часа со стопроцентно
+          // падающим опросом, и разовое предупреждение с первой минуты
+          // оператор уже не видел. Флуд-блок (ошибка 9) поднимает баннер
+          // сразу — ждать пяти попыток незачем, он не проходит сам.
+          if (errorCode === 9 || consecutiveFailures === 5) {
+            reportVkIntake(false, {
+              reason: errorCode === 9 ? "flood_control" : `poll_failed_${consecutiveFailures}`,
+              hint: errorCode === 9
+                ? "ВК заблокировал аккаунт по флуду — брони и конкурс не принимаются, нужен другой VK_USER_TOKEN"
+                : errorCode === 5
+                  ? "истёк VK-токен — обновите VK_USER_TOKEN в .env и перезапустите"
+                  : "ВК не отдаёт комментарии эфира — брони и конкурс сейчас не принимаются",
             });
           }
         }
 
         let delayMs;
-        if (consecutiveFailures > 0) {
+        if (floodBlockedUntil > Date.now()) {
+          // Флуд-блок ВК держится часами и от повторов только продлевается:
+          // 12.09 мы отстучали в стену 249 запросов за два часа. Ходим раз в
+          // пять минут — ровно чтобы заметить, когда блок снимут.
+          delayMs = FLOOD_BLOCK_RETRY_MS;
+        } else if (consecutiveFailures > 0) {
           // Exponential backoff on failures: 2s → 4s → 8s → 16s → 32s (cap).
           delayMs = Math.min(32000, 2000 * 2 ** Math.min(consecutiveFailures - 1, 4));
         } else if (expectingReservations()) {
@@ -367,6 +553,8 @@ export function createCommentPollers({
       chatGeneration += 1;
       chatActive = false;
       chatCursor = null;
+      vkIntakeHealthy = true;
+      longPollProbe = null;
     },
 
     // Только для тестов и диагностики: снаружи на это состояние никто не
