@@ -21,24 +21,29 @@ function normalizeVkVideoId(value) {
   return /^\d+$/.test(normalized) && normalized !== "0" ? normalized : "";
 }
 
+// Понимаем обе ссылки на эфир: на видео (vk.ru/video-123_456) и на ЗАПИСЬ,
+// к которой оно прикреплено (vk.ru/wall-123_789). Запись важнее: под неё
+// публикуются карточки и подтверждения, и если оператор дал её сразу, эфир
+// заговорит с первой секунды, а не с первого комментария зрителя.
 function parseLiveVideoReference(value) {
   if (!value) {
-    return { ownerId: "", videoId: "", source: "" };
+    return { ownerId: "", videoId: "", postId: "", source: "" };
   }
 
   const input = String(value).trim();
+  const wallMatch = /wall(-?\d+)_(\d+)/.exec(input);
   const directMatch = /video(-?\d+)_(\d+)/.exec(input);
-  if (directMatch) {
-    const ownerId = normalizeVkOwnerId(directMatch[1]);
-    const videoId = normalizeVkVideoId(directMatch[2]);
+  if (directMatch || wallMatch) {
+    const owner = directMatch ? directMatch[1] : wallMatch[1];
     return {
-      ownerId,
-      videoId,
+      ownerId: normalizeVkOwnerId(owner),
+      videoId: directMatch ? normalizeVkVideoId(directMatch[2]) : "",
+      postId: wallMatch ? wallMatch[2] : "",
       source: input,
     };
   }
 
-  return { ownerId: "", videoId: "", source: input };
+  return { ownerId: "", videoId: "", postId: "", source: input };
 }
 
 function formatPrice(price) {
@@ -140,7 +145,9 @@ const VK_FATAL_ERROR_CODES = new Set([14, 15, 100, 214, 801]);
 // удалено/без прав/комментарии закрыты — все эти кейсы одинаково ломают
 // и ретраи sendWithRetry, и массовое закрытие лотов на конце эфира.
 export function isVkStreamFatalError(error) {
-  return VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
+  // fatal: true ставим сами там, где повтор бессмыслен по нашей же логике,
+  // а не по ответу ВК (например, неизвестна запись эфира).
+  return Boolean(error?.fatal) || VK_FATAL_ERROR_CODES.has(error?.vkErrorCode);
 }
 
 export function buildVideoCommentParams({ ownerId, videoId, message, attachments, replyToComment }) {
@@ -159,26 +166,13 @@ export function buildVideoCommentParams({ ownerId, videoId, message, attachments
 }
 
 export function createVkPublisher(config) {
-  const userToken = config?.userToken || "";
+  // Один токен на всё — токен СООБЩЕСТВА. Пользовательский убран 13.09.2026:
+  // 12.09 ВК заблокировал аккаунт по флуду (ошибка 9), и эфир два часа не мог
+  // ни прочитать зал, ни ответить ему. Теперь приём идёт событиями Long Poll,
+  // публикация — wall.createComment от имени сообщества, бан — groups.ban,
+  // удаление — wall.deleteComment. Всё это ВК сообществу разрешает, а
+  // video.* не разрешает вовсе (ошибка 27) — туда мы больше не ходим.
   const groupToken = config?.groupToken || "";
-  const accessToken = config?.accessToken || "";
-  // Токен для всех video.* методов: чтение комментариев (video.getComments),
-  // публикация карточек/цены/брони (video.createComment), валидация ссылки
-  // (video.get) и загрузка фото к комментарию. VK НЕ разрешает эти методы
-  // под токеном сообщества — отвечает error_code 27 "Group authorization
-  // failed: method is unavailable with group auth" (а video.get — ещё и
-  // error_code 5 "invalid token type"). Поэтому здесь нужен user-токен;
-  // group/access оставляем лишь как fallback для legacy single-token конфигов.
-  // Идея «Этапа 5» постить комментарии от имени группы технически
-  // невыполнима — VK видео-комментарии под community-токеном не принимает.
-  // Групповой токен остаётся только для messages.* (DM сообщества).
-  const videoToken = userToken || groupToken || accessToken;
-  // VK user id аккаунта, под которым бот публикует комментарии. Нужен, чтобы
-  // опрос комментариев игнорировал собственные сообщения бота (карточки,
-  // обновления цены, подтверждения броней) — иначе бот переисследует свой же
-  // ответ «бронь подтверждена (код …)» как новую бронь от своего же имени.
-  // Берём из env (VK_SELF_USER_ID) либо лениво через users.get.
-  let resolvedSelfUserId = parsePositiveInt(config?.selfUserId, 0) || 0;
   const apiVersion = config?.apiVersion || "5.199";
   const placeholderImageUrl = config?.placeholderImageUrl || "";
   const liveVideo = parseLiveVideoReference(config?.liveVideoUrl || config?.liveVideoRef || "");
@@ -191,7 +185,7 @@ export function createVkPublisher(config) {
   // под видео с подписью «Амберри · Автор»). Поэтому публикуем туда.
   // Берём из env либо узнаём сами из события wall_reply_new.
   let livePostId = parsePositiveInt(config?.livePostId, 0) || 0;
-  const isEnabled = Boolean(videoToken);
+  const isEnabled = Boolean(groupToken);
   const minApiIntervalMs = parsePositiveInt(config?.apiMinIntervalMs, 1100);
   const rateLimitBackoffMs = parsePositiveInt(config?.apiRateLimitBackoffMs, 1500);
   // Адаптивный backoff: при каждой ошибке 6 удваиваем «штраф» к интервалу,
@@ -277,14 +271,15 @@ export function createVkPublisher(config) {
     });
   }
 
-  // Чтение комментариев — фоновый опрос, ему можно подождать. Всё остальное
-  // (публикации, загрузка фото, разовые users.get/video.get) — высокий
-  // приоритет, чтобы реакция покупателю не стояла в очереди за опросом.
-  function vkCallPriority(method) {
-    return method === "video.getComments" ? "low" : "high";
+  // приоритет, чтобы реакция покупателю не стояла в очереди.
+  function vkCallPriority() {
+    // Полосы остались от эпохи опроса комментариев: тогда чтение уступало
+    // публикациям. Читать нам больше нечего — всё, что мы шлём, это реакция
+    // залу, и она одинаково срочная.
+    return "high";
   }
 
-  async function callVkApi(method, params, token = userToken) {
+  async function callVkApi(method, params, token = groupToken) {
     // Все параметры — включая access_token — в теле POST, не в query string:
     // URL попадает в логи прокси/ошибок и в стек-трейсы, и токен оттуда
     // утекает (ровно от такой утечки redact в stream-relay). VK принимает
@@ -304,26 +299,6 @@ export function createVkPublisher(config) {
     }, { priority: vkCallPriority(method) });
   }
 
-  async function fetchComments(count = 20) {
-    // sort=desc → VK returns the LATEST `count` comments. With sort=asc on a
-    // long livestream this would return the earliest comments forever and
-    // miss every reservation. Items are re-sorted ascending on the caller
-    // side via id, so behaviour downstream is unchanged.
-    const response = await callVkApi("video.getComments", {
-      owner_id: liveOwnerId,
-      video_id: liveVideoId,
-      count: Math.min(Math.max(count, 1), 100),
-      extended: 1,
-      sort: "desc",
-    }, videoToken);
-
-    return {
-      items: response?.items || [],
-      profiles: response?.profiles || [],
-      groups: response?.groups || [],
-      canPost: Boolean(response?.can_post),
-    };
-  }
 
   async function sendWithRetry(operation, meta) {
     let lastError = null;
@@ -375,28 +350,30 @@ export function createVkPublisher(config) {
   // заблокировал его по флуду, и эфир два часа не мог сказать залу ни слова)
   // и подписывается самим сообществом, а не человеком. Старый путь через
   // video.createComment остаётся запасным — пока не знаем post_id.
-  function postLiveComment({ message, replyToComment, viewerName }) {
-    if (groupToken && livePostId) {
-      const params = {
-        owner_id: liveOwnerId,
-        post_id: livePostId,
-        from_group: 1,
-        // Имя в тексте вместо ответа на комментарий: id комментария к видео
-        // и id комментария к записи — разные пространства, и ответить по
-        // видео-id через wall.createComment нельзя. Без имени покупатель не
-        // поймёт, что подтверждение адресовано ему.
-        // ponytail: в событии wall_reply_new есть «свой» id — если понадобится
-        // именно ответ веткой, сопоставлять комментарии по (from_id, date, text).
-        message: viewerName ? `${viewerName}, ${message}` : message,
-      };
-      return callVkApi("wall.createComment", params, groupToken);
+  function postLiveComment({ message, replyToComment }) {
+    if (!livePostId) {
+      // Запись эфира ещё не известна: публиковать физически некуда.
+      // Узнаётся из ссылки оператора (wall-…) или из первого же комментария
+      // зрителя. Наверх уходит ошибка — вызывающий залогирует publish_failed.
+      const error = new Error("VK: запись эфира неизвестна — публиковать некуда");
+      // Повторять нечего: за 400 мс запись не появится, появится она из
+      // события wall_reply_new. Три выстрела в пустоту только шумят в логах.
+      error.fatal = true;
+      throw error;
     }
-    return callVkApi("video.createComment", buildVideoCommentParams({
-      ownerId: liveOwnerId,
-      videoId: liveVideoId,
+    const params = {
+      owner_id: liveOwnerId,
+      post_id: livePostId,
+      from_group: 1,
       message,
-      replyToComment,
-    }), videoToken);
+    };
+    if (replyToComment) {
+      // Отвечаем веткой: id приходят из wall_reply_new, то есть лежат в том
+      // же пространстве, что и комментарии записи. Покупатель видит
+      // подтверждение прямо под своим комментарием.
+      params.reply_to_comment = replyToComment;
+    }
+    return callVkApi("wall.createComment", params, groupToken);
   }
 
   // ——— Long Poll сообщества: комментарии эфира приходят СОБЫТИЯМИ ———
@@ -410,7 +387,7 @@ export function createVkPublisher(config) {
   //
   // Чинится только ВХОД. Публикация как была под user-токеном, так и
   // остаётся: video.createComment под групповой авторизацией ВК не
-  // принимает (ошибка 27), см. комментарий к videoToken выше.
+  // принимает (ошибка 27).
   const groupId = String(config?.groupId || "").replace(/^-/, "").trim();
   const commentLongPollConfigured = Boolean(groupToken && groupId);
 
@@ -490,33 +467,46 @@ export function createVkPublisher(config) {
       };
     }
 
-    const comments = [];
-    for (const update of payload?.updates || []) {
-      // Комментарий под видео приходит ДВУМЯ событиями: video_comment_new и
-      // wall_reply_new к записи, на которой висит эфир. Второе нам нужно
-      // ровно ради post_id — без него публиковать некуда. Разбираем как
-      // комментарий только первое, иначе зал задвоится.
-      if (update?.type === "wall_reply_new") {
-        const postId = parsePositiveInt(update.object?.post_id, 0);
-        const ownerId = update.object?.post_owner_id ?? update.object?.owner_id ?? null;
-        if (postId && (ownerId === null || String(ownerId) === String(liveOwnerId)) && postId !== livePostId) {
+    const updates = payload?.updates || [];
+
+    // Комментарий под эфиром приходит ДВУМЯ событиями: video_comment_new и
+    // wall_reply_new к записи, на которой висит видео. Работаем со вторым:
+    // его id лежат в том же пространстве, что публикация, ответ веткой и
+    // удаление. Первое нужно ровно для одного — понять, какая из записей
+    // сообщества и есть эфир: пара «тот же автор, тот же текст в одной
+    // пачке». Без такой сверки мы бы приняли за эфир любую запись, под
+    // которой кто-то написал (у сообщества их сотни).
+    if (!livePostId) {
+      const videoComments = updates.filter((update) => update?.type === "video_comment_new"
+        && isLiveVideoComment(update.object || {}));
+      for (const update of updates) {
+        if (update?.type !== "wall_reply_new") {
+          continue;
+        }
+        const object = update.object || {};
+        const twin = videoComments.find((video) => String(video.object?.from_id) === String(object.from_id)
+          && String(video.object?.text ?? "") === String(object.text ?? ""));
+        const postId = parsePositiveInt(object.post_id, 0);
+        if (twin && postId) {
           livePostId = postId;
           logger.info("vk", "live_post_id_learned", { ownerId: liveOwnerId, postId });
+          break;
         }
-        continue;
       }
-      if (update?.type !== "video_comment_new") {
+    }
+
+    const comments = [];
+    for (const update of updates) {
+      if (update?.type !== "wall_reply_new") {
         continue;
       }
       const object = update.object || {};
-      if (!isLiveVideoComment(object)) {
+      if (!livePostId || parsePositiveInt(object.post_id, 0) !== livePostId) {
         continue;
       }
-      // Комментарии САМОГО сообщества (в том числе наши карточки лота и
-      // подтверждения броней — с 13.09 они уходят от имени группы) приходят
-      // с отрицательным from_id. Разобрать их как зрительские значит завести
-      // фантомный заказ в МойСкладе на сообщество. Фильтр по selfUserId тут
-      // не спасает: он про пользовательский аккаунт.
+      // Комментарии САМОГО сообщества (наши карточки и подтверждения — они
+      // уходят от имени группы) приходят с отрицательным from_id. Разобрать
+      // их как зрительские значит завести фантомный заказ в МойСкладе.
       if (!(Number(object.from_id) > 0)) {
         continue;
       }
@@ -540,7 +530,7 @@ export function createVkPublisher(config) {
     }
     const users = await callVkApi("users.get", {
       user_ids: ids.slice(0, 100).join(","),
-    }, groupToken || videoToken);
+    }, groupToken);
     return new Map((Array.isArray(users) ? users : []).map((user) => [
       Number(user.id),
       [user.first_name, user.last_name].filter(Boolean).join(" "),
@@ -562,33 +552,11 @@ export function createVkPublisher(config) {
         lowPending: lowQueue.length,
       };
     },
-    // Возвращает (и кэширует) VK user id собственного аккаунта бота. Если
-    // токена нет или users.get упал — возвращает 0; вызывающий код тогда
-    // просто не фильтрует (поведение как раньше).
-    async getSelfUserId() {
-      if (resolvedSelfUserId) {
-        return resolvedSelfUserId;
-      }
-      if (!videoToken) {
-        return 0;
-      }
-      try {
-        const users = await callVkApi("users.get", {}, videoToken);
-        const id = Number(Array.isArray(users) ? users[0]?.id : users?.id);
-        if (Number.isFinite(id) && id > 0) {
-          resolvedSelfUserId = id;
-          logger.info("vk", "self_user_id_resolved", { selfUserId: id });
-        }
-      } catch (error) {
-        logger.warn("vk", "self_user_id_lookup_failed", { error });
-      }
-      return resolvedSelfUserId;
-    },
     buildLotCardMessage(activeLot) {
       return buildLotCardMessage(activeLot, placeholderImageUrl);
     },
     async getLiveTarget() {
-      if (!userToken) {
+      if (!groupToken) {
         return null;
       }
 
@@ -600,15 +568,15 @@ export function createVkPublisher(config) {
     },
     // Реальный бан спамера в сообществе эфира. Эфир — видео сообщества
     // (owner_id отрицательный), поэтому groups.ban банит его из этого
-    // сообщества, и заблокированный больше не может комментировать. Токен —
-    // user (videoToken): владелец user-токена админ сообщества, а group-токен
-    // в этом проекте от ДРУГОГО сообщества (см. vk-comments.md). Бан из всего
-    // сообщества, а не только эфира — оператор жмёт осознанно (confirm в UI),
-    // откат через groups.unban. Только для реальных VK-id (< 2^31); зрители
-    // своего чата (id ≥ 9e9) сюда не попадают — их фильтрует вызывающий код.
+    // сообщества, и заблокированный больше не может комментировать.
+    // Токен — групповой: groups.ban сообществу разрешён (проверено 13.09.2026,
+    // groups.getBanned под ним отвечает). Бан из всего сообщества, а не только
+    // эфира — оператор жмёт осознанно (confirm в UI), откат через
+    // groups.unban. Только для реальных VK-id (< 2^31); зрители своего чата
+    // (id ≥ 9e9) сюда не попадают — их фильтрует вызывающий код.
     async banViewer({ userId, reason = 1, comment = "" } = {}) {
-      if (!userToken) {
-        return { ok: false, code: "no_user_token", message: "VK user-токен не настроен" };
+      if (!groupToken) {
+        return { ok: false, code: "no_group_token", message: "VK-токен сообщества не настроен" };
       }
       const targetId = parsePositiveInt(userId, 0);
       if (!targetId) {
@@ -628,7 +596,7 @@ export function createVkPublisher(config) {
           reason,
           comment,
           comment_visible: 0,
-        }, videoToken);
+        }, groupToken);
         logger.info("vk", "viewer_banned", { groupId, userId: targetId, reason });
         return { ok: true, groupId, userId: targetId };
       } catch (error) {
@@ -637,12 +605,12 @@ export function createVkPublisher(config) {
         return { ok: false, code: "api_error", vkErrorCode, message: error?.message || String(error) };
       }
     },
-    // Удаляет комментарий спамера из эфира (video.deleteComment, user-токен).
-    // owner_id — владелец эфирного видео (liveOwnerId). Комментарий исчезает
-    // у всех зрителей ВК — это то, что оператор видит глазами как «удалить».
-    async deleteVideoComment({ commentId } = {}) {
-      if (!userToken) {
-        return { ok: false, code: "no_user_token", message: "VK user-токен не настроен" };
+    // Удаляет комментарий спамера из эфира. wall.deleteComment по записи
+    // эфира: комментарии под видео — это её комментарии, и id мы получаем
+    // оттуда же (wall_reply_new). video.deleteComment сообществу закрыт.
+    async deleteLiveComment({ commentId } = {}) {
+      if (!groupToken) {
+        return { ok: false, code: "no_group_token", message: "VK-токен сообщества не настроен" };
       }
       const cid = parsePositiveInt(commentId, 0);
       if (!cid) {
@@ -653,10 +621,10 @@ export function createVkPublisher(config) {
         return { ok: false, code: "no_live", message: "Эфирное видео не настроено" };
       }
       try {
-        await callVkApi("video.deleteComment", {
+        await callVkApi("wall.deleteComment", {
           owner_id: owner,
           comment_id: cid,
-        }, videoToken);
+        }, groupToken);
         logger.info("vk", "comment_deleted", { ownerId: owner, commentId: cid });
         return { ok: true, ownerId: owner, commentId: cid };
       } catch (error) {
@@ -664,24 +632,6 @@ export function createVkPublisher(config) {
         logger.warn("vk", "comment_delete_failed", { ownerId: owner, commentId: cid, vkErrorCode, error });
         return { ok: false, code: "api_error", vkErrorCode, message: error?.message || String(error) };
       }
-    },
-    async getComments(count = 20) {
-      if (!isEnabled) {
-        logger.info("vk", "read_skipped_not_configured", {
-          kind: "comments",
-          hasUserToken: Boolean(userToken),
-          ownerId: liveOwnerId || null,
-          videoId: liveVideoId || null,
-        });
-        return {
-          items: [],
-          profiles: [],
-          groups: [],
-          canPost: false,
-        };
-      }
-
-      return fetchComments(count);
     },
     // Long Poll сообщества — вход комментариев без user-токена; см. блок
     // «Long Poll сообщества» выше. Наружу торчит ровно то, что нужно
@@ -698,7 +648,7 @@ export function createVkPublisher(config) {
           kind: "lot_card",
           code: activeLot?.code,
           lotSessionId: activeLot?.lotSessionId,
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -730,7 +680,7 @@ export function createVkPublisher(config) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "lot_closed",
           lotSessionId: activeLot?.lotSessionId || null,
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -767,7 +717,7 @@ export function createVkPublisher(config) {
       if (!isEnabled) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "broadcast_closed",
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -788,7 +738,7 @@ export function createVkPublisher(config) {
         },
       );
     },
-    async publishReservationReply({ commentId, message, lotSessionId, code, viewerId, viewerName, status }) {
+    async publishReservationReply({ commentId, message, lotSessionId, code, viewerId, status }) {
       if (!isEnabled || !commentId || !message) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "reservation_reply",
@@ -797,7 +747,7 @@ export function createVkPublisher(config) {
           code: code || null,
           viewerId: viewerId || null,
           status: status || null,
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -808,7 +758,6 @@ export function createVkPublisher(config) {
         () => postLiveComment({
           message,
           replyToComment: commentId,
-          viewerName,
         }),
         {
           kind: "reservation_reply",
@@ -827,7 +776,7 @@ export function createVkPublisher(config) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "discount_update",
           lotSessionId: activeLot?.lotSessionId || null,
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -865,7 +814,7 @@ export function createVkPublisher(config) {
       if (!isEnabled || !message) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind,
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -892,7 +841,7 @@ export function createVkPublisher(config) {
       if (!isEnabled || !message) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "cross_promo",
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -916,7 +865,7 @@ export function createVkPublisher(config) {
         logger.info("vk", "publish_skipped_not_configured", {
           kind: "price_update",
           lotSessionId: activeLot?.lotSessionId || null,
-          hasUserToken: Boolean(userToken),
+          hasGroupToken: Boolean(groupToken),
           ownerId: liveOwnerId || null,
           videoId: liveVideoId || null,
         });
@@ -993,9 +942,11 @@ export function createVkPublisher(config) {
       liveOwnerId = normalizeVkOwnerId(parsed.ownerId);
       liveVideoId = normalizeVkVideoId(parsed.videoId);
       // Новый эфир — новая запись на стене. Не сбросить её значит писать
-      // карточки сегодняшних лотов под ВЧЕРАШНЕЕ видео.
-      livePostId = 0;
-      logger.info("vk", "live_video_url_updated", { url, liveOwnerId, liveVideoId });
+      // карточки сегодняшних лотов под ВЧЕРАШНЕЕ видео. Если оператор дал
+      // ссылку на запись, эфир заговорит сразу; если на видео — после первого
+      // комментария зрителя, по которому запись и опознаётся.
+      livePostId = parsePositiveInt(parsed.postId, 0) || 0;
+      logger.info("vk", "live_video_url_updated", { url, liveOwnerId, liveVideoId, livePostId });
     },
 
     getLiveVideoUrl() {
@@ -1004,7 +955,7 @@ export function createVkPublisher(config) {
 
     async validateLiveVideoUrl(url) {
       if (!isEnabled) {
-        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_GROUP_TOKEN / VK_ACCESS_TOKEN / VK_USER_TOKEN)" };
+        return { ok: false, code: "no_token", message: "VK не настроен (нет VK_GROUP_TOKEN)" };
       }
 
       const trimmed = String(url || "").trim();
@@ -1015,67 +966,29 @@ export function createVkPublisher(config) {
       const parsed = parseLiveVideoReference(trimmed);
       const ownerId = normalizeVkOwnerId(parsed.ownerId);
       const videoId = normalizeVkVideoId(parsed.videoId);
-      if (!ownerId || !videoId) {
+      // Годится и ссылка на видео, и ссылка на запись эфира: под запись мы
+      // публикуем, по видео опознаём её в потоке событий.
+      if (!ownerId || (!videoId && !parsed.postId)) {
         return {
           ok: false,
           code: "bad_url",
-          message: "Не удалось разобрать ссылку. Ожидаю что-то вроде https://vk.com/video-123_456",
+          message: "Не удалось разобрать ссылку. Ожидаю https://vk.com/video-123_456 или https://vk.com/wall-123_789",
         };
       }
 
-      try {
-        // video.get — read-метод, который VK отклоняет для community-токенов
-        // (error_code 5 "invalid token type"), как и все остальные video.*.
-        // Используем videoToken (user-токен с fallback).
-        const response = await callVkApi("video.get", {
-          owner_id: ownerId,
-          videos: `${ownerId}_${videoId}`,
-          extended: 1,
-        }, videoToken);
-        const video = response?.items?.[0];
-        if (!video) {
-          return {
-            ok: false,
-            code: "not_found",
-            message: "Видео не найдено или у токена нет к нему доступа",
-            ownerId,
-            videoId,
-          };
-        }
-        if (video.can_comment === 0) {
-          return {
-            ok: false,
-            code: "comments_closed",
-            message: "У видео закрыты комментарии — брони не смогут прийти",
-            title: video.title || "",
-            ownerId,
-            videoId,
-          };
-        }
-        return {
-          ok: true,
-          title: video.title || "",
-          ownerId,
-          videoId,
-          isLive: video.live_status === "started",
-          liveStatus: video.live_status || null,
-        };
-      } catch (error) {
-        const vkErrorCode = error?.vkErrorCode ?? null;
-        let code = "api_error";
-        let message = error?.message || String(error);
-        if (vkErrorCode === 5) {
-          code = "auth_failed";
-          message = "VK-токен недействителен (обновите VK_TOKEN в .env и перезапустите)";
-        } else if (vkErrorCode === 15) {
-          code = "access_denied";
-          message = "Доступ запрещён — видео приватное или скрыто";
-        } else if (vkErrorCode === 100) {
-          code = "not_found";
-          message = "VK не распознал owner_id/video_id";
-        }
-        return { ok: false, code, message, vkErrorCode, ownerId, videoId };
-      }
+      // Живьём видео больше не проверяем: video.get сообществу закрыт
+      // (ошибка 5), а пользовательского токена у нас нет. Разбор ссылки
+      // остался — он ловит главную ошибку оператора, вставленную не туда
+      // ссылку. Закрытые комментарии всплывут при первой публикации
+      // (ошибка 214) и поднимут баннер.
+      return {
+        ok: true,
+        title: "",
+        ownerId,
+        videoId,
+        postId: parsed.postId || livePostId || null,
+        checked: false,
+      };
     },
   };
 }
@@ -1084,10 +997,7 @@ export function resolveVkConfig(env) {
   const liveVideo = parseLiveVideoReference(env.VK_LIVE_VIDEO_URL?.trim() || "");
 
   return {
-    userToken: env.VK_USER_TOKEN?.trim() || "",
     groupToken: env.VK_GROUP_TOKEN?.trim() || "",
-    selfUserId: env.VK_SELF_USER_ID?.trim() || "",
-    accessToken: env.VK_ACCESS_TOKEN?.trim() || "",
     groupId: env.VK_GROUP_ID?.trim() || "",
     apiVersion: env.VK_API_VERSION?.trim() || "5.199",
     apiMinIntervalMs: env.VK_API_MIN_INTERVAL_MS?.trim() || "1100",
@@ -1099,6 +1009,6 @@ export function resolveVkConfig(env) {
     // Запись на стене, к которой привязано видео эфира. Обычно узнаётся сама
     // из первого же комментария зрителя (событие wall_reply_new); переменная
     // нужна, когда публиковать надо до того, как кто-то написал.
-    livePostId: env.VK_LIVE_POST_ID?.trim() || "",
+    livePostId: env.VK_LIVE_POST_ID?.trim() || liveVideo.postId || "",
   };
 }

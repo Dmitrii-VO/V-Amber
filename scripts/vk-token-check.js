@@ -3,22 +3,18 @@
 //
 //   node scripts/vk-token-check.js
 //
-// С 13.09.2026 эфир целиком живёт на ГРУППОВОМ токене: комментарии приходят
-// событием video_comment_new (Long Poll сообщества), карточки и подтверждения
-// уходят через wall.createComment от имени сообщества. Пользовательский токен
-// остался только запасным путём — 12.09 ВК заблокировал его по флуду
-// (ошибка 9), и два часа эфира прошли вслепую. Поэтому первыми проверяются
-// групповые пункты: если красный там — эфир будет глухим.
+// Эфир целиком живёт на ТОКЕНЕ СООБЩЕСТВА: комментарии приходят событием
+// video_comment_new (Long Poll), карточки и подтверждения уходят через
+// wall.createComment от имени сообщества, бан — groups.ban. Пользовательский
+// токен убран 13.09.2026: 12.09 ВК заблокировал аккаунт по флуду (ошибка 9),
+// и два часа эфира прошли вслепую. Красный пункт здесь = глухой эфир.
 //
 // Подробности: knowledge/wiki/vk-integration.md
 import "dotenv/config";
 
 const version = process.env.VK_API_VERSION?.trim() || "5.199";
 const groupToken = process.env.VK_GROUP_TOKEN?.trim() || "";
-const userToken = process.env.VK_USER_TOKEN?.trim() || "";
 const groupId = (process.env.VK_GROUP_ID?.trim() || "").replace(/^-/, "");
-const liveUrl = process.env.VK_LIVE_VIDEO_URL?.trim() || "";
-const video = liveUrl.match(/video(-?\d+)_(\d+)/);
 
 async function call(method, params, token) {
   if (!token) return { error: "нет токена" };
@@ -87,27 +83,6 @@ report(
   postId ? "ok" : "warn",
   postId ? `VK_LIVE_POST_ID=${postId}` : "не задана — узнается сама из первого комментария зрителя",
 );
-
-console.log("\nПользовательский токен — только запасной путь\n");
-
-if (!userToken) {
-  report("user-токен", "warn", "не задан; эфиру он больше не нужен");
-} else if (video) {
-  const check = await call(
-    "video.getComments",
-    { owner_id: video[1], video_id: video[2], count: 1 },
-    userToken,
-  );
-  report(
-    "чтение комментариев видео",
-    check.error ? "warn" : "ok",
-    check.error
-      ? `${check.error} — эфиру не мешает, но восстановление заказов по логам без него невозможно`
-      : "",
-  );
-} else {
-  report("чтение комментариев видео", "warn", "VK_LIVE_VIDEO_URL не разобран");
-}
 
 const broken = results.filter((r) => r.verdict === "fail");
 console.log(

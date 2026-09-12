@@ -5,7 +5,7 @@ import {
   createVkPublisher,
 } from "../server/vk.js";
 
-// Минимальный стаб fetch для video.createComment + загрузки фото. Маршрутизация
+// Минимальный стаб fetch для публикации комментария + загрузки фото. Маршрутизация
 // по pathname метода и наличию параметра attachments. Параметры VK-вызовов
 // (включая access_token) живут в теле POST — стаб отдаёт их как `params`.
 function installVkFetchStub(handlers) {
@@ -32,7 +32,7 @@ function installVkFetchStub(handlers) {
     if (method === "photos.saveWallPhoto") {
       return makeOk({ response: [{ owner_id: -10, id: 99 }] });
     }
-    if (method === "video.createComment") {
+    if (method === "wall.createComment" || method === "video.createComment") {
       const hasAttachment = params.has("attachments");
       return makeOk(handlers.createComment(hasAttachment));
     }
@@ -45,9 +45,11 @@ function installVkFetchStub(handlers) {
 }
 
 const PUBLISHER_CONFIG = {
-  userToken: "t",
+  groupToken: "t",
   liveOwnerId: "-10",
   liveVideoId: "20",
+  // Запись эфира: под неё уходят комментарии (wall.createComment).
+  livePostId: "30",
   placeholderImageUrl: "https://img/placeholder.jpg",
   apiMinIntervalMs: 1,
 };
@@ -107,7 +109,7 @@ test("карточка лота уходит текстом, без вложен
     const result = await vk.publishLotCard(ACTIVE_LOT);
     assert.equal(result.comment_id, 555);
 
-    const commentCalls = stub.calls.filter((c) => c.method === "video.createComment");
+    const commentCalls = stub.calls.filter((c) => c.method === "wall.createComment");
     assert.equal(commentCalls.length, 1, "никаких повторных публикаций без фото");
     assert.equal(commentCalls[0].params.has("attachments"), false);
     // Заглушка печатается всегда, когда задана в конфиге.
@@ -133,10 +135,14 @@ test("rate-limit penalty decays gradually instead of resetting on first success"
   };
   try {
     const vk = createVkPublisher({ ...PUBLISHER_CONFIG, apiMinIntervalMs: INTERVAL_MS });
-    await assert.rejects(() => vk.getComments(), /VK API 6/); // штраф ×2
-    await assert.rejects(() => vk.getComments(), /VK API 6/); // штраф ×4
-    await vk.getComments(); // успех: ×4 → ×2 (раньше сбрасывался в ×1)
-    await vk.getComments(); // должен подождать ≥ 2×INTERVAL_MS
+    // Раньше здесь дёргали чтение комментариев; читать нам больше нечем,
+    // поэтому тем же каналом идут публикации — адаптивный штраф общий.
+    // Раньше здесь дёргали чтение комментариев; читать нам больше нечем,
+    // поэтому берём users.get — он идёт той же очередью без ретраев.
+    await assert.rejects(() => vk.fetchViewerNames([1]), /VK API 6/); // штраф ×2
+    await assert.rejects(() => vk.fetchViewerNames([1]), /VK API 6/); // штраф ×4
+    await vk.fetchViewerNames([1]); // успех: ×4 → ×2 (раньше сбрасывался в ×1)
+    await vk.fetchViewerNames([1]); // должен подождать ≥ 2×INTERVAL_MS
 
     const gapAfterSuccess = fetchTimes[3] - fetchTimes[2];
     // setTimeout не срабатывает раньше срока, поэтому нижняя граница надёжна;
@@ -161,7 +167,7 @@ test("publishLotCard still publishes when photo upload fails", async () => {
     if (method === "photos.getWallUploadServer") {
       return { ok: true, status: 200, async json() { return { error: { error_code: 500, error_msg: "boom" } }; } };
     }
-    if (method === "video.createComment") {
+    if (method === "wall.createComment") {
       return { ok: true, status: 200, async json() { return { response: { comment_id: 777 } }; } };
     }
     return { ok: true, status: 200, async json() { return { response: {} }; } };
@@ -170,7 +176,7 @@ test("publishLotCard still publishes when photo upload fails", async () => {
     const vk = createVkPublisher(PUBLISHER_CONFIG);
     const result = await vk.publishLotCard(ACTIVE_LOT);
     assert.equal(result.comment_id, 777);
-    const commentCalls = calls.filter((c) => c.method === "video.createComment");
+    const commentCalls = calls.filter((c) => c.method === "wall.createComment");
     assert.equal(commentCalls.length, 1);
     assert.equal(commentCalls[0].params.has("attachments"), false);
     assert.match(commentCalls[0].params.get("message"), /placeholder\.jpg/);
@@ -202,7 +208,6 @@ function installMethodSpy() {
 
 function publisherWith(extra = {}) {
   return createVkPublisher({
-    userToken: "user-token",
     groupToken: "group-token",
     groupId: "183296442",
     liveVideoUrl: "https://vk.ru/video-183296442_456245462",
@@ -221,32 +226,32 @@ test("зная запись эфира, карточка лота уходит �
     assert.equal(call.params.get("post_id"), "301049");
     assert.equal(call.params.get("owner_id"), "-183296442");
     assert.equal(call.params.get("from_group"), "1");
-    assert.equal(call.params.get("access_token"), "group-token", "именно групповой токен — user под флуд-блоком");
+    assert.equal(call.params.get("access_token"), "group-token", "эфир живёт на токене сообщества");
   } finally {
     spy.restore();
   }
 });
 
-test("запись эфира неизвестна — работает старый путь через видео", async () => {
+test("запись эфира неизвестна — публиковать некуда, и повторять бессмысленно", async () => {
   const spy = installMethodSpy();
   try {
     const vk = publisherWith();
-    await vk.publishLotCard({ code: "03900", lotSessionId: "lot-1", salePrice: 4250 });
-
-    const call = spy.calls.at(-1);
-    assert.equal(call.method, "video.createComment");
-    assert.equal(call.params.get("access_token"), "user-token");
+    await assert.rejects(
+      () => vk.publishLotCard({ code: "03900", lotSessionId: "lot-1", salePrice: 4250 }),
+      /запись эфира неизвестна/,
+    );
+    assert.equal(spy.calls.length, 0, "video.createComment сообществу закрыт (ошибка 27), ходить туда незачем");
   } finally {
     spy.restore();
   }
 });
 
-test("подтверждение брони на стене адресовано по имени, а не ответом в ветке", async () => {
+test("подтверждение брони уходит ответом в ветку покупателя", async () => {
   const spy = installMethodSpy();
   try {
     const vk = publisherWith({ livePostId: "301049" });
     await vk.publishReservationReply({
-      commentId: 100001931,
+      commentId: 302806,
       message: "бронь принята (код 03900)",
       viewerName: "Аня",
       lotSessionId: "lot-1",
@@ -257,14 +262,17 @@ test("подтверждение брони на стене адресовано
 
     const call = spy.calls.at(-1);
     assert.equal(call.method, "wall.createComment");
-    assert.equal(call.params.get("message"), "Аня, бронь принята (код 03900)");
-    assert.equal(call.params.get("reply_to_comment"), null, "id комментария к видео в ветке записи не существует");
+    // id приходят из wall_reply_new, то есть лежат в пространстве записи —
+    // ответить веткой можно, и покупатель видит подтверждение под своим
+    // комментарием.
+    assert.equal(call.params.get("reply_to_comment"), "302806");
+    assert.equal(call.params.get("message"), "бронь принята (код 03900)");
   } finally {
     spy.restore();
   }
 });
 
-test("post_id узнаётся сам из события wall_reply_new", async () => {
+test("post_id узнаётся по паре событий: то же видео, тот же автор и текст", async () => {
   const spy = installMethodSpy();
   try {
     const vk = publisherWith();
@@ -277,8 +285,11 @@ test("post_id узнаётся сам из события wall_reply_new", async
         return {
           ts: "2",
           updates: [
-            { type: "wall_reply_new", object: { id: 302806, from_id: 5001, text: "бронь", post_id: 301049, post_owner_id: -183296442 } },
+            // Чужая запись сообщества: под ней тоже пишут, и принять её за
+            // эфир значит публиковать карточки не туда.
+            { type: "wall_reply_new", object: { id: 1, from_id: 7001, text: "когда привоз?", post_id: 300000, date: 1 } },
             { type: "video_comment_new", object: { id: 100001931, from_id: 5001, text: "бронь", date: 1, video_id: 456245462, video_owner_id: -183296442 } },
+            { type: "wall_reply_new", object: { id: 302806, from_id: 5001, text: "бронь", post_id: 301049, date: 1 } },
           ],
         };
       },
@@ -286,8 +297,8 @@ test("post_id узнаётся сам из события wall_reply_new", async
 
     const update = await vk.fetchCommentLongPollUpdates({ server: "https://lp.vk.com/whp/1", key: "k", ts: "1" });
 
-    assert.equal(vk.getLivePostId(), 301049, "узнали запись эфира из зеркального события");
-    assert.deepEqual(update.comments.map((c) => c.id), [100001931], "сам комментарий берём один раз, из video_comment_new");
+    assert.equal(vk.getLivePostId(), 301049, "эфир — та запись, чей комментарий продублирован событием видео");
+    assert.deepEqual(update.comments.map((c) => c.id), [302806], "в зал берём id записи: по ним отвечаем и удаляем");
   } finally {
     spy.restore();
   }
@@ -312,8 +323,8 @@ test("свои же комментарии от имени сообщества 
       return {
         ts: "2",
         updates: [
-          { type: "video_comment_new", object: { id: 1, from_id: -183296442, text: "Аня, бронь принята (код 03900)", date: 1, video_id: 456245462, video_owner_id: -183296442 } },
-          { type: "video_comment_new", object: { id: 2, from_id: 5001, text: "бронь", date: 1, video_id: 456245462, video_owner_id: -183296442 } },
+          { type: "wall_reply_new", object: { id: 1, from_id: -183296442, text: "Аня, бронь принята (код 03900)", post_id: 301049, date: 1 } },
+          { type: "wall_reply_new", object: { id: 2, from_id: 5001, text: "бронь", post_id: 301049, date: 1 } },
         ],
       };
     },

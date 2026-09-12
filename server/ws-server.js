@@ -388,7 +388,10 @@ export function attachWsServer(httpServer, config, services = {}) {
     }
 
     function handleVkPublishError(lot, error) {
-      if (error?.vkErrorCode === 801) {
+      // 801 — комментарии закрыты у видео, 214 — у записи, под которую мы
+      // теперь публикуем. Смысл один: писать в этот эфир больше некуда,
+      // и долбиться каждой карточкой до конца эфира незачем.
+      if (error?.vkErrorCode === 801 || error?.vkErrorCode === 214) {
         markLotPoisoned(lot, "comments_closed", error);
       }
     }
@@ -1474,9 +1477,6 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotSessionId: lot?.lotSessionId || null,
         code: lot?.code || null,
         viewerId: event.viewerId,
-        // Имя нужно, когда подтверждение уходит комментарием к записи, а не
-        // ответом в ветке: адресата иначе не отличить (см. postLiveComment).
-        viewerName: event.viewerName || nameCacheStore?.getName?.(event.viewerId) || "",
         status: event.status,
       }).catch((error) => {
         handleVkPublishError(lot, error);
@@ -2294,7 +2294,6 @@ export function attachWsServer(httpServer, config, services = {}) {
           lotSessionId: gateLot?.lotSessionId || null,
           code,
           viewerId: comment.viewerId,
-          viewerName: comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "",
           status: `cancel_${outcome}`,
         }).catch((error) => {
           handleVkPublishError(gateLot, error);
@@ -3722,6 +3721,16 @@ export function attachWsServer(httpServer, config, services = {}) {
 
           if (payload.vkLiveVideoUrl) {
             vk.setLiveVideoUrl(payload.vkLiveVideoUrl);
+            // Публикуем мы под ЗАПИСЬ, к которой прикреплено видео. Со ссылкой
+            // на видео запись опознаётся только по первому комментарию зрителя
+            // — до этого карточки лота публиковать некуда. Ссылка на запись
+            // (vk.ru/wall-…) снимает вопрос, поэтому говорим об этом сразу.
+            if (vk.isEnabled && !vk.getLivePostId?.()) {
+              sendJson(websocket, {
+                type: "warning",
+                message: "Ссылка на видео: карточки лота начнут публиковаться после первого комментария зрителя. Вставьте ссылку на запись эфира (vk.ru/wall-…), чтобы публиковать сразу.",
+              });
+            }
           }
 
           logger.info("ws", "stream_start_requested", {

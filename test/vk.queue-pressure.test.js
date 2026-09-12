@@ -6,7 +6,7 @@ import { createVkPublisher } from "../server/vk.js";
 // backoff после VK 6 и длины полос. Потребитель — poll-цикл ws-server,
 // который под давлением растягивает интервал опроса комментариев.
 
-const BASE = { userToken: "user-tok", liveOwnerId: "-1", liveVideoId: "2", apiMinIntervalMs: 1 };
+const BASE = { groupToken: "grp-tok", liveOwnerId: "-1", liveVideoId: "2", apiMinIntervalMs: 1 };
 
 function stubFetch(handler) {
   const original = globalThis.fetch;
@@ -31,22 +31,22 @@ test("после VK 6 multiplier растёт, после успеха зату�
     async json() {
       return rateLimited
         ? { error: { error_code: 6, error_msg: "Too many requests per second" } }
-        : { response: { items: [] } };
+        : { response: [] };
     },
   }));
   try {
     const pub = createVkPublisher(BASE);
 
-    await assert.rejects(() => pub.getComments(1), /VK API 6/);
+    await assert.rejects(() => pub.fetchViewerNames([1]), /VK API 6/);
     assert.equal(pub.getQueuePressure().backoffMultiplier, 2);
 
-    await assert.rejects(() => pub.getComments(1), /VK API 6/);
+    await assert.rejects(() => pub.fetchViewerNames([1]), /VK API 6/);
     assert.equal(pub.getQueuePressure().backoffMultiplier, 4);
 
     rateLimited = false;
-    await pub.getComments(1);
+    await pub.fetchViewerNames([1]);
     assert.equal(pub.getQueuePressure().backoffMultiplier, 2);
-    await pub.getComments(1);
+    await pub.fetchViewerNames([1]);
     assert.equal(pub.getQueuePressure().backoffMultiplier, 1);
   } finally {
     restore();
