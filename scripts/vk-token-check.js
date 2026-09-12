@@ -1,49 +1,117 @@
-// Проверка VK-токенов перед эфиром: читаем и НЕ публикуем ничего.
-// Отвечает на один вопрос — примет ли ВК наши вызовы, или аккаунт под
-// флуд-блоком (ошибка 9). Эфир 2026-09-12: 249 из 249 опросов упали с
-// «Flood control», комментарии не доходили два часа, а узнали об этом
-// только из логов после эфира.
+// Проверка VK перед эфиром: пройдёт ли зал к нам и мы к залу. Только чтение,
+// ничего не публикует и не меняет настроек.
 //
 //   node scripts/vk-token-check.js
 //
-// Ошибка 9 у video.getComments = аккаунт user-токена заблокирован ВК по
-// флуду. Лечится не кодом: нужен user-токен другого администратора
-// сообщества (см. knowledge/wiki/vk-integration.md).
+// С 13.09.2026 эфир целиком живёт на ГРУППОВОМ токене: комментарии приходят
+// событием video_comment_new (Long Poll сообщества), карточки и подтверждения
+// уходят через wall.createComment от имени сообщества. Пользовательский токен
+// остался только запасным путём — 12.09 ВК заблокировал его по флуду
+// (ошибка 9), и два часа эфира прошли вслепую. Поэтому первыми проверяются
+// групповые пункты: если красный там — эфир будет глухим.
+//
+// Подробности: knowledge/wiki/vk-integration.md
 import "dotenv/config";
 
 const version = process.env.VK_API_VERSION?.trim() || "5.199";
-const userToken = process.env.VK_USER_TOKEN?.trim() || "";
 const groupToken = process.env.VK_GROUP_TOKEN?.trim() || "";
+const userToken = process.env.VK_USER_TOKEN?.trim() || "";
+const groupId = (process.env.VK_GROUP_ID?.trim() || "").replace(/^-/, "");
 const liveUrl = process.env.VK_LIVE_VIDEO_URL?.trim() || "";
-// video-183296442_456245462 — из ссылки на эфир в .env.
 const video = liveUrl.match(/video(-?\d+)_(\d+)/);
 
 async function call(method, params, token) {
-  if (!token) return "нет токена";
+  if (!token) return { error: "нет токена" };
   const url = new URL(`https://api.vk.com/method/${method}`);
   for (const [key, value] of Object.entries({ ...params, access_token: token, v: version })) {
     url.searchParams.set(key, value);
   }
   const body = await (await fetch(url)).json();
   return body.error
-    ? `ОШИБКА ${body.error.error_code}: ${body.error.error_msg}`
-    : "ок";
+    ? { error: `ОШИБКА ${body.error.error_code}: ${body.error.error_msg}` }
+    : { ok: body.response };
 }
 
-const checks = [
-  ["users.get (кто мы)", "users.get", {}, userToken],
-  ["messages.isMessagesFromGroupAllowed (ЛС)", "messages.isMessagesFromGroupAllowed",
-    { group_id: process.env.VK_GROUP_ID?.trim() || "", user_id: 1 }, groupToken],
-];
-if (video) {
-  checks.splice(1, 0,
-    ["video.get (эфир виден)", "video.get", { owner_id: video[1], videos: `${video[1]}_${video[2]}` }, userToken],
-    ["video.getComments (комменты читаются)", "video.getComments", { owner_id: video[1], video_id: video[2], count: 1 }, userToken],
+const results = [];
+function report(label, verdict, detail = "") {
+  results.push({ label, verdict });
+  const mark = verdict === "ok" ? "  ок  " : verdict === "warn" ? " ждёт " : "ПЛОХО ";
+  console.log(`${mark} ${label}${detail ? " — " + detail : ""}`);
+}
+
+console.log("\nГрупповой токен — на нём держится эфир\n");
+
+const group = await call("groups.getById", { group_id: groupId }, groupToken);
+if (group.error) {
+  report("сообщество отвечает", "fail", group.error);
+} else {
+  const found = group.ok?.groups?.[0] || group.ok?.[0];
+  report("сообщество отвечает", "ok", `${found?.name || "?"} (id ${found?.id || "?"})`);
+}
+
+const settings = await call("groups.getLongPollSettings", { group_id: groupId }, groupToken);
+if (settings.error) {
+  report("Long Poll настроен", "fail", settings.error);
+} else {
+  const enabled = Boolean(settings.ok?.is_enabled);
+  const event = Number(settings.ok?.events?.video_comment_new) === 1;
+  report("Long Poll включён", enabled ? "ok" : "fail", enabled ? "" : "включить в «Работа с API → Long Poll API»");
+  report(
+    "событие «Комментарий к видео: добавлен»",
+    event ? "ok" : "fail",
+    event ? "" : "без него комментарии зрителей до сервера не дойдут",
+  );
+}
+
+const server = await call("groups.getLongPollServer", { group_id: groupId }, groupToken);
+report("очередь событий выдаётся", server.error ? "fail" : "ok", server.error || "");
+
+// Имена авторов комментариев тянутся этим же токеном — в событии их нет.
+const names = await call("users.get", { user_ids: 1 }, groupToken);
+report("имена зрителей читаются", names.error ? "fail" : "ok", names.error || "");
+
+const dm = await call(
+  "messages.isMessagesFromGroupAllowed",
+  { group_id: groupId, user_id: 1 },
+  groupToken,
+);
+report("личные сообщения сообщества", dm.error ? "fail" : "ok", dm.error || "");
+
+// Публикацию (wall.createComment) вживую не проверяем: это публичный
+// комментарий под эфиром. Проверяем то, от чего она зависит, — известен ли
+// post_id записи. Пустой — не беда: сервер узнает его из первого же
+// комментария зрителя (событие wall_reply_new).
+const postId = process.env.VK_LIVE_POST_ID?.trim() || "";
+report(
+  "запись эфира для публикации",
+  postId ? "ok" : "warn",
+  postId ? `VK_LIVE_POST_ID=${postId}` : "не задана — узнается сама из первого комментария зрителя",
+);
+
+console.log("\nПользовательский токен — только запасной путь\n");
+
+if (!userToken) {
+  report("user-токен", "warn", "не задан; эфиру он больше не нужен");
+} else if (video) {
+  const check = await call(
+    "video.getComments",
+    { owner_id: video[1], video_id: video[2], count: 1 },
+    userToken,
+  );
+  report(
+    "чтение комментариев видео",
+    check.error ? "warn" : "ok",
+    check.error
+      ? `${check.error} — эфиру не мешает, но восстановление заказов по логам без него невозможно`
+      : "",
   );
 } else {
-  console.log("VK_LIVE_VIDEO_URL не разобран — проверки по видео пропущены\n");
+  report("чтение комментариев видео", "warn", "VK_LIVE_VIDEO_URL не разобран");
 }
 
-for (const [label, method, params, token] of checks) {
-  console.log(`${label}: ${await call(method, params, token)}`);
-}
+const broken = results.filter((r) => r.verdict === "fail");
+console.log(
+  broken.length === 0
+    ? "\nИтог: эфир примет брони и ответит залу.\n"
+    : `\nИтог: сломано пунктов — ${broken.length}, эфир будет глухим. Чинить: ${broken.map((r) => r.label).join(", ")}.\n`,
+);
