@@ -1474,6 +1474,9 @@ export function attachWsServer(httpServer, config, services = {}) {
         lotSessionId: lot?.lotSessionId || null,
         code: lot?.code || null,
         viewerId: event.viewerId,
+        // Имя нужно, когда подтверждение уходит комментарием к записи, а не
+        // ответом в ветке: адресата иначе не отличить (см. postLiveComment).
+        viewerName: event.viewerName || nameCacheStore?.getName?.(event.viewerId) || "",
         status: event.status,
       }).catch((error) => {
         handleVkPublishError(lot, error);
@@ -2291,6 +2294,7 @@ export function attachWsServer(httpServer, config, services = {}) {
           lotSessionId: gateLot?.lotSessionId || null,
           code,
           viewerId: comment.viewerId,
+          viewerName: comment.viewerName || nameCacheStore?.getName?.(comment.viewerId) || "",
           status: `cancel_${outcome}`,
         }).catch((error) => {
           handleVkPublishError(gateLot, error);

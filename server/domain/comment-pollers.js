@@ -335,7 +335,9 @@ export function createCommentPollers({
           }
 
           const newItems = (comments.items || [])
-            .filter((item) => item.id > vkLastCommentId && !vkSeenIds.has(item.id))
+            // from_id > 0 — только люди: комментарии от имени сообщества
+            // (наши же карточки и подтверждения) разбирать как брони нельзя.
+            .filter((item) => item.id > vkLastCommentId && !vkSeenIds.has(item.id) && item.from_id > 0)
             .sort((left, right) => left.id - right.id);
 
           for (const comment of newItems) {

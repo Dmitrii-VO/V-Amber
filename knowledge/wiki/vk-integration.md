@@ -37,11 +37,59 @@ the last open lot closes. Comments that look like reservations during that gap
 are escalated as `reservationAttention` with no automatic reservation, so the
 operator can handle late or between-lot bookings manually.
 
+## Публикация: комментарии к записи эфира (с 2026-09-13)
+
+Карточки лота, подтверждения броней, объявление победителя конкурса и
+инструкция зрителям уходят через **`wall.createComment` под ГРУППОВЫМ
+токеном** с `from_group=1` — то есть от имени сообщества.
+
+Видео эфира висит на записи стены, и комментарии под видео — это её
+комментарии. `video.createComment` сообществу закрыт (ошибка 27), а
+`wall.createComment` — открыт. Проверено на боевом эфире 13.09.2026:
+комментарий ушёл групповым токеном (`comment_id=302807`) и появился под видео
+с подписью «Амберри — натуральный янтарь… · Автор».
+
+Что это даёт:
+
+- эфир перестал зависеть от пользовательского токена, который ВК 12.09
+  заблокировал по флуду (см. раздел про Long Poll выше);
+- зал видит ответы **от сообщества**, а не от человека — старая претензия
+  оператора «чтобы не Амбер Стандарт писал» закрыта;
+- читать стену сообществу по-прежнему нельзя (`wall.get`, `wall.getById`,
+  `wall.getComments` → ошибка 27), но чтение и не нужно: комментарии приходят
+  событиями Long Poll.
+
+### Откуда берётся `post_id`
+
+1. Событие `wall_reply_new` приходит **зеркалом** к каждому
+   `video_comment_new` и несёт `post_id` — `server/vk.js` запоминает его сам
+   при первом же комментарии зрителя. Как комментарий зеркальное событие не
+   разбирается, иначе зал задвоится.
+2. `VK_LIVE_POST_ID` в `.env` — когда публиковать надо до того, как кто-то
+   написал (первая карточка лота в начале эфира).
+
+`setLiveVideoUrl` **сбрасывает** запомненный `post_id`: новый эфир — новая
+запись, иначе карточки уйдут под вчерашнее видео.
+
+### Ограничение
+
+Подтверждение брони больше не ответ в ветке, а отдельный комментарий с именем
+покупателя в начале: `«Аня, бронь принята (код 03900)»`. Id комментария к
+видео и id комментария к записи — разные пространства, ответить по первому
+через `wall.createComment` нельзя. Сопоставить их можно по паре событий
+(`from_id`, `date`, `text`) — помечено `ponytail:` в `server/vk.js`.
+
+Запасной путь через `video.createComment` под пользовательским токеном
+сохранён: он включается сам, пока `post_id` неизвестен.
+
 ## Token routing (critical)
 
 All `video.*` methods — `video.getComments`, `video.createComment`,
 `video.get` — must use a **user token**, never a community/group token. VK
-rejects video methods under group auth with `error_code 27`. `server/vk.js`
+rejects video methods under group auth with `error_code 27`. С 2026-09-13
+эфир по этим методам больше не ходит: приём переехал на Long Poll, публикация
+— на `wall.createComment` (оба под групповым токеном, см. разделы выше).
+Ниже — как это устроено на запасном пути и почему группе нельзя. `server/vk.js`
 derives `videoToken = VK_USER_TOKEN || VK_GROUP_TOKEN || VK_ACCESS_TOKEN` for
 these calls. `VK_GROUP_TOKEN` is used only for `messages.*` (community DMs).
 Service comments therefore post from the user-token account's identity, not the
