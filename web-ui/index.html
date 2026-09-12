@@ -88,6 +88,16 @@
         <button id="connectionBannerStart" class="btn btn--primary" type="button">Перезапустить</button>
       </div>
 
+      <!-- Приём комментариев из ВК умер. Баннер, а не тост: 12.09.2026 эфир
+           шёл два часа при ста процентах упавших опросов, и разовое
+           предупреждение с первой минуты оператор не увидел. -->
+      <div id="vkCommentsBanner" class="info-banner info-banner--attention" hidden role="alert">
+        <div class="info-banner-body">
+          <strong>Комментарии ВК не приходят.</strong>
+          <span id="vkCommentsBannerHint" class="dim">Брони и конкурс сейчас не принимаются.</span>
+        </div>
+      </div>
+
       <div id="safeModePrestreamBanner" class="info-banner info-banner--safe-mode" hidden role="alert">
         <div class="info-banner-body">
           <strong>Safe mode включён.</strong>

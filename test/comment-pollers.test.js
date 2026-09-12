@@ -203,7 +203,11 @@ test("ошибки опроса дают экспоненциальный backof
   await settle();
 
   assert.deepEqual(delays.slice(0, 5), [2000, 4000, 8000, 16000, 32000]);
-  assert.equal(notices.filter((n) => n.type === "warning").length, 1, "предупреждать оператора один раз за серию");
+  // С 12.09.2026 это состояние с баннером, а не разовый тост: эфир может
+  // идти часами, и предупреждение с первой минуты оператор не увидит.
+  const health = notices.filter((n) => n.type === "vkCommentsHealth");
+  assert.equal(health.length, 1, "поднимать баннер один раз за серию");
+  assert.equal(health[0].ok, false);
 });
 
 test("очередь публикаций притормаживает опрос", async () => {
@@ -302,4 +306,173 @@ test("повторный startVk не поднимает второй цикл",
   await settle();
 
   assert.equal(vk.calls, 1, "два параллельных цикла удвоили бы нагрузку на квоту VK");
+});
+
+// ——— Long Poll сообщества (эфир 2026-09-12) ———
+//
+// ВК заблокировал user-аккаунт по флуду: 249 из 249 опросов video.getComments
+// упали с ошибкой 9, комментарии два часа не доходили, брони и конкурс
+// молчали. Событийный канал идёт под ГРУППОВЫМ токеном и этого блока не
+// касается — здесь проверяется, что поллер им пользуется, когда он доступен.
+
+function createLongPollVkFake(batches, { settings = { longPollEnabled: true, videoCommentEventEnabled: true } } = {}) {
+  let index = 0;
+  return {
+    getCommentsCalls: 0,
+    namesCalls: 0,
+    commentLongPollConfigured: true,
+    async getSelfUserId() { return 777; },
+    async getCommentLongPollSettings() { return settings; },
+    async openCommentLongPoll() { return { server: "https://lp.vk.com/whp/1", key: "k", ts: "1" }; },
+    tsSeen: [],
+    reconnects: 0,
+    async fetchCommentLongPollUpdates({ ts } = {}) {
+      this.tsSeen.push(String(ts));
+      const batch = batches[Math.min(index, batches.length - 1)];
+      index += 1;
+      if (batch instanceof Error) throw batch;
+      // "expired" — ВК ответил failed:2: ключ протух, ts остаётся валидным.
+      if (batch === "expired") {
+        this.reconnects += 1;
+        return { ts: String(ts), comments: [], reconnect: true, keepTs: true };
+      }
+      return { ts: String(10 + index), comments: batch, reconnect: false };
+    },
+    async fetchViewerNames(ids) {
+      this.namesCalls += 1;
+      return new Map(ids.map((id) => [id, `Зритель ${id}`]));
+    },
+    async getComments() { this.getCommentsCalls += 1; return { items: [], profiles: [] }; },
+  };
+}
+
+function setupLongPoll({ batches, stopAfter = 2, settings } = {}) {
+  const driver = createDriver({ stopAfter });
+  const comments = [];
+  const notices = [];
+  const vk = createLongPollVkFake(batches, settings ? { settings } : {});
+  const pollers = createCommentPollers({
+    vk,
+    chatClient: { enabled: false },
+    config: {},
+    connectionId: "ws-test",
+    onComment: (c) => comments.push(c),
+    getOpenLotCount: () => 1,
+    notify: (p) => notices.push(p),
+    sleep: driver.sleep,
+  });
+  driver.onStop(() => pollers.stopVk());
+  return { pollers, vk, comments, notices, delays: driver.delays };
+}
+
+function lpComment(id, fromId, text) {
+  return { id, from_id: fromId, text, date: 1_700_000_000 };
+}
+
+test("Long Poll: события становятся комментариями, опрос video.getComments не нужен", async () => {
+  const { pollers, vk, comments } = setupLongPoll({
+    batches: [[lpComment(31, 5001, "бронь 03900"), lpComment(30, 5002, "хочу")], []],
+  });
+
+  pollers.startVk();
+  await settle();
+
+  assert.deepEqual(comments.map((c) => c.id), [30, 31], "по возрастанию id, как в опросе");
+  assert.equal(comments[0].viewerName, "Зритель 5002", "имя дотянуто отдельным users.get");
+  assert.equal(comments[0].source, "vk");
+  assert.equal(vk.getCommentsCalls, 0, "video.getComments не зовём вовсе — он и есть заблокированный метод");
+});
+
+test("Long Poll: свои же комментарии бота не переисследуются как брони", async () => {
+  const { pollers, comments } = setupLongPoll({
+    batches: [[lpComment(40, 777, "бронь подтверждена (код 03900)"), lpComment(41, 5001, "бронь")], []],
+  });
+
+  pollers.startVk();
+  await settle();
+
+  assert.deepEqual(comments.map((c) => c.viewerId), [5001]);
+});
+
+test("Long Poll: один и тот же id не уезжает дважды", async () => {
+  const { pollers, comments } = setupLongPoll({
+    batches: [[lpComment(50, 5001, "бронь")], [lpComment(50, 5001, "бронь")], []],
+    stopAfter: 2,
+  });
+
+  pollers.startVk();
+  await settle();
+
+  assert.deepEqual(comments.map((c) => c.id), [50]);
+});
+
+test("Long Poll выключен в сообществе — работаем опросом и говорим об этом один раз", async () => {
+  const { pollers, vk, notices } = setupLongPoll({
+    batches: [[]],
+    settings: { longPollEnabled: true, videoCommentEventEnabled: false },
+    stopAfter: 2,
+  });
+
+  pollers.startVk();
+  await settle();
+
+  assert.ok(vk.getCommentsCalls > 0, "упали на опрос");
+  assert.equal(notices.filter((n) => /Long Poll/.test(n.message || "")).length, 1);
+});
+
+// ——— Флуд-блок ВК (ошибка 9) ———
+
+function vkError(code) {
+  const error = new Error(`VK API ${code}: Flood control`);
+  error.vkErrorCode = code;
+  return error;
+}
+
+test("ошибка 9: баннер оператору сразу и отход на пять минут, а не долбёж в стену", async () => {
+  const { pollers, notices, delays } = setup({
+    cycles: [{ items: [comment(10, 5, "старый")], profiles: [] }, vkError(9), vkError(9)],
+    stopAfter: 3,
+  });
+
+  pollers.startVk();
+  await settle();
+
+  const health = notices.filter((n) => n.type === "vkCommentsHealth");
+  assert.equal(health.length, 1, "состояние шлём на переходе, а не каждую итерацию");
+  assert.equal(health[0].ok, false);
+  assert.equal(health[0].reason, "flood_control");
+  assert.match(health[0].hint, /VK_USER_TOKEN/);
+  assert.ok(delays.includes(300000), `ждали пять минут, а не секунды: ${delays.join(",")}`);
+});
+
+test("комменты вернулись — баннер снимается", async () => {
+  const { pollers, notices } = setup({
+    cycles: [
+      { items: [comment(10, 5, "старый")], profiles: [] },
+      vkError(9),
+      { items: [comment(11, 6, "бронь")], profiles: [] },
+    ],
+    stopAfter: 3,
+  });
+
+  pollers.startVk();
+  await settle();
+
+  const health = notices.filter((n) => n.type === "vkCommentsHealth").map((n) => n.ok);
+  assert.deepEqual(health, [false, true]);
+});
+
+test("Long Poll: протухший ключ (failed:2) не сбрасывает позицию в очереди", async () => {
+  const { pollers, vk } = setupLongPoll({
+    batches: [[lpComment(60, 5001, "бронь")], "expired", []],
+    stopAfter: 2,
+  });
+
+  pollers.startVk();
+  await settle();
+
+  assert.equal(vk.reconnects, 1);
+  // Третий запрос идёт с тем же ts, что и упавший второй: свежий ts от
+  // нового сервера означал бы прыжок в «сейчас» и потерю броней в этот миг.
+  assert.equal(vk.tsSeen[2], vk.tsSeen[1], `ts сброшен: ${vk.tsSeen.join(",")}`);
 });

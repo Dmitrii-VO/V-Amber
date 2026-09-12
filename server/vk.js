@@ -361,6 +361,133 @@ export function createVkPublisher(config) {
     throw lastError;
   }
 
+  // ——— Long Poll сообщества: комментарии эфира приходят СОБЫТИЯМИ ———
+  //
+  // Эфир 2026-09-12: ВК заблокировал аккаунт user-токена по флуду
+  // (ошибка 9) — 249 из 249 опросов video.getComments упали, зал два часа
+  // не доходил до сервера, брони и конкурс молчали. Long Poll сообщества
+  // ходит по своей трубе (lp.vk.com) под ГРУППОВЫМ токеном: квоту API он
+  // не ест, флуд-контроль user-аккаунта его не касается, и комментарий
+  // приходит сразу, а не через 1–9 секунд опроса.
+  //
+  // Чинится только ВХОД. Публикация как была под user-токеном, так и
+  // остаётся: video.createComment под групповой авторизацией ВК не
+  // принимает (ошибка 27), см. комментарий к videoToken выше.
+  const groupId = String(config?.groupId || "").replace(/^-/, "").trim();
+  const commentLongPollConfigured = Boolean(groupToken && groupId);
+
+  // Событие надо один раз включить руками: Управление сообществом → Работа
+  // с API → Long Poll API → Типы событий → «Комментарий к видео: добавлен».
+  // Намеренно НЕ включаем сами: groups.setLongPollSettings переписывает
+  // ВСЕ флаги разом, и наш вызов погасил бы события чужих ботов сообщества
+  // (в проверке 2026-09-12 у группы включены message_new, message_reply,
+  // wall_reply_new, group_join).
+  async function getCommentLongPollSettings() {
+    const settings = await callVkApi("groups.getLongPollSettings", {
+      group_id: groupId,
+    }, groupToken);
+    return {
+      longPollEnabled: Boolean(settings?.is_enabled),
+      videoCommentEventEnabled: Number(settings?.events?.video_comment_new) === 1,
+    };
+  }
+
+  async function openCommentLongPoll() {
+    const server = await callVkApi("groups.getLongPollServer", {
+      group_id: groupId,
+    }, groupToken);
+    return {
+      server: String(server?.server || ""),
+      key: String(server?.key || ""),
+      ts: String(server?.ts || ""),
+    };
+  }
+
+  // Событие video_comment_new приходит на ВСЕ видео сообщества — берём
+  // только текущий эфир. Имена полей у объекта события ВК документирует
+  // скупо, поэтому проверяем оба написания владельца и не падаем, если
+  // video_id в объекте не окажется вовсе (тогда доверяем тому, что у
+  // сообщества в эфире одно живое видео).
+  function isLiveVideoComment(object) {
+    const videoId = object?.video_id ?? object?.video?.id ?? null;
+    if (videoId !== null && String(videoId) !== String(liveVideoId)) {
+      return false;
+    }
+    const ownerId = object?.video_owner_id ?? object?.owner_id ?? object?.video?.owner_id ?? null;
+    if (ownerId !== null && String(ownerId) !== String(liveOwnerId)) {
+      return false;
+    }
+    return true;
+  }
+
+  // Долгое ожидание события. Мимо очереди VK API намеренно: запрос висит
+  // до 25 секунд, и в общей очереди он застопорил бы публикации.
+  async function fetchCommentLongPollUpdates({ server, key, ts, waitSec = 25 } = {}) {
+    const url = new URL(server);
+    url.searchParams.set("act", "a_check");
+    url.searchParams.set("key", key);
+    url.searchParams.set("ts", String(ts));
+    url.searchParams.set("wait", String(waitSec));
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout((waitSec + 10) * 1000),
+    });
+    if (!response.ok) {
+      throw new Error(`VK LongPoll HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+
+    // failed:1 — ts устарел, ВК прислал новый; 2 — протух ключ, но ts живой;
+    // 3 — потеряны и ключ, и история. keepTs важен: на failed:2 взять свежий
+    // ts вместе с новым ключом значит перепрыгнуть в «сейчас» и потерять
+    // комментарии, пришедшие в эту секунду, — а это ровно брони.
+    if (payload?.failed === 1 && payload?.ts) {
+      return { ts: String(payload.ts), comments: [], reconnect: false };
+    }
+    if (payload?.failed) {
+      return {
+        ts: String(ts),
+        comments: [],
+        reconnect: true,
+        keepTs: payload.failed === 2,
+      };
+    }
+
+    const comments = [];
+    for (const update of payload?.updates || []) {
+      if (update?.type !== "video_comment_new") {
+        continue;
+      }
+      const object = update.object || {};
+      if (!isLiveVideoComment(object)) {
+        continue;
+      }
+      comments.push({
+        id: Number(object.id),
+        from_id: Number(object.from_id),
+        text: String(object.text ?? ""),
+        date: Number(object.date) || Math.floor(Date.now() / 1000),
+      });
+    }
+    return { ts: String(payload?.ts ?? ts), comments, reconnect: false };
+  }
+
+  // Имена авторов: в событии Long Poll их нет, а оператору в ленте нужен
+  // человек, а не «id 19702596». Групповым токеном — он живой и когда
+  // user-аккаунт под флуд-блоком (проверено 2026-09-12).
+  async function fetchViewerNames(userIds) {
+    const ids = [...new Set(userIds.filter((id) => Number(id) > 0))];
+    if (ids.length === 0) {
+      return new Map();
+    }
+    const users = await callVkApi("users.get", {
+      user_ids: ids.slice(0, 100).join(","),
+    }, groupToken || videoToken);
+    return new Map((Array.isArray(users) ? users : []).map((user) => [
+      Number(user.id),
+      [user.first_name, user.last_name].filter(Boolean).join(" "),
+    ]));
+  }
+
   return {
     isEnabled,
     dmEnabled: Boolean(groupToken),
@@ -497,6 +624,15 @@ export function createVkPublisher(config) {
 
       return fetchComments(count);
     },
+    // Long Poll сообщества — вход комментариев без user-токена; см. блок
+    // «Long Poll сообщества» выше. Наружу торчит ровно то, что нужно
+    // циклу в comment-pollers: можно ли им пользоваться, где очередь и что
+    // в ней нового.
+    commentLongPollConfigured,
+    getCommentLongPollSettings,
+    openCommentLongPoll,
+    fetchCommentLongPollUpdates,
+    fetchViewerNames,
     async publishLotCard(activeLot) {
       if (!isEnabled) {
         logger.info("vk", "publish_skipped_not_configured", {

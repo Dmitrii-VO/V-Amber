@@ -462,6 +462,12 @@ function setLifecycle(next) {
   if (contestButton) {
     contestButton.hidden = !(next === "streaming" || next === "starting");
   }
+  // Новый эфир начинается с чистого листа: сервер поднимет баннер заново,
+  // если комментарии опять не пойдут.
+  if (next === "starting") {
+    const vkBanner = document.getElementById("vkCommentsBanner");
+    if (vkBanner) vkBanner.hidden = true;
+  }
 
   if (next === "streaming") {
     setSessionPill("live", "Live");
@@ -1313,7 +1319,32 @@ function renderContest(payload) {
   }
 }
 
+// Приём комментариев из ВК. Это СОСТОЯНИЕ, а не разовое уведомление:
+// 12.09.2026 эфир два часа шёл со стопроцентно падающим опросом ВК
+// (флуд-блок аккаунта), и единственный тост с первой минуты оператор уже
+// не видел — брони и конкурс молчали, а на дашборде было тихо.
+function renderVkCommentsHealth(payload) {
+  const banner = document.getElementById("vkCommentsBanner");
+  const hint = document.getElementById("vkCommentsBannerHint");
+  if (!banner) return;
+
+  if (payload.ok) {
+    banner.hidden = true;
+    logEvent("Комментарии ВК снова приходят", "info");
+    return;
+  }
+
+  if (hint && payload.hint) hint.textContent = payload.hint;
+  banner.hidden = false;
+  logEvent(`Комментарии ВК не приходят: ${payload.hint || payload.reason || "ошибка ВК"}`, "warn");
+}
+
 function handleServerMessage(payload) {
+  if (payload.type === "vkCommentsHealth") {
+    renderVkCommentsHealth(payload);
+    return;
+  }
+
   if (payload.type === "contest") {
     renderContest(payload);
     return;
