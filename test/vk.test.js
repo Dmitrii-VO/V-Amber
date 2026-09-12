@@ -178,3 +178,126 @@ test("publishLotCard still publishes when photo upload fails", async () => {
     globalThis.fetch = original;
   }
 });
+
+// ——— Публикация под запись эфира (13.09.2026) ———
+//
+// ВК не даёт сообществу video.createComment (ошибка 27), но даёт
+// wall.createComment — а комментарии под видео лежат и как комментарии к
+// записи, на которой висит эфир. Проверено на боевом эфире: комментарий ушёл
+// групповым токеном и появился под видео с подписью «Амберри · Автор».
+// Это снимает зависимость эфира от пользовательского токена, который ВК
+// 12.09 заблокировал по флуду.
+
+function installMethodSpy() {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? new URL(input) : input;
+    const params = init?.body instanceof URLSearchParams ? init.body : new URLSearchParams();
+    calls.push({ method: url.pathname.replace("/method/", ""), params });
+    return { ok: true, status: 200, async json() { return { response: { comment_id: 1 } }; } };
+  };
+  return { calls, restore() { globalThis.fetch = original; } };
+}
+
+function publisherWith(extra = {}) {
+  return createVkPublisher({
+    userToken: "user-token",
+    groupToken: "group-token",
+    groupId: "183296442",
+    liveVideoUrl: "https://vk.ru/video-183296442_456245462",
+    ...extra,
+  });
+}
+
+test("зная запись эфира, карточка лота уходит на стену от имени сообщества", async () => {
+  const spy = installMethodSpy();
+  try {
+    const vk = publisherWith({ livePostId: "301049" });
+    await vk.publishLotCard({ code: "03900", lotSessionId: "lot-1", salePrice: 4250 });
+
+    const call = spy.calls.at(-1);
+    assert.equal(call.method, "wall.createComment");
+    assert.equal(call.params.get("post_id"), "301049");
+    assert.equal(call.params.get("owner_id"), "-183296442");
+    assert.equal(call.params.get("from_group"), "1");
+    assert.equal(call.params.get("access_token"), "group-token", "именно групповой токен — user под флуд-блоком");
+  } finally {
+    spy.restore();
+  }
+});
+
+test("запись эфира неизвестна — работает старый путь через видео", async () => {
+  const spy = installMethodSpy();
+  try {
+    const vk = publisherWith();
+    await vk.publishLotCard({ code: "03900", lotSessionId: "lot-1", salePrice: 4250 });
+
+    const call = spy.calls.at(-1);
+    assert.equal(call.method, "video.createComment");
+    assert.equal(call.params.get("access_token"), "user-token");
+  } finally {
+    spy.restore();
+  }
+});
+
+test("подтверждение брони на стене адресовано по имени, а не ответом в ветке", async () => {
+  const spy = installMethodSpy();
+  try {
+    const vk = publisherWith({ livePostId: "301049" });
+    await vk.publishReservationReply({
+      commentId: 100001931,
+      message: "бронь принята (код 03900)",
+      viewerName: "Аня",
+      lotSessionId: "lot-1",
+      code: "03900",
+      viewerId: 5001,
+      status: "ok",
+    });
+
+    const call = spy.calls.at(-1);
+    assert.equal(call.method, "wall.createComment");
+    assert.equal(call.params.get("message"), "Аня, бронь принята (код 03900)");
+    assert.equal(call.params.get("reply_to_comment"), null, "id комментария к видео в ветке записи не существует");
+  } finally {
+    spy.restore();
+  }
+});
+
+test("post_id узнаётся сам из события wall_reply_new", async () => {
+  const spy = installMethodSpy();
+  try {
+    const vk = publisherWith();
+    assert.equal(vk.getLivePostId(), 0);
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ts: "2",
+          updates: [
+            { type: "wall_reply_new", object: { id: 302806, from_id: 5001, text: "бронь", post_id: 301049, post_owner_id: -183296442 } },
+            { type: "video_comment_new", object: { id: 100001931, from_id: 5001, text: "бронь", date: 1, video_id: 456245462, video_owner_id: -183296442 } },
+          ],
+        };
+      },
+    });
+
+    const update = await vk.fetchCommentLongPollUpdates({ server: "https://lp.vk.com/whp/1", key: "k", ts: "1" });
+
+    assert.equal(vk.getLivePostId(), 301049, "узнали запись эфира из зеркального события");
+    assert.deepEqual(update.comments.map((c) => c.id), [100001931], "сам комментарий берём один раз, из video_comment_new");
+  } finally {
+    spy.restore();
+  }
+});
+
+test("новый эфир забывает запись прошлого", async () => {
+  const vk = publisherWith({ livePostId: "301049" });
+  assert.equal(vk.getLivePostId(), 301049);
+
+  vk.setLiveVideoUrl("https://vk.ru/video-183296442_456299999");
+
+  assert.equal(vk.getLivePostId(), 0, "иначе карточки сегодняшних лотов уйдут под вчерашнее видео");
+});
