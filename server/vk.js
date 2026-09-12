@@ -436,13 +436,20 @@ export function createVkPublisher(config) {
     }
     const payload = await response.json();
 
-    // failed:1 — ts устарел, ВК прислал новый; 2 и 3 — ключ протух или
-    // история потеряна, надо заново брать сервер.
+    // failed:1 — ts устарел, ВК прислал новый; 2 — протух ключ, но ts живой;
+    // 3 — потеряны и ключ, и история. keepTs важен: на failed:2 взять свежий
+    // ts вместе с новым ключом значит перепрыгнуть в «сейчас» и потерять
+    // комментарии, пришедшие в эту секунду, — а это ровно брони.
     if (payload?.failed === 1 && payload?.ts) {
       return { ts: String(payload.ts), comments: [], reconnect: false };
     }
     if (payload?.failed) {
-      return { ts: String(ts), comments: [], reconnect: true };
+      return {
+        ts: String(ts),
+        comments: [],
+        reconnect: true,
+        keepTs: payload.failed === 2,
+      };
     }
 
     const comments = [];

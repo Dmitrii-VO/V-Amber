@@ -152,6 +152,7 @@ export function createCommentPollers({
     const LONG_POLL_WAIT_SEC = 25;
     const viewerNames = new Map();
     let connection = null;
+    let keptTs = null;
     let consecutiveFailures = 0;
     let noOpenLotsSince = null;
     // Собственные комментарии бота фильтруем так же, как в опросе. 0 =
@@ -170,6 +171,10 @@ export function createCommentPollers({
       try {
         if (!connection) {
           connection = await vk.openCommentLongPoll();
+          if (keptTs) {
+            connection = { ...connection, ts: keptTs };
+            keptTs = null;
+          }
         }
         const startedAt = Date.now();
         const update = await vk.fetchCommentLongPollUpdates({
@@ -180,6 +185,10 @@ export function createCommentPollers({
           break;
         }
         if (update?.reconnect) {
+          // Ключ протух (failed:2) — позицию в очереди сохраняем, иначе
+          // новый сервер отдаст ts «сейчас» и брони, пришедшие в этот
+          // момент, до нас не доедут.
+          keptTs = update.keepTs ? connection.ts : null;
           connection = null;
           await sleep(1000);
           continue;
@@ -279,7 +288,11 @@ export function createCommentPollers({
       // Long Poll включается вручную в сообществе и может быть недоступен.
       if (await canUseCommentLongPoll()) {
         await runVkLongPollLoop(generation);
-        vkActive = false;
+        // Только если нас не сменил новый цикл: иначе флаг погаснет под
+        // живым поллером и следующий startVk поднимет второй.
+        if (generation === vkGeneration) {
+          vkActive = false;
+        }
         return;
       }
 
@@ -439,7 +452,9 @@ export function createCommentPollers({
         await sleep(delayMs);
       }
 
-      vkActive = false;
+      if (generation === vkGeneration) {
+        vkActive = false;
+      }
     })();
   }
 

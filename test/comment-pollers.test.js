@@ -324,10 +324,18 @@ function createLongPollVkFake(batches, { settings = { longPollEnabled: true, vid
     async getSelfUserId() { return 777; },
     async getCommentLongPollSettings() { return settings; },
     async openCommentLongPoll() { return { server: "https://lp.vk.com/whp/1", key: "k", ts: "1" }; },
-    async fetchCommentLongPollUpdates() {
+    tsSeen: [],
+    reconnects: 0,
+    async fetchCommentLongPollUpdates({ ts } = {}) {
+      this.tsSeen.push(String(ts));
       const batch = batches[Math.min(index, batches.length - 1)];
       index += 1;
       if (batch instanceof Error) throw batch;
+      // "expired" — ВК ответил failed:2: ключ протух, ts остаётся валидным.
+      if (batch === "expired") {
+        this.reconnects += 1;
+        return { ts: String(ts), comments: [], reconnect: true, keepTs: true };
+      }
       return { ts: String(10 + index), comments: batch, reconnect: false };
     },
     async fetchViewerNames(ids) {
@@ -452,4 +460,19 @@ test("комменты вернулись — баннер снимается", 
 
   const health = notices.filter((n) => n.type === "vkCommentsHealth").map((n) => n.ok);
   assert.deepEqual(health, [false, true]);
+});
+
+test("Long Poll: протухший ключ (failed:2) не сбрасывает позицию в очереди", async () => {
+  const { pollers, vk } = setupLongPoll({
+    batches: [[lpComment(60, 5001, "бронь")], "expired", []],
+    stopAfter: 2,
+  });
+
+  pollers.startVk();
+  await settle();
+
+  assert.equal(vk.reconnects, 1);
+  // Третий запрос идёт с тем же ts, что и упавший второй: свежий ts от
+  // нового сервера означал бы прыжок в «сейчас» и потерю броней в этот миг.
+  assert.equal(vk.tsSeen[2], vk.tsSeen[1], `ts сброшен: ${vk.tsSeen.join(",")}`);
 });
