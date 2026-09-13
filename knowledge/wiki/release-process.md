@@ -49,6 +49,21 @@ to `bsdtar` or `unzip`; this keeps updates working when the archive contains
 UTF-8 filenames. An operator update from `0.1.26` to `0.1.33` confirmed the
 fixed flow after the old `unzip` path failed on `Добро пожаловать.md`.
 
+## Проверка обновлений на старте
+
+`server/version-check.js` спрашивает GitHub при запуске и кладёт результат в
+`/health` и в шапку дашборда.
+
+- Основной путь — `releases/latest` через API. Неавторизованному API GitHub
+  даёт **60 запросов в час на IP**.
+- На `403 rate limit exceeded` берём ту же версию из публичной ленты
+  `releases.atom` — там лимита нет. 13.09.2026 бейдж висел «обновления не
+  проверены» на общем адресе (VPN + десяток перезапусков), хотя релиз был.
+- Успешный ответ кешируется на час в `logs/update-check.json`. Кешируется
+  **только удалённая версия**: сравнение с локальной делается заново, иначе
+  после обновления бейдж ещё час звал бы обновляться.
+- `DISABLE_UPDATE_CHECK=1` отключает проверку целиком.
+
 ## Related pages
 
 - [[operational-commands]]
