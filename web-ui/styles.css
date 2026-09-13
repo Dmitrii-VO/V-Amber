@@ -1151,3 +1151,8 @@ a { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .contest__number--rolling { animation: none; }
 }
+/* Победа: та же панель, но зелёная — видно боковым зрением, что конкурс
+   кончился и торги снова идут. */
+.contest--won { border-bottom-color: var(--green-border); background: var(--green-bg); }
+.contest--won .contest__label,
+.contest--won .contest__number { color: var(--green); }
