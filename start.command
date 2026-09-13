@@ -183,6 +183,15 @@ echo "  Остановить: Ctrl+C"
 echo "  ─────────────────────────────────────"
 echo ""
 
-(sleep 1.5 && open "http://localhost:${PORT}") &
+# Порт мог уехать: если 8080 занят чужим приложением, сервер поднимается на
+# следующем свободном и пишет туда реальный адрес. Открываем именно его.
+(
+  sleep 1.5
+  URL="http://localhost:${PORT}"
+  if [ -f logs/server-url.txt ]; then
+    URL="$(cat logs/server-url.txt)"
+  fi
+  open "$URL"
+) &
 
 npm start

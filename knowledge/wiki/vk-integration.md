@@ -27,7 +27,10 @@ restored full speed and the very next poll hit `VK API 6` again (33 warnings
 in 3.5 minutes during the 2026-07-05 эфир).
 The queue has **two lanes**: publishing (cards/price/replies/lot-closed/photo
 upload) is high priority and preempts the low-priority `video.getComments` poll,
-so a polling burst never delays a reservation reply. The comment poll cadence in
+so a polling burst never delayed a reservation reply. **Полос больше нет**
+(13.09.2026): читать нечего, вся очередь — это реакция залу, и она одинаково
+срочная. Общий интервал между вызовами и адаптивный backoff после ошибки 6
+остались. The comment poll cadence in
 `server/ws-server.js` is adaptive — ~1.5 s active, ramping to 8 s when quiet
 (was a fixed 2 s). Lot cards also degrade to text-only when a photo upload fails
 or VK returns `error_code 100`. Details in [[vk-comments]].

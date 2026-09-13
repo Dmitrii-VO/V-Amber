@@ -2664,15 +2664,31 @@ function appendChatMessages(items) {
 
     if (item.kind === "service") {
       // Ответ оператора/бота («Янтарь») — не комментарий зрителя, в счётчик
-      // зала не идёт.
+      // зала не идёт. Повтор того же текста подряд не плодит строк, а
+      // наращивает счётчик: напоминания «как забронировать» идут по таймеру
+      // весь эфир и вытесняли живые комментарии за экран — а лента нужна
+      // ровно для того, чтобы видеть зал.
+      const last = elements.commentsFeed?.lastElementChild;
+      if (last?.classList.contains("chat-msg--service") && last.dataset.serviceText === item.text) {
+        const repeats = Number(last.dataset.serviceRepeats || 1) + 1;
+        last.dataset.serviceRepeats = String(repeats);
+        const counter = last.querySelector(".chat-msg__repeat");
+        if (counter) counter.textContent = `×${repeats}`;
+        continue;
+      }
+
       const row = document.createElement("div");
       row.className = "chat-msg chat-msg--service";
+      row.dataset.serviceText = item.text;
+      row.dataset.serviceRepeats = "1";
       const author = document.createElement("span");
       author.className = "author";
       author.textContent = item.name;
       const body = document.createElement("span");
       body.textContent = item.text;
-      row.append(author, body);
+      const repeat = document.createElement("span");
+      repeat.className = "chat-msg__repeat";
+      row.append(author, body, repeat);
       appendFeedRow(row);
       continue;
     }
@@ -3284,7 +3300,10 @@ if (savedVkUrl) {
   validateVkUrl(savedVkUrl);
 }
 
-elements.endpointLabel.textContent = elements.wsUrlInput.value;
+// Адрес WS показываем тот же, по которому реально пойдём: скрытое поле
+// хранит захардкоженный localhost:8080, и на другом порту (или с другого
+// устройства в LAN) подпись врала до первого старта сессии.
+elements.endpointLabel.textContent = resolveWsUrl();
 setSessionPill("", "Idle");
 renderSafeMode();
 fetchSafeModeInitial();

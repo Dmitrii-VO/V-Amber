@@ -196,14 +196,11 @@ export function createVkPublisher(config) {
   let backoffMultiplier = 1;
   let nextApiCallAt = 0;
 
-  // Две полосы общей VK-очереди под одним rate-limit'ом. Публикации
-  // (карточка/цена/ответ на бронь/закрытие лота, а также служебные методы)
-  // идут в high-полосу и опережают чтение комментариев (video.getComments)
-  // из low-полосы. Так всплеск опроса не задерживает подтверждение брони
-  // покупателю. Один и тот же `nextApiCallAt` сохраняет общий интервал и
-  // адаптивный backoff — две полосы делят квоту, а не удваивают её.
-  const highQueue = [];
-  const lowQueue = [];
+  // Очередь VK-вызовов под общим rate-limit'ом: один интервал между
+  // запросами и адаптивный backoff на ошибку 6. Полос было две — публикации
+  // обгоняли чтение комментариев; с переездом приёма на Long Poll читать
+  // стало нечего, и делить очередь больше не на что.
+  const queue = [];
   let pumping = false;
 
   async function pumpVkQueue() {
@@ -212,8 +209,8 @@ export function createVkPublisher(config) {
     }
     pumping = true;
     try {
-      while (highQueue.length > 0 || lowQueue.length > 0) {
-        const task = highQueue.length > 0 ? highQueue.shift() : lowQueue.shift();
+      while (queue.length > 0) {
+        const task = queue.shift();
 
         const waitMs = Math.max(0, nextApiCallAt - Date.now());
         if (waitMs > 0) {
@@ -262,21 +259,11 @@ export function createVkPublisher(config) {
     }
   }
 
-  function enqueueVkApiCall(method, operation, options = {}) {
-    const priority = options.priority || "low";
+  function enqueueVkApiCall(method, operation) {
     return new Promise((resolve, reject) => {
-      const task = { method, operation, resolve, reject };
-      (priority === "high" ? highQueue : lowQueue).push(task);
+      queue.push({ method, operation, resolve, reject });
       void pumpVkQueue();
     });
-  }
-
-  // приоритет, чтобы реакция покупателю не стояла в очереди.
-  function vkCallPriority() {
-    // Полосы остались от эпохи опроса комментариев: тогда чтение уступало
-    // публикациям. Читать нам больше нечего — всё, что мы шлём, это реакция
-    // залу, и она одинаково срочная.
-    return "high";
   }
 
   async function callVkApi(method, params, token = groupToken) {
@@ -296,7 +283,7 @@ export function createVkPublisher(config) {
     return enqueueVkApiCall(method, async () => {
       const response = await fetch(`https://api.vk.com/method/${method}`, { method: "POST", body });
       return parseVkResponse(response);
-    }, { priority: vkCallPriority(method) });
+    });
   }
 
 
@@ -540,18 +527,6 @@ export function createVkPublisher(config) {
   return {
     isEnabled,
     dmEnabled: Boolean(groupToken),
-    // Текущее давление на общую VK-очередь — для потребителей, которые могут
-    // подождать (опрос комментариев в ws-server): multiplier > 1 означает
-    // активный адаптивный backoff после VK 6, highPending — публикации,
-    // ждущие своей очереди. Опросу в такие моменты лучше отступить и не
-    // отъедать квоту у ответов покупателям.
-    getQueuePressure() {
-      return {
-        backoffMultiplier,
-        highPending: highQueue.length,
-        lowPending: lowQueue.length,
-      };
-    },
     buildLotCardMessage(activeLot) {
       return buildLotCardMessage(activeLot, placeholderImageUrl);
     },
