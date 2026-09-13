@@ -79,3 +79,40 @@ test("стоп завершает конкурс без победителя", (
   // После стопа комментарии больше не считаются попытками.
   assert.equal(contest.submit({ commentId: 9, text: "100" }), null);
 });
+
+// Перезагадать посреди конкурса (13.09.2026). Запрет на смену числа стоял,
+// пока оператор называл его вслух; теперь не называет — зрители угадывают
+// вслепую, и конкурс может тянуться, пока никто не попал.
+test("перезагадать меняет число и начинает счёт попыток заново", () => {
+  let value = 0;
+  const contest = createContest({ random: () => value, now: () => 1000 });
+  contest.start();
+  contest.submit({ commentId: 1, viewerId: 5001, text: "555" });
+  assert.equal(contest.getState().attempts, 1);
+
+  value = 0.9999999;
+  const rerolled = contest.reroll();
+
+  assert.equal(rerolled.rerolled, true);
+  assert.equal(rerolled.number, 999);
+  assert.equal(contest.getState().attempts, 0, "новый раунд — новый счёт");
+});
+
+test("перезагадать без конкурса ничего не делает", () => {
+  const contest = fixed(0);
+  const result = contest.reroll();
+  assert.equal(result.rerolled, false);
+  assert.equal(result.active, false);
+});
+
+test("после перезагадывания выигрывает НОВОЕ число, а не старое", () => {
+  let value = 0;
+  const contest = createContest({ random: () => value, now: () => 1000 });
+  contest.start(); // 100
+  value = 0.9999999;
+  contest.reroll(); // 999
+
+  assert.equal(contest.submit({ commentId: 10, viewerId: 5001, text: "100" }), null);
+  const winner = contest.submit({ commentId: 11, viewerId: 5002, text: "999" });
+  assert.equal(winner?.number, 999);
+});
