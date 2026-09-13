@@ -1,12 +1,15 @@
 import { appendFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 import { config } from "./config.js";
 import { createStaticServer } from "./http-server.js";
 import { attachWsServer } from "./ws-server.js";
+import { createServer } from "node:net";
+
 import { logger } from "./logger.js";
+import { isOwnInstanceOnPort, nextPortCandidates } from "./port-fallback.js";
 import { checkForUpdates } from "./version-check.js";
 import { createVkPublisher } from "./vk.js";
 import { createMoySkladClient } from "./moysklad.js";
@@ -373,25 +376,14 @@ async function main() {
   });
 
   httpServer.on("error", (error) => {
-    // Порт занят = почти всегда вторая копия V-Amber (лог 2026-07-24: двойной
-    // запуск на маке оператора). Раньше процесс молча жил дальше без HTTP —
-    // «зомби», который продолжал дёргать МойСклад и греть кеши. Завершаемся
-    // с понятным сообщением: рабочая копия уже открыта на том же порту.
+    // Порт занят — но кем? Своя вторая копия и чужое приложение требуют
+    // противоположных действий: рядом со своей копией подниматься нельзя
+    // (два эфира, двойные публикации в ВК), а чужому приложению порт надо
+    // уступить. 13.09.2026 8080 занял веб-интерфейс qBittorrent, и оператор
+    // в такой ситуации получил бы чужую страницу вместо дашборда, а на
+    // macOS — стек-трейс EADDRINUSE в Terminal.
     if (error?.code === "EADDRINUSE") {
-      logger.error("http", "port_busy_exiting", {
-        port: config.port,
-        hint: "V-Amber уже запущен — вторая копия завершается",
-      });
-      console.error(
-        `\nV-Amber уже запущен: порт ${config.port} занят.\n`
-        + `Откройте http://localhost:${config.port} в браузере или закройте вторую копию приложения.\n`,
-      );
-      // flush с таймаутом: зависший write-chain (диск/антивирус) не должен
-      // воскресить того самого зомби, ради которого этот выход и написан.
-      const flushTimeout = new Promise((resolve) => {
-        setTimeout(resolve, 2000).unref?.();
-      });
-      void Promise.race([logger.flush(), flushTimeout]).finally(() => process.exit(1));
+      void handlePortBusy();
       return;
     }
     logger.error("http", "server_listen_failed", {
@@ -400,7 +392,80 @@ async function main() {
     });
   });
 
+  async function handlePortBusy() {
+    const ownInstance = await isOwnInstanceOnPort(config.port);
+
+    if (!ownInstance) {
+      for (const candidate of nextPortCandidates(config.port)) {
+        const free = await new Promise((resolve) => {
+          const probe = createServer();
+          probe.once("error", () => resolve(false));
+          probe.once("listening", () => probe.close(() => resolve(true)));
+          probe.listen(candidate, config.host);
+        });
+        if (!free) {
+          continue;
+        }
+
+        logger.warn("http", "port_busy_fallback", {
+          busyPort: config.port,
+          port: candidate,
+          hint: "порт занят другим приложением — поднимаемся на следующем свободном",
+        });
+        console.error(
+          `
+Порт ${config.port} занят другим приложением.
+`
+          + `V-Amber открыт по адресу:  http://localhost:${candidate}
+`,
+        );
+        config.port = candidate;
+        httpServer.listen(candidate, config.host);
+        return;
+      }
+    }
+
+    // Своя копия (лог 2026-07-24: двойной запуск на маке оператора) или
+    // свободного порта рядом не нашлось. Раньше процесс молча жил дальше без
+    // HTTP — «зомби», который продолжал дёргать МойСклад и греть кеши.
+    logger.error("http", "port_busy_exiting", {
+      port: config.port,
+      ownInstance,
+      hint: ownInstance
+        ? "V-Amber уже запущен — вторая копия завершается"
+        : "порт занят, свободного порта рядом не нашлось",
+    });
+    console.error(
+      ownInstance
+        ? `
+V-Amber уже запущен: порт ${config.port} занят.
+`
+          + `Откройте http://localhost:${config.port} в браузере или закройте вторую копию приложения.
+`
+        : `
+Порт ${config.port} занят, и свободного порта рядом нет.
+`
+          + `Освободите порт или задайте другой: PORT=8099 в файле .env
+`,
+    );
+    // flush с таймаутом: зависший write-chain (диск/антивирус) не должен
+    // воскресить того самого зомби, ради которого этот выход и написан.
+    const flushTimeout = new Promise((resolve) => {
+      setTimeout(resolve, 2000).unref?.();
+    });
+    void Promise.race([logger.flush(), flushTimeout]).finally(() => process.exit(1));
+  }
+
   httpServer.listen(config.port, config.host, () => {
+    // Реальный адрес — на диск: start.command открывает браузер по нему, а не
+    // по угаданному порту (порт мог уехать, если 8080 занят чужим).
+    const url = `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`;
+    try {
+      writeFileSync(join(__dirname, "..", "logs", "server-url.txt"), url, "utf8");
+    } catch {
+      // Не смогли записать — лаунчер откроет порт из .env, это не повод падать.
+    }
+
     logger.info("http", "server_started", {
       host: config.host,
       port: config.port,
