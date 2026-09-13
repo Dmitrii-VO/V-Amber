@@ -167,3 +167,54 @@ test("конкурс без открытого лота слышит комме�
     await harness.close();
   }
 });
+
+test("«сказать залу» публикует объявление конкурса в ВК", async () => {
+  const harness = await startHarness({ cardsByCode: { "03204": CARD }, knownCodes: ["03204"] });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+
+    client.send({ type: "contestStart" });
+    await client.waitFor((m) => m.type === "contest" && m.active, { timeoutMs: 6000 });
+
+    client.send({ type: "contestAnnounce" });
+    await client.waitFor((m) => m.type === "info" && /объявлен залу/i.test(m.message || ""), { timeoutMs: 6000 });
+
+    // Зал не знает о конкурсе иначе: число вслух не называют, а до этого мы
+    // ему ничего не писали — 12.09 конкурс закрылся с нулём попыток.
+    const announcements = harness.vk.callsTo("publishViewerInstruction")
+      .filter((c) => c.args[1] === "contest_announce");
+    assert.equal(announcements.length, 1);
+    // Текст фиксированный: границы диапазона (100–999) в нём есть, а вот
+    // загаданное число залу публиковать нельзя — угадывать станет нечего.
+    assert.equal(
+      announcements[0].args[0],
+      "Конкурс! Мы загадали трёхзначное число от 100 до 999. "
+      + "Пишите варианты в комментариях — первый, кто угадает, забирает приз.",
+    );
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("объявление без запущенного конкурса не уходит", async () => {
+  const harness = await startHarness({ cardsByCode: { "03204": CARD }, knownCodes: ["03204"] });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+
+    client.send({ type: "contestAnnounce" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(
+      harness.vk.callsTo("publishViewerInstruction").filter((c) => c.args[1] === "contest_announce").length,
+      0,
+    );
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});

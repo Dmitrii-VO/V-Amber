@@ -1386,6 +1386,11 @@ function renderContest(payload) {
 
   panel.hidden = false;
   panel.classList.remove("contest--won");
+  // Новый конкурс — можно объявлять заново.
+  const announceButton = document.getElementById("contestAnnounceButton");
+  if (announceButton && contestRolledNumber === null) {
+    announceButton.disabled = false;
+  }
   if (contestWinnerTimer) {
     clearTimeout(contestWinnerTimer);
     contestWinnerTimer = null;
@@ -3027,6 +3032,13 @@ function sendContest(type) {
 
 document.getElementById("contestButton")?.addEventListener("click", () => sendContest("contestStart"));
 document.getElementById("contestStopButton")?.addEventListener("click", () => sendContest("contestStop"));
+document.getElementById("contestRerollButton")?.addEventListener("click", () => sendContest("contestReroll"));
+document.getElementById("contestAnnounceButton")?.addEventListener("click", (event) => {
+  sendContest("contestAnnounce");
+  // Объявление — публичный комментарий; второй такой же строкой зал спамить
+  // незачем, поэтому кнопка гаснет до конца этого конкурса.
+  event.currentTarget.disabled = true;
+});
 
 document.getElementById("manualCodeForm")?.addEventListener("submit", (event) => {
   event.preventDefault();

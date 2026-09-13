@@ -53,6 +53,22 @@ export function createContest({ random = Math.random, now = () => Date.now() } =
       return { started: true, ...snapshot() };
     },
 
+    // Перезагадать, не закрывая конкурс. Раньше это было запрещено (повторный
+    // «старт» ничего не менял): оператор называл число вслух, и смена числа
+    // под уже сказанным ломала игру. Число вслух не называют — зрители
+    // угадывают вслепую, поэтому запрет потерял смысл, а нужда осталась:
+    // конкурс может тянуться, пока никто не попал.
+    // Попытки считаем заново — это новый раунд; seenCommentIds оставляем,
+    // иначе уже разобранные комментарии посчитались бы второй раз.
+    reroll() {
+      if (!current) return { rerolled: false, ...snapshot() };
+      const span = MAX_NUMBER - MIN_NUMBER + 1;
+      current.number = MIN_NUMBER + Math.floor(random() * span);
+      current.attempts = 0;
+      current.startedAt = now();
+      return { rerolled: true, ...snapshot() };
+    },
+
     stop(reason = "operator") {
       if (!current) return { stopped: false, reason, winner: null };
       const { number, attempts } = current;

@@ -4314,6 +4314,37 @@ export function attachWsServer(httpServer, config, services = {}) {
           return;
         }
 
+        if (payload.type === "contestReroll") {
+          const rerolled = contest.reroll();
+          if (rerolled.rerolled) {
+            logger.info("contest", "contest_rerolled", { connectionId, number: rerolled.number });
+          }
+          // Число уходит ТОЛЬКО оператору, как и на старте.
+          broadcastContest();
+          return;
+        }
+
+        if (payload.type === "contestAnnounce") {
+          if (!contest.isActive()) {
+            return;
+          }
+          // Зал не знает, что идёт конкурс: число не называется вслух, а сами
+          // мы до этого не писали ему ни слова — 12.09 конкурс закрылся с
+          // нулём попыток. Объявление идёт и в ВК, и в зеркало /efir/:
+          // угадывают из обоих залов.
+          const message = "Конкурс! Мы загадали трёхзначное число от 100 до 999. "
+            + "Пишите варианты в комментариях — первый, кто угадает, забирает приз.";
+          logger.info("contest", "contest_announced", { connectionId });
+          vk.publishViewerInstruction(message, "contest_announce").catch((error) => {
+            logger.warn("contest", "contest_announce_publish_failed", { connectionId, error });
+          });
+          chatClient?.postServiceMessage?.(message)?.catch?.((error) => {
+            logger.warn("contest", "contest_announce_chat_failed", { connectionId, error });
+          });
+          sendJson(websocket, { type: "info", message: "Конкурс объявлен залу" });
+          return;
+        }
+
         if (payload.type === "contestStop") {
           const stopped = contest.stop("operator");
           if (stopped.stopped) {
