@@ -1300,6 +1300,28 @@ function renderArticleAmbiguity(payload) {
 // попыток) число не перезапускают.
 let contestRollTimer = null;
 let contestRolledNumber = null;
+let contestWinnerTimer = null;
+
+// Панель победы: имя вместо подсказки, число остаётся на месте. Через десять
+// секунд панель уходит сама — торги уже идут, и место на экране нужнее лоту.
+function showContestWinner(panel, numberEl, statusEl, winner) {
+  const name = winner.viewerName || `id ${winner.viewerId}`;
+  const label = panel.querySelector(".contest__label");
+  if (label) label.textContent = "Конкурс окончен · торги продолжаются";
+  if (numberEl) numberEl.textContent = String(winner.number);
+  if (statusEl) {
+    statusEl.textContent = `Победитель — ${name}. Попыток: ${winner.attempts}. Объявлено в комментариях.`;
+  }
+  panel.hidden = false;
+  panel.classList.add("contest--won");
+
+  if (contestWinnerTimer) clearTimeout(contestWinnerTimer);
+  contestWinnerTimer = setTimeout(() => {
+    panel.hidden = true;
+    panel.classList.remove("contest--won");
+    contestWinnerTimer = null;
+  }, 10000);
+}
 
 function rollContestNumber(numberEl, target) {
   if (contestRollTimer) {
@@ -1342,7 +1364,6 @@ function renderContest(payload) {
     logEvent("Конкурс остановлен — торги продолжаются", "info");
   }
 
-  panel.hidden = !payload.active;
   button.disabled = Boolean(payload.active);
 
   if (!payload.active) {
@@ -1351,8 +1372,26 @@ function renderContest(payload) {
       clearInterval(contestRollTimer);
       contestRollTimer = null;
     }
+    // Победа — единственный момент конкурса, который стоит показать крупно:
+    // оператор смотрит в центр экрана, а не в ленту событий справа. Панель
+    // не гаснет сразу, а десять секунд держит имя победителя.
+    if (payload.winner) {
+      showContestWinner(panel, numberEl, statusEl, payload.winner);
+      return;
+    }
+    panel.hidden = true;
+    panel.classList.remove("contest--won");
     return;
   }
+
+  panel.hidden = false;
+  panel.classList.remove("contest--won");
+  if (contestWinnerTimer) {
+    clearTimeout(contestWinnerTimer);
+    contestWinnerTimer = null;
+  }
+  const label = panel.querySelector(".contest__label");
+  if (label) label.textContent = "Конкурс идёт · торги на паузе";
 
   if (numberEl) {
     if (contestRolledNumber !== payload.number) {
