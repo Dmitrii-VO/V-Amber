@@ -1293,6 +1293,41 @@ function renderArticleAmbiguity(payload) {
 
 // Конкурс. Число приходит с сервера и показывается ТОЛЬКО здесь: оператор
 // называет его вслух, зрители угадывают в комментариях.
+// Барабан на числе конкурса: цифры быстро перебираются и останавливаются на
+// загаданном. Это не украшение — оператор видит МОМЕНТ, когда число готово,
+// и не зачитывает подсказку раньше времени. Крутится ровно один раз, на
+// старте: повторные снимки состояния (переподключение дашборда, счётчик
+// попыток) число не перезапускают.
+let contestRollTimer = null;
+let contestRolledNumber = null;
+
+function rollContestNumber(numberEl, target) {
+  if (contestRollTimer) {
+    clearInterval(contestRollTimer);
+    contestRollTimer = null;
+  }
+  const finalText = String(target);
+  const startedAt = Date.now();
+  const DURATION_MS = 1400;
+
+  contestRollTimer = setInterval(() => {
+    const passed = Date.now() - startedAt;
+    if (passed >= DURATION_MS) {
+      clearInterval(contestRollTimer);
+      contestRollTimer = null;
+      numberEl.textContent = finalText;
+      numberEl.classList.remove("contest__number--rolling");
+      return;
+    }
+    numberEl.textContent = String(100 + Math.floor(Math.random() * 900));
+  }, 60);
+
+  numberEl.classList.add("contest__number--rolling");
+  numberEl.textContent = String(100 + Math.floor(Math.random() * 900));
+}
+
+// Конкурс. Число знает ТОЛЬКО оператор: вслух его никто не называет, зрители
+// пишут в комментарии случайные числа и угадывают.
 function renderContest(payload) {
   const panel = document.getElementById("contestPanel");
   const button = document.getElementById("contestButton");
@@ -1309,34 +1344,29 @@ function renderContest(payload) {
 
   panel.hidden = !payload.active;
   button.disabled = Boolean(payload.active);
-  if (payload.active) {
-    if (numberEl) numberEl.textContent = String(payload.number);
-    if (statusEl) {
-      statusEl.textContent = payload.attempts > 0
-        ? `Назовите число вслух. Попыток: ${payload.attempts}`
-        : "Назовите число вслух. Победит первый, кто напишет его в комментариях.";
+
+  if (!payload.active) {
+    contestRolledNumber = null;
+    if (contestRollTimer) {
+      clearInterval(contestRollTimer);
+      contestRollTimer = null;
     }
-  }
-}
-
-// Приём комментариев из ВК. Это СОСТОЯНИЕ, а не разовое уведомление:
-// 12.09.2026 эфир два часа шёл со стопроцентно падающим опросом ВК
-// (флуд-блок аккаунта), и единственный тост с первой минуты оператор уже
-// не видел — брони и конкурс молчали, а на дашборде было тихо.
-function renderVkCommentsHealth(payload) {
-  const banner = document.getElementById("vkCommentsBanner");
-  const hint = document.getElementById("vkCommentsBannerHint");
-  if (!banner) return;
-
-  if (payload.ok) {
-    banner.hidden = true;
-    logEvent("Комментарии ВК снова приходят", "info");
     return;
   }
 
-  if (hint && payload.hint) hint.textContent = payload.hint;
-  banner.hidden = false;
-  logEvent(`Комментарии ВК не приходят: ${payload.hint || payload.reason || "ошибка ВК"}`, "warn");
+  if (numberEl) {
+    if (contestRolledNumber !== payload.number) {
+      contestRolledNumber = payload.number;
+      rollContestNumber(numberEl, payload.number);
+    } else if (!contestRollTimer) {
+      numberEl.textContent = String(payload.number);
+    }
+  }
+  if (statusEl) {
+    statusEl.textContent = payload.attempts > 0
+      ? `Зрители угадывают. Попыток: ${payload.attempts}`
+      : "Число не называем — зрители пишут в комментарии наугад. Победит первый, кто угадает.";
+  }
 }
 
 function handleServerMessage(payload) {
