@@ -547,6 +547,8 @@ export function attachWsServer(httpServer, config, services = {}) {
       openLotsBySessionId.set(lot.lotSessionId, lot);
       noteReservationSignal();
       handoffCompletedAttentionReservations(lot);
+      // После текущего синхронного открытия: лот должен успеть стать активным.
+      queueMicrotask(() => replayPreLotComments(lot));
     }
 
     function unregisterOpenLot(lot) {
@@ -2611,9 +2613,55 @@ export function attachWsServer(httpServer, config, services = {}) {
         return;
       }
 
+      routeReservationComment(comment, logSource);
+    }
+
+    // Покупатель видит товар в кадре и пишет код раньше, чем распознавание
+    // речи открыло лот: эфир 2026-10-17 потерял так 03922 (за 2 с до лота) и
+    // две брони 00701 (за 1 с). Строка «требует внимания» с кнопкой есть, но
+    // оператор во время эфира её не нажимает (0 из 6488). Поэтому такой
+    // комментарий держим PRE_LOT_REPLAY_WINDOW_MS и, если в это окно открылся
+    // лот под его код, прогоняем через обычный путь брони — с тем же
+    // стоковым гейтом, дублями и ответом покупателю. Окно короткое нарочно:
+    // код, написанный минуту назад, — уже просьба про другой показ.
+    const PRE_LOT_REPLAY_WINDOW_MS = services.preLotReplayWindowMs ?? 20_000;
+    let preLotComments = [];
+
+    function replayPreLotComments(lot) {
+      if (!(PRE_LOT_REPLAY_WINDOW_MS > 0)) return;
+      const cutoff = Date.now() - PRE_LOT_REPLAY_WINDOW_MS;
+      preLotComments = preLotComments.filter((entry) => entry.receivedAt >= cutoff);
+      for (const entry of [...preLotComments]) {
+        if (openLotsBySessionId.get(lot.lotSessionId) !== lot) return;
+        if (findCommentTarget(entry.comment.text)?.lot !== lot) continue;
+        preLotComments = preLotComments.filter((candidate) => candidate !== entry);
+        logger.info(entry.logSource, "pre_lot_comment_replayed", {
+          connectionId,
+          lotSessionId: lot.lotSessionId,
+          code: lot.code,
+          commentId: entry.comment.id,
+          viewerId: entry.comment.viewerId,
+          aheadOfLotMs: Date.now() - entry.receivedAt,
+        });
+        // Строка разбора больше не нужна: бронь пошла через лот. Повторный
+        // клик по ней всё равно безопасен — лот отсечёт его по acceptedUserIds,
+        // безлотовый путь — по hasPositionInOrder.
+        for (const row of attentionStore?.list?.() || []) {
+          if (row.commentId === entry.comment.id) {
+            attentionStore.resolve(row.id, { status: "reserved", resolution: { status: "pre_lot_replay" } });
+          }
+        }
+        routeReservationComment(entry.comment, entry.logSource);
+      }
+    }
+
+    function routeReservationComment(comment, logSource) {
       const target = findCommentTarget(comment.text);
       if (!target || !target.lot) {
-        reservationAttention.handleNoOpenLot({ comment, target, logSource });
+        const escalated = reservationAttention.handleNoOpenLot({ comment, target, logSource });
+        if (escalated && (target?.reason || "no_open_lot") === "no_open_lot") {
+          preLotComments.push({ comment, logSource, receivedAt: Date.now() });
+        }
         return;
       }
       const { lot: currentLot, reservationComment, wishlistComment, matchedReservation, matchedWishlist } = target;
