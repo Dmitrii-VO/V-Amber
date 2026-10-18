@@ -605,15 +605,51 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
   }
 
   if (cardinalGroups.length >= 2) {
-    const combinedCode = cardinalGroups.map((group) => group.code).join("");
+    const blocksCandidate = (groups) => ({
+      code: groups.map((group) => group.code).join(""),
+      source: "number_word_blocks",
+      fragment: groups.map((group) => group.fragment).join(" "),
+      confidence: 0.97,
+    });
+    const combined = blocksCandidate(cardinalGroups);
+    if (isCodeLengthAllowed(combined.code, config)) {
+      return [combined];
+    }
 
-    if (isCodeLengthAllowed(combinedCode, config)) {
-      return [{
-        code: combinedCode,
-        source: "number_word_blocks",
-        fragment: cardinalGroups.map((group) => group.fragment).join(" "),
-        confidence: 0.97,
-      }];
+    // Цена или размер сразу за артикулом склеивались с ним: «ноль тридцать
+    // один девяносто два три тысячи триста пятнадцать» → 031923315, длиннее
+    // любого кода, и разбор откатывался на куски 00031 / 00092 / 03315 —
+    // настоящего 03192 среди них не было. Эфир 2026-10-17 потерял так брони
+    // на 03192 и 03787. Сюда доходим, только когда прежняя склейка не
+    // подошла, — «ноль тысяча двести тридцать семь» (01237) выше не меняется.
+    //
+    // Тысячи в поздней группе — уже цена: «тридцать девять тысяча девятьсот»
+    // читалось как 39900. От такой группы оставляем часть до «тысяч» (нужна
+    // ли она коду — 03939 — или это множитель цены — «три» тысячи у 03192, —
+    // решает каталог), дальше не читаем. Затем отрезаем хвостовые группы до
+    // кода, который каталог знает дословно: «039» дополнять нулями до чужого
+    // 00039 нельзя. Без каталога — прежнее поведение.
+    const knownCodes = normalizeKnownCodes(config?.knownCodes);
+    if (knownCodes && knownCodes.size > 0) {
+      let groups = cardinalGroups;
+      const priceIndex = groups.findIndex((group, index) => index > 0 && group.code.length >= 4);
+      if (priceIndex > 0) {
+        const words = splitWords(groups[priceIndex].fragment);
+        const beforeThousand = THOUSAND_WORDS.has(words[0]) ? null : parseSubThousand(words);
+        groups = groups.slice(0, priceIndex);
+        if (beforeThousand) {
+          groups.push({
+            code: String(beforeThousand.value),
+            fragment: words.slice(0, beforeThousand.consumed).join(" "),
+          });
+        }
+      }
+      for (let count = groups.length; count >= 2; count -= 1) {
+        const truncated = blocksCandidate(groups.slice(0, count));
+        if (!isCodeLengthAllowed(truncated.code, config)) continue;
+        if (!knownCodes.has(truncated.code)) continue;
+        return [truncated];
+      }
     }
   }
 

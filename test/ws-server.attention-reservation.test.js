@@ -36,7 +36,7 @@ test("строка внимания несёт actionId и по нему соз�
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
     overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -68,7 +68,7 @@ test("при открытом заказе кампании позиция до�
       findBroadcastCustomerOrderForCounterparty: async () => ({ id: "co-camp-1", name: "00042" }),
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -95,7 +95,7 @@ test("повторный клик не дублирует позицию в за
       hasPositionInOrder: async () => ({ present: true, positionId: "pos-1" }),
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -130,7 +130,7 @@ test("безлотовая attention-бронь блокирует повтор 
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
     overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -177,7 +177,7 @@ test("лот, открытый во время attention-записи, полу�
       },
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -228,7 +228,7 @@ test("незабранный attention handoff переживает перепо
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
     overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const firstClient = await harness.connect();
   let secondClient;
   try {
@@ -277,7 +277,7 @@ test("безлотовая attention-бронь не оставляет след
       },
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -322,7 +322,7 @@ test("handoff не вычитает повторно положительный 
       },
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -379,7 +379,7 @@ test("stock refresh после null race-handoff не вычитает attention
       },
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -414,6 +414,7 @@ test("stock refresh после null race-handoff не вычитает attention
 
 test("нет остатка — покупатель уходит в список ожидания, без записи в МойСклад", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED_OOS },
     knownCodes: ["03204", "03723"],
   });
@@ -434,6 +435,7 @@ test("нет остатка — покупатель уходит в списо�
 
 test("подделанный actionId ничего не пишет", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
     knownCodes: ["03204", "03723"],
   });
@@ -454,6 +456,7 @@ test("подделанный actionId ничего не пишет", async () =>
 
 test("safe-mode блокирует бронь из строки внимания", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
     knownCodes: ["03204", "03723"],
   });
@@ -477,6 +480,7 @@ test("safe-mode блокирует бронь из строки внимания
 
 test("код вне каталога не получает кнопку брони", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT },
     knownCodes: ["03204"],
   });
@@ -510,7 +514,7 @@ test("двойной клик не создаёт второй заказ", asyn
       createCustomerOrderReservation: slow({ id: "co-new-1", positionId: "pos-1" }),
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -539,7 +543,7 @@ test("товар без цены в каталоге не уходит в зак
     },
     overrides: { ensureCounterparty: async () => ({ id: "cp-1", name: "Марго Краснова" }) },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -560,6 +564,7 @@ test("без контрагента отказ, а не заказ вслепу�
   // Без id контрагента недоступны ни поиск заказа кампании, ни проверка на
   // дубль — значит каждый повтор писал бы новый заказ. Отказываем закрыто.
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03723": CARD_CLOSED },
     knownCodes: ["03204", "03723"],
   });
@@ -594,7 +599,7 @@ test("проверка дубля смотрит в заказ кампании,
       hasPositionInOrder: async () => ({ present: false }),
     },
   });
-  const harness = await startHarness({ moysklad, knownCodes: ["03204", "03723"] });
+  const harness = await startHarness({ preLotReplayWindowMs: 0, moysklad, knownCodes: ["03204", "03723"] });
   const client = await harness.connect();
   try {
     const attention = await attentionFor(harness, client);
@@ -640,6 +645,7 @@ async function attentionThenOpenLot(harness, client) {
 
 test("бронь из баннера при открытом лоте учитывается лотом, а не мимо него", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03824": CARD_SINGLE },
     knownCodes: ["03204", "03824"],
   });
@@ -668,6 +674,7 @@ test("бронь из баннера при открытом лоте учиты
 
 test("после ручной брони второй покупатель не получает ту же единицу", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03824": CARD_SINGLE },
     knownCodes: ["03204", "03824"],
   });
@@ -701,6 +708,7 @@ test("после ручной брони второй покупатель не 
 
 test("повторный клик по строке при открытом лоте не бронирует второй раз", async () => {
   const harness = await startHarness({
+    preLotReplayWindowMs: 0,
     cardsByCode: { "03204": CARD_LOT, "03824": { ...CARD_SINGLE, availableStock: 5 } },
     knownCodes: ["03204", "03824"],
   });

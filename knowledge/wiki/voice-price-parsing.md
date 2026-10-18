@@ -126,6 +126,20 @@ made the whole `00XXX` range unspeakable until 2026-07-26.
 - **Rejection beats a wrong lot.** When candidates don't validate, nothing
   opens and the operator types the code — annoying but recoverable. A wrong lot
   is published to viewers and can take a бронь on the wrong product.
+- **Цена за артикулом склеивалась с блоками кода (fixed 2026-10-18).** The
+  operator says code and price in one breath: «артикул ноль тридцать один
+  девяносто два три тысячи триста пятнадцать рублей». The cardinal-block parse
+  joined `0|31|92|3315` into a 9-digit string, rejected it as too long and
+  fell back to the loose groups (`00031`/`00092`/`03315`) — the real `03192`
+  was never a candidate. Эфир 2026-10-17 lost броней on `03192` and `03787`.
+  Now (1) a later group that reaches «тысяч» is cut before the thousand word
+  and reading stops — `тридцать девять тысяча девятьсот` was 39900, a code
+  block never holds thousands; (2) when the join is too long or a price tail
+  was cut, trailing groups are dropped down to a code the catalog holds
+  **verbatim** (no zero-pad — `039` must not become the unrelated `00039`).
+  No catalog → old behaviour. Replaying all 6809 finals of the 29.08–17.10
+  bundle changed 33 detections: 32 ambiguous → correct code, 1 wrong → still
+  wrong («ноль сорок ноль ноль три», a stutter).
 - Regression tests: `test/article-extractor.test.js` (real transcripts from the
   26.07 bundle) and `test/product-code-resolver.test.js`.
 

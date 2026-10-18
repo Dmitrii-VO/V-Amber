@@ -70,6 +70,23 @@ Reservation-like comments in that window still become `reservationAttention`
 rows with an empty `openLotCodes` list. They are not auto-reserved because there
 is no current lot to attach stock, price, and MoySklad writes to.
 
+### Code written seconds before the lot opens (2026-10-18)
+
+Buyers see the item on camera and type its code before speech recognition has
+opened the lot. Эфир 2026-10-17 lost three броней that way (03922 two seconds
+early, 00701 ×2 one second early) — they only became attention rows, and the
+operator does not click those during an эфир. `routeReservationComment`
+(`server/ws-server.js`) now keeps every `no_open_lot` comment that
+`handleNoOpenLot` escalated for `PRE_LOT_REPLAY_WINDOW_MS` (20 s). When
+`registerOpenLot` opens a lot, `replayPreLotComments` re-routes those whose
+code now maps to that lot through the ordinary path — stock gate, duplicates,
+public reply all apply — and resolves their attention row
+(`resolution.status: "pre_lot_replay"`). Logged as `pre_lot_comment_replayed`
+with `aheadOfLotMs`. Older comments are left alone: a code typed a minute ago is
+a request about a different showing. `ambiguous` matches never replay.
+Tests: `test/ws-server.pre-lot-comment.test.js`; click-path tests pass
+`preLotReplayWindowMs: 0` to the harness.
+
 ### Reserving straight from the attention row
 
 Buyers routinely write a code whose lot is already closed — an hour later in the
