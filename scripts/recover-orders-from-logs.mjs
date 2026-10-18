@@ -47,6 +47,8 @@ for (const f of sessions) {
       code: String(d.code || "").trim(), viewerId: d.viewerId, viewerName: d.viewerName,
       quantity: Math.max(1, Number(d.quantity) || 1), commentId: d.commentId,
       commentCreatedAt: d.commentCreatedAt || d.ts, lotSessionId: d.lotSessionId,
+      // Цена, названная голосом, для товара с нулевой ценой в каталоге.
+      voicePrice: Number(d.voicePrice) > 0 ? Number(d.voicePrice) : null,
     });
   }
 }
@@ -90,18 +92,20 @@ if (unresolved.length) console.log("UNRESOLVED:", unresolved.map((r) => `${r.cod
 
 // 4) Create orders (idempotent). One broadcast order per buyer.
 const results = { created: [], appended: [], skipped: [], errors: [] };
-const slim = (r) => ({ code: r.code, product: r.card?.name || null, price: r.card?.salePrice ?? null, viewerId: r.viewerId, viewerName: r.viewerName });
+const slim = (r) => ({ code: r.code, product: r.card?.name || null, price: r.voicePrice || (r.card?.salePrice ?? null), viewerId: r.viewerId, viewerName: r.viewerName });
 if (EXECUTE) {
   const orderByViewer = new Map();
   for (const r of allocated) {
+    // Позиция по 0 ₽ — потерянные деньги, а не бронь: такую не пишем.
+    if (!(r.card.salePrice > 0) && !r.voicePrice) { results.skipped.push({ ...slim(r), reason: "no_price" }); continue; }
     try {
       const cp = await ms.ensureCounterparty({ viewerId: r.viewerId, viewerName: r.viewerName });
       if (!cp?.id) { results.errors.push({ ...slim(r), error: "counterparty_unresolved" }); continue; }
       let order = orderByViewer.get(r.viewerId) || null;
       if (!order) { order = await ms.findBroadcastCustomerOrderForCounterparty(cp.id, { broadcastDate: BROADCAST_DATE }); if (order?.id) orderByViewer.set(r.viewerId, order); }
       if (order?.id) { const hp = await ms.hasPositionForProduct(cp.id, r.card.id); if (hp?.inOpenOrder) { results.skipped.push({ ...slim(r), orderId: order.id, reason: "already_in_order" }); continue; } }
-      const activeLot = { code: r.code, lotSessionId: r.lotSessionId, product: { id: r.card.id, salePrice: r.card.salePrice, availableStock: r.card.availableStock, voicePrice: null }, discountAmount: 0 };
-      const productCard = { salePrice: r.card.salePrice, voicePrice: null };
+      const activeLot = { code: r.code, lotSessionId: r.lotSessionId, product: { id: r.card.id, salePrice: r.card.salePrice, availableStock: r.card.availableStock, voicePrice: r.voicePrice }, discountAmount: 0 };
+      const productCard = { salePrice: r.card.salePrice, voicePrice: r.voicePrice };
       if (order?.id) {
         const ap = await ms.appendPositionToCustomerOrder({ orderId: order.id, activeLot, reservation: r, productCard, broadcastDate: BROADCAST_DATE });
         results.appended.push({ ...slim(r), orderId: order.id, positionId: ap?.positionId || null });
