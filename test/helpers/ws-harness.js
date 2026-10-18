@@ -284,6 +284,7 @@ export async function startHarness({
   attentionStore,
   config: configOverride = {},
   createSessionLog: createSessionLogOverride,
+  preLotReplayWindowMs,
 } = {}) {
   __resetIdCountersForTests();
 
@@ -325,6 +326,7 @@ export async function startHarness({
     saveActiveState: () => {},
     clearActiveState: async () => {},
     packageVersion: "test",
+    ...(preLotReplayWindowMs !== undefined ? { preLotReplayWindowMs } : {}),
   });
 
   httpServer.listen(0, "127.0.0.1");
