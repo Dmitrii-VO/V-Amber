@@ -2854,7 +2854,9 @@ export function attachWsServer(httpServer, config, services = {}) {
               : `${reason}_wishlist_migration`,
             wishlistEntryId: wishlistEntry.id,
           });
-          if (previousStatus === "pending_reservation") {
+          // Проверяем и саму цену: в pending_reservation бывает и бронь,
+          // которая в момент остановки ещё шла по денежному пути.
+          if (previousStatus === "pending_reservation" && !(Number(getLotEffectivePrice(lot)) > 0)) {
             // Бронь ждала цену, а товар на складе есть: это не «не хватило»,
             // а потерянный заказ. Хотелка его не вернёт — её никто не
             // разбирает. Кладём строку в разбор после эфира: оператор ставит
@@ -3352,7 +3354,9 @@ export function attachWsServer(httpServer, config, services = {}) {
         // только новым lotSessionId. Если лот открылся фразой, в которой уже
         // была цена, ценовой гейт закрыт сразу — эта цена и есть первая.
         voiceWindowOpenedAt: Date.now(),
-        voicePriceAutoClosed: Boolean(productCard?.voicePrice),
+        // Цена без триггера (barePrice) окно НЕ закрывает: она угадана из
+        // фразы, и «стоимость …» следом обязана её поправить.
+        voicePriceAutoClosed: Boolean(productCard?.voicePrice) && !productCard?.barePrice,
         voiceDiscountAutoClosed: false,
         voiceSuggestions: [],
         vkPublication: null,
@@ -3606,6 +3610,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         // У товара с ценой голос её и так не перебивает.
         productCard.voicePrice = barePrice.value;
         productCard.priceSource = "voice";
+        productCard.barePrice = true;
         logger.info("price", "bare_voice_price_applied", {
           connectionId,
           code: selectedCode,

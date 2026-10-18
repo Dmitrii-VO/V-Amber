@@ -174,3 +174,21 @@ test("бронь без цены на закрытии попадает в ра�
     await harness.close();
   }
 });
+
+test("угаданную без триггера цену поправляет «стоимость …» следом", async () => {
+  const harness = await startHarness({ cardsByCode: { "03048": { ...CARD } }, knownCodes: ["03048"] });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+    const speech = harness.getLastSpeechKitSession().handlers;
+    speech.onFinal({ text: "всего шесть четыреста артикул ноль три ноль сорок восемь", latencyMs: 10 });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.product?.voicePrice === 6400, { timeoutMs: 6000 });
+
+    speech.onFinal({ text: "стоимость пять тысяч", latencyMs: 10 });
+    await client.waitFor((m) => m.type === "state" && m.activeLot?.product?.voicePrice === 5000, { timeoutMs: 6000 });
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
