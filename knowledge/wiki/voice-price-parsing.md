@@ -64,6 +64,24 @@ to the active lot before publication or reservation.
     windows inside a running sentence, and a compound multiplier would turn
     «цена двадцать пять сто из них» into 25100. Hundreds can never be the
     multiplier, or «двести пятьдесят» would read as 200250.
+- **Цена без триггера — только для товара без цены (2026-10-18).** The
+  operator rarely says «цена»/«стоимость»: «всего шесть четыреста артикул ноль
+  четыре ноль двадцать семь». For a product whose MoySklad price is 0, the
+  бронь then waited for a price all эфир and was moved to the wishlist at
+  stream stop (эфир 2026-10-17, lots 04027/04025). `detectBarePrice` reads a
+  money amount without a trigger, and `handleConfirmedDetection` applies it
+  **only** when the card has no usable price **and** only from the final that
+  opened the lot, with the article words cut out (`exclude:
+  chosen.fragment`; if the fragment is not in that final, no guess). Floor
+  `BARE_PRICE_MIN` = 300 ₽ and `NON_MONEY_UNITS` keep «две шкатулки», «сорок
+  два сантиметра», «пять процентов» out. Priced products are untouched — voice
+  never overrides a catalog price anyway. Replay over the 29.08–17.10 bundle: 3
+  of 37 zero-price lots priced (04027 → 6400, 04022 → 3300, 04036 → 1550), no
+  false hits. Logged as `bare_voice_price_applied`.
+- If the price never comes, the stream-stop migration still moves the бронь to
+  the wishlist, but now also leaves an attention row with `reason: "no_price"`
+  (bookable) for the post-эфир review: set the price in MoySklad, click
+  «Забронировать». The lot-less path refuses while the price is still 0.
 - Numbers followed by a non-money unit are rejected: `стоит посмотреть на
   5 минут` no longer sets the price to `5 ₽` (see `NON_MONEY_UNITS` in
   `server/price-detector.js`).

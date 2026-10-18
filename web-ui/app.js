@@ -3672,7 +3672,9 @@ async function renderReviewList() {
     const when = row.createdAt ? new Date(row.createdAt).toLocaleString() : "";
     const why = row.reason === "ambiguous"
       ? "код подошёл нескольким лотам — выберите товар в МойСкладе сами"
-      : "открытого лота не было";
+      : row.reason === "no_price"
+        ? "у товара нулевая цена — поставьте цену в МойСкладе и забронируйте"
+        : "открытого лота не было";
     sub.textContent = [when, `«${row.text}»`, why].filter(Boolean).join(" · ");
     body.append(head, sub);
 

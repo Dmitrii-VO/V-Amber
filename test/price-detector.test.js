@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { detectPrice } from "../server/price-detector.js";
+import { detectPrice, detectBarePrice } from "../server/price-detector.js";
 
 test("detectPrice extracts numeric стоимость", () => {
   assert.deepEqual(detectPrice("код товара 12345 стоимость 1500"), {
@@ -250,4 +250,26 @@ test("detectPrice: разговорная форма не срабатывает
   // Сотни множителем быть не могут — иначе «двести пятьдесят» стало бы 200250.
   assert.equal(detectPrice("стоимость двести пятьдесят")?.value, 250);
   assert.equal(detectPrice("стоимость сто пятьдесят")?.value, 150);
+});
+
+// Реальные фразы эфира 2026-10-17: цена без «цена»/«стоимость».
+test("detectBarePrice reads a colloquial price around the article words", () => {
+  const cases = [
+    ["вот еще шикарная нить всего шесть четыреста артикул ноль четыре ноль двадцать семь", "ноль четыре ноль двадцать семь", 6400],
+    ["так первая шкатулка три шестьсот артикул ноль ноль шесть сорок четыре", "ноль ноль шесть сорок четыре", 3600],
+    ["артикул ноль тридцать семь восемьдесят семь сорок два сантиметра тысяча шестьсот пятьдесят рублей", "ноль тридцать семь восемьдесят семь", 1650],
+    ["артикул ноль тридцать один девяносто два три тысячи триста пятнадцать рублей", "ноль тридцать один девяносто два", 3315],
+  ];
+  for (const [text, exclude, value] of cases) {
+    assert.equal(detectBarePrice(text, { exclude })?.value, value, text);
+  }
+});
+
+test("detectBarePrice rejects small numbers, units and a missing article", () => {
+  assert.equal(detectBarePrice("вот есть три нити сто восемьдесят артикул ноль четыре ноль двадцать пять", { exclude: "ноль четыре ноль двадцать пять" }), null);
+  assert.equal(detectBarePrice("две шкатулки артикул ноль один", { exclude: "ноль один" }), null);
+  assert.equal(detectBarePrice("минус пять процентов артикул ноль один", { exclude: "ноль один" }), null);
+  assert.equal(detectBarePrice("шесть четыреста", { exclude: "ноль один" }), null);
+  // Без вырезанного артикула его цифры не должны стать ценой.
+  assert.equal(detectBarePrice("артикул ноль четыре ноль двадцать семь", { exclude: "ноль четыре ноль двадцать семь" }), null);
 });
