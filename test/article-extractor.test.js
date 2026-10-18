@@ -469,3 +469,11 @@ test("detectArticle does not truncate number-word blocks onto a code missing fro
   );
   assert.notEqual(result.chosen?.code, "03192");
 });
+
+test("detectArticle still joins a thousands block that fits the code length", async () => {
+  const result = await detectArticle(
+    "артикул ноль тысяча двести тридцать семь",
+    { ...baseConfig, triggers: ["артикул"], minLength: 2, maxLength: 6, knownCodes: new Set(["01237"]) },
+  );
+  assert.equal(result.chosen?.code, "01237");
+});

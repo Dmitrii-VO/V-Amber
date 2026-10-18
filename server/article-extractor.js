@@ -580,31 +580,10 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
 
   const cardinalGroups = [];
   let cursor = 0;
-  let priceTail = false;
 
   while (cursor < remainingWords.length) {
-    const rest = remainingWords.slice(cursor);
-    const parsed = parseCardinalNumber(rest);
+    const parsed = parseCardinalNumber(remainingWords.slice(cursor));
     if (!parsed) {
-      break;
-    }
-
-    // Тысячи внутри блоков кода не бывает — это уже цена за артикулом.
-    // «тридцать девять тысяча девятьсот» читалось как 39900; оставляем
-    // от группы то, что стоит до «тысяч», и дальше не читаем. Нужен ли этот
-    // остаток коду (03939) или он множитель цены («три» тысячи → 03192),
-    // решает каталог ниже.
-    if (cardinalGroups.length > 0 && parsed.value.length >= 4) {
-      priceTail = true;
-      const beforeThousand = THOUSAND_WORDS.has(rest[0]) ? null : parseSubThousand(rest);
-      if (beforeThousand) {
-        cardinalGroups.push({
-          code: String(beforeThousand.value),
-          source: "number_words_group",
-          fragment: rest.slice(0, beforeThousand.consumed).join(" "),
-          confidence: 0.6,
-        });
-      }
       break;
     }
 
@@ -633,7 +612,7 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
       confidence: 0.97,
     });
     const combined = blocksCandidate(cardinalGroups);
-    if (!priceTail && isCodeLengthAllowed(combined.code, config)) {
+    if (isCodeLengthAllowed(combined.code, config)) {
       return [combined];
     }
 
@@ -641,13 +620,32 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
     // один девяносто два три тысячи триста пятнадцать» → 031923315, длиннее
     // любого кода, и разбор откатывался на куски 00031 / 00092 / 03315 —
     // настоящего 03192 среди них не было. Эфир 2026-10-17 потерял так брони
-    // на 03192 и 03787. Отрезаем хвостовые группы, но только до кода, который
-    // каталог знает дословно: без каталога и без точного совпадения прежнее
-    // поведение — «039» дополнять нулями до чужого 00039 нельзя.
+    // на 03192 и 03787. Сюда доходим, только когда прежняя склейка не
+    // подошла, — «ноль тысяча двести тридцать семь» (01237) выше не меняется.
+    //
+    // Тысячи в поздней группе — уже цена: «тридцать девять тысяча девятьсот»
+    // читалось как 39900. От такой группы оставляем часть до «тысяч» (нужна
+    // ли она коду — 03939 — или это множитель цены — «три» тысячи у 03192, —
+    // решает каталог), дальше не читаем. Затем отрезаем хвостовые группы до
+    // кода, который каталог знает дословно: «039» дополнять нулями до чужого
+    // 00039 нельзя. Без каталога — прежнее поведение.
     const knownCodes = normalizeKnownCodes(config?.knownCodes);
     if (knownCodes && knownCodes.size > 0) {
-      for (let count = cardinalGroups.length; count >= 2; count -= 1) {
-        const truncated = blocksCandidate(cardinalGroups.slice(0, count));
+      let groups = cardinalGroups;
+      const priceIndex = groups.findIndex((group, index) => index > 0 && group.code.length >= 4);
+      if (priceIndex > 0) {
+        const words = splitWords(groups[priceIndex].fragment);
+        const beforeThousand = THOUSAND_WORDS.has(words[0]) ? null : parseSubThousand(words);
+        groups = groups.slice(0, priceIndex);
+        if (beforeThousand) {
+          groups.push({
+            code: String(beforeThousand.value),
+            fragment: words.slice(0, beforeThousand.consumed).join(" "),
+          });
+        }
+      }
+      for (let count = groups.length; count >= 2; count -= 1) {
+        const truncated = blocksCandidate(groups.slice(0, count));
         if (!isCodeLengthAllowed(truncated.code, config)) continue;
         if (!knownCodes.has(truncated.code)) continue;
         return [truncated];
