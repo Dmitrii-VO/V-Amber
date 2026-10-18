@@ -435,3 +435,37 @@ test("detectArticle: без каталога поведение не меняе�
   assert.equal(result.status, "confirmed");
   assert.equal(result.chosen?.code, "00");
 });
+
+// Эфир 2026-10-17: цена или размер сразу за артикулом склеивались с блоками
+// кода, склейка выходила длиннее любого кода, и вместо 03192 / 03787 лот
+// не открывался (кандидаты 00031 / 00092 / 03315). Реальные транскрипты.
+test("detectArticle drops a trailing price or size glued onto number-word blocks", async () => {
+  const knownCodes = new Set([
+    "03192", "00031", "00092", "03315",
+    "03787", "00037", "00087", "00042",
+    "03948", "00039", "00048", "00255",
+    "03939", "03990", "03396", "00033", "00096", "00070", "03040", "00030", "00040",
+  ]);
+  const config = { ...baseConfig, triggers: ["артикул"], minLength: 2, maxLength: 6, knownCodes };
+  const cases = [
+    ["артикул ноль тридцать один девяносто два три тысячи триста пятнадцать рублей", "03192"],
+    ["инга емельянова напишите пожалуйста артикул ноль тридцать семь восемьдесят семь сорок два сантиметра тысяча шестьсот пятьдесят рублей", "03787"],
+    ["одни пейзажные чипсики артикул ноль тридцать девять сорок восемь две тысячи пятьсот пятьдесят рублей", "03948"],
+    ["следующий артикул ноль тридцать девять тридцать девять тысяча девятьсот рублей вот такие абстрактные камушки", "03939"],
+    ["под артикул ноль тридцать три девяносто шесть семьдесят сантиметров я их убираю", "03396"],
+    ["артикул ноль тридцать сорок сорок восемь сантиметров", "03040"],
+  ];
+  for (const [transcript, code] of cases) {
+    const result = await detectArticle(transcript, config);
+    assert.equal(result.status, "confirmed", transcript);
+    assert.equal(result.chosen.code, code, transcript);
+  }
+});
+
+test("detectArticle does not truncate number-word blocks onto a code missing from the catalog", async () => {
+  const result = await detectArticle(
+    "артикул ноль тридцать один девяносто два три тысячи триста пятнадцать рублей",
+    { ...baseConfig, triggers: ["артикул"], minLength: 2, maxLength: 6, knownCodes: new Set(["00031", "03315"]) },
+  );
+  assert.notEqual(result.chosen?.code, "03192");
+});

@@ -580,10 +580,31 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
 
   const cardinalGroups = [];
   let cursor = 0;
+  let priceTail = false;
 
   while (cursor < remainingWords.length) {
-    const parsed = parseCardinalNumber(remainingWords.slice(cursor));
+    const rest = remainingWords.slice(cursor);
+    const parsed = parseCardinalNumber(rest);
     if (!parsed) {
+      break;
+    }
+
+    // Тысячи внутри блоков кода не бывает — это уже цена за артикулом.
+    // «тридцать девять тысяча девятьсот» читалось как 39900; оставляем
+    // от группы то, что стоит до «тысяч», и дальше не читаем. Нужен ли этот
+    // остаток коду (03939) или он множитель цены («три» тысячи → 03192),
+    // решает каталог ниже.
+    if (cardinalGroups.length > 0 && parsed.value.length >= 4) {
+      priceTail = true;
+      const beforeThousand = THOUSAND_WORDS.has(rest[0]) ? null : parseSubThousand(rest);
+      if (beforeThousand) {
+        cardinalGroups.push({
+          code: String(beforeThousand.value),
+          source: "number_words_group",
+          fragment: rest.slice(0, beforeThousand.consumed).join(" "),
+          confidence: 0.6,
+        });
+      }
       break;
     }
 
@@ -605,15 +626,32 @@ function extractLeadingCandidatesFromSuffix(suffix, config) {
   }
 
   if (cardinalGroups.length >= 2) {
-    const combinedCode = cardinalGroups.map((group) => group.code).join("");
+    const blocksCandidate = (groups) => ({
+      code: groups.map((group) => group.code).join(""),
+      source: "number_word_blocks",
+      fragment: groups.map((group) => group.fragment).join(" "),
+      confidence: 0.97,
+    });
+    const combined = blocksCandidate(cardinalGroups);
+    if (!priceTail && isCodeLengthAllowed(combined.code, config)) {
+      return [combined];
+    }
 
-    if (isCodeLengthAllowed(combinedCode, config)) {
-      return [{
-        code: combinedCode,
-        source: "number_word_blocks",
-        fragment: cardinalGroups.map((group) => group.fragment).join(" "),
-        confidence: 0.97,
-      }];
+    // Цена или размер сразу за артикулом склеивались с ним: «ноль тридцать
+    // один девяносто два три тысячи триста пятнадцать» → 031923315, длиннее
+    // любого кода, и разбор откатывался на куски 00031 / 00092 / 03315 —
+    // настоящего 03192 среди них не было. Эфир 2026-10-17 потерял так брони
+    // на 03192 и 03787. Отрезаем хвостовые группы, но только до кода, который
+    // каталог знает дословно: без каталога и без точного совпадения прежнее
+    // поведение — «039» дополнять нулями до чужого 00039 нельзя.
+    const knownCodes = normalizeKnownCodes(config?.knownCodes);
+    if (knownCodes && knownCodes.size > 0) {
+      for (let count = cardinalGroups.length; count >= 2; count -= 1) {
+        const truncated = blocksCandidate(cardinalGroups.slice(0, count));
+        if (!isCodeLengthAllowed(truncated.code, config)) continue;
+        if (!knownCodes.has(truncated.code)) continue;
+        return [truncated];
+      }
     }
   }
 
