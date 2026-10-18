@@ -95,3 +95,82 @@ test("цена так и не прозвучала — бронь уходит �
     await harness.close();
   }
 });
+
+// Эфир 2026-10-17, лот 04027: «всего шесть четыреста артикул ноль четыре ноль
+// двадцать семь» — цену назвали без слова «цена», и бронь ждала её до конца
+// эфира. Для товара без цены в каталоге цена из фразы, открывшей лот,
+// применяется и без триггера.
+test("лот без цены открыт фразой с ценой без триггера — бронь сразу уходит в заказ", async () => {
+  const harness = await startHarness({ cardsByCode: { "03048": { ...CARD } }, knownCodes: ["03048"] });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+    harness.getLastSpeechKitSession().handlers.onFinal({
+      text: "вот еще шикарная нить всего шесть четыреста артикул ноль три ноль сорок восемь",
+      latencyMs: 10,
+    });
+    const opened = await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03048", { timeoutMs: 6000 });
+    assert.equal(opened.activeLot.product.voicePrice, 6400);
+
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03048", firstName: "Аня" });
+    await client.waitFor(
+      (m) => m.type === "state" && m.activeLot?.reservations?.events?.some((e) => e.viewerId === 5001 && e.status === "reserved"),
+      { timeoutMs: 6000 },
+    );
+    assert.equal(harness.moysklad.callsTo("createCustomerOrderReservation").length, 1);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("цена без триггера не трогает товар с ценой из каталога", async () => {
+  const priced = { ...CARD, salePrice: 2500 };
+  const harness = await startHarness({ cardsByCode: { "03048": priced }, knownCodes: ["03048"] });
+  const client = await harness.connect();
+  try {
+    client.send({ type: "start", sampleRate: 16000, encoding: "pcm_s16le" });
+    await harness.waitForSession();
+    harness.getLastSpeechKitSession().handlers.onFinal({
+      text: "всего шесть четыреста артикул ноль три ноль сорок восемь",
+      latencyMs: 10,
+    });
+    const opened = await client.waitFor((m) => m.type === "state" && m.activeLot?.code === "03048", { timeoutMs: 6000 });
+    assert.equal(opened.activeLot.product.voicePrice ?? null, null);
+    assert.equal(opened.activeLot.product.salePrice, 2500);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});
+
+test("бронь без цены на закрытии попадает в разбор после эфира с причиной no_price", async () => {
+  const rows = [];
+  const attentionStore = {
+    add(row) { rows.push(row); return `att-${rows.length}`; },
+    get: () => null,
+    resolve: () => false,
+    list: () => [],
+    openCount: () => rows.length,
+  };
+  const harness = await startHarness({ cardsByCode: { "03048": { ...CARD } }, knownCodes: ["03048"], attentionStore });
+  const client = await harness.connect();
+  try {
+    await openLot(harness, client);
+    harness.vk.pushComment({ id: 101, fromId: 5001, text: "03048", firstName: "Аня" });
+    await client.waitFor((m) => heldEvent(m, 5001), { timeoutMs: 6000 });
+
+    client.send({ type: "stop" });
+    await client.waitFor((m) => m.type === "state" && m.activeLot === null, { timeoutMs: 6000 });
+
+    const row = rows.find((candidate) => candidate.reason === "no_price");
+    assert.ok(row, "строка разбора no_price должна появиться");
+    assert.equal(row.viewerId, 5001);
+    assert.equal(row.code, "03048");
+    assert.equal(row.bookable, true);
+  } finally {
+    await client.close();
+    await harness.close();
+  }
+});

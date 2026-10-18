@@ -4,7 +4,7 @@ import { createSessionLog } from "./session-log.js";
 import { SpeechKitStreamingSession } from "./speechkit-stream.js";
 import { detectArticle, transcriptHasTrigger } from "./article-extractor.js";
 import { detectDiscount, matchesDiscountTrigger } from "./discount-detector.js";
-import { detectPrice } from "./price-detector.js";
+import { detectPrice, detectBarePrice } from "./price-detector.js";
 import { createMoySkladClient } from "./moysklad.js";
 import { createContest } from "./contest.js";
 import { createVkPublisher, isVkStreamFatalError } from "./vk.js";
@@ -2849,9 +2849,29 @@ export function attachWsServer(httpServer, config, services = {}) {
           }
           logReservationFinalized(lot, entry, {
             previousStatus,
-            reason: `${reason}_wishlist_migration`,
+            reason: previousStatus === "pending_reservation"
+              ? `${reason}_no_price_wishlist_migration`
+              : `${reason}_wishlist_migration`,
             wishlistEntryId: wishlistEntry.id,
           });
+          if (previousStatus === "pending_reservation") {
+            // Бронь ждала цену, а товар на складе есть: это не «не хватило»,
+            // а потерянный заказ. Хотелка его не вернёт — её никто не
+            // разбирает. Кладём строку в разбор после эфира: оператор ставит
+            // цену в МойСкладе и жмёт «Забронировать» (безлотовый путь сам
+            // откажет, пока цена нулевая).
+            attentionStore?.add?.({
+              code: lot.code,
+              viewerId: entry.viewerId,
+              viewerName: entry.viewerName,
+              commentId: entry.commentId,
+              text: entry.text,
+              quantity: entry.quantity,
+              source: entry.source,
+              reason: "no_price",
+              bookable: true,
+            });
+          }
           await notifyReservationStatus(lot, entry);
           migrated += 1;
           migratedEntries.push(entry);
@@ -3514,6 +3534,7 @@ export function attachWsServer(httpServer, config, services = {}) {
         enforceActiveRun = false,
         expectedDetectionId = null,
         voicePrice = null,
+        barePrice = null,
       } = options;
 
       if (!isDetectionStillActive({ runId, enforceActiveRun, expectedDetectionId })) {
@@ -3579,6 +3600,18 @@ export function attachWsServer(httpServer, config, services = {}) {
       if (productCard && !hasUsableSalePrice(productCard) && voicePrice?.value) {
         productCard.voicePrice = voicePrice.value;
         productCard.priceSource = "voice";
+      } else if (productCard && !hasUsableSalePrice(productCard) && barePrice?.value) {
+        // Цена без «цена»/«стоимость» — только здесь: товар без цены в
+        // каталоге и фраза, которая этот лот и открыла (см. detectBarePrice).
+        // У товара с ценой голос её и так не перебивает.
+        productCard.voicePrice = barePrice.value;
+        productCard.priceSource = "voice";
+        logger.info("price", "bare_voice_price_applied", {
+          connectionId,
+          code: selectedCode,
+          value: barePrice.value,
+          transcript: detection.transcript,
+        });
       }
 
       // Товар числится только в «Брак(на ремонт)», а оператор держит его в
@@ -3997,6 +4030,9 @@ export function attachWsServer(httpServer, config, services = {}) {
                       enforceActiveRun: true,
                       expectedDetectionId: detectionWithId.detectionId,
                       voicePrice: priceResult,
+                      barePrice: priceResult
+                        ? null
+                        : detectBarePrice(text, { exclude: detectionWithId.chosen.fragment }),
                     },
                   );
                 } else if (detectionWithId.status === "ambiguous") {

@@ -192,3 +192,54 @@ export function detectPrice(text) {
 
   return detectPriceBeforeTrigger(tokens);
 }
+
+// Цена без триггера: «всего шесть четыреста артикул ноль четыре ноль двадцать
+// семь». Оператор почти никогда не говорит «цена»/«стоимость», и для товара с
+// нулевой ценой в МойСкладе бронь ждала цену до конца эфира, а потом уходила в
+// хотелки — эфир 2026-10-17, лоты 04027 и 04025. Вызывающий обязан применять
+// это ТОЛЬКО к лоту без цены в каталоге и ТОЛЬКО к фразе, открывшей лот, с уже
+// вырезанными словами артикула: «стоит» и прочий мусор как раз поэтому из
+// триггеров убраны (см. PRICE_TRIGGERS), здесь его не возвращаем.
+//
+// Порог 300 ₽ отсекает «две шкатулки», «три штуки» и номера размеров; число с
+// не-денежной единицей после него («сорок два сантиметра») — не цена.
+export const BARE_PRICE_MIN = 300;
+
+// exclude — слова артикула из той же фразы: без них «ноль четыре ноль двадцать
+// семь» само прочиталось бы ценой. Не нашли их во фразе — цену не угадываем.
+export function detectBarePrice(text, { exclude = null } = {}) {
+  const tokens = tokenize(text);
+  if (exclude) {
+    const excluded = tokenize(exclude);
+    const at = tokens.findIndex((_, start) => excluded.length > 0
+      && excluded.every((word, offset) => tokens[start + offset] === word));
+    if (at < 0) return null;
+    // Разделитель, а не пустота: числа по обе стороны артикула не склеиваются.
+    tokens.splice(at, excluded.length, "|");
+  }
+  for (let j = 0; j < tokens.length; j += 1) {
+    if (FILLER_WORDS.has(tokens[j])) continue;
+    const grouped = parseGroupedDigits(tokens, j);
+    if (grouped && grouped.value >= BARE_PRICE_MIN && !isNonMoneyUnit(tokens[j + grouped.consumed])) {
+      return { value: grouped.value, trigger: null };
+    }
+    const digitValue = parseNumericToken(tokens[j]);
+    if (digitValue && !/^0/.test(tokens[j]) && MONEY_WORDS.has(tokens[j + 1])
+        && digitValue >= BARE_PRICE_MIN) {
+      return { value: digitValue, trigger: null };
+    }
+    for (let len = Math.min(6, tokens.length - j); len >= 1; len -= 1) {
+      const words = tokens.slice(j, j + len);
+      if (words.some((word) => FILLER_WORDS.has(word))) continue;
+      const value = parseMonetaryWords(words);
+      if (!value) continue;
+      // Самое длинное прочтение с этой позиции — единственное: короче не
+      // пробуем, иначе «сорок два сантиметра» отдало бы «сорок».
+      if (value >= BARE_PRICE_MIN && !isNonMoneyUnit(tokens[j + len])) {
+        return { value, trigger: null };
+      }
+      break;
+    }
+  }
+  return null;
+}
